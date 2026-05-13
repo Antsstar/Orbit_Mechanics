@@ -8,8 +8,9 @@ class Units:
     AU2KM   = 1.495978707e8
     KM2AU   = 1 / AU2KM
     C       = 2.99792458e8
-    JD2SEC  = 60*60*365.25
-    LY2KM   = C * JD2SEC
+    JD2SEC  = 60*60*24
+    LY2KM   = C * JD2SEC * 365.25
+    G       = 6.6743e-11
 
 class Transformations:
     """ Rotation Matrix Toolbox, takes radians as inputs for euler angles about classic X,Y or Z definitions.  """
@@ -51,6 +52,20 @@ class Transformations:
     @staticmethod
     def Rzxz(alpha, beta, gamma):
         return Transformations.Rz(gamma) @ Transformations.Rx(beta) @ Transformations.Rz(alpha)
+    
+    @staticmethod
+    def cart_to_spherical(vec):
+        r = np.linalg.norm(vec)
+        azimuth = np.arctan2(vec[1], vec[0])
+        elevation = np.arcsin(vec[2] / r)
+        return r, azimuth, elevation
+    
+    @staticmethod
+    def spherical_to_cart(r, azimuth, elevation):
+        x = r * np.cos(elevation) * np.cos(azimuth)
+        y = r * np.cos(elevation) * np.sin(azimuth)
+        z = r * np.sin(elevation)
+        return np.array([x, y, z])
 
 class Anomalies:
     """
@@ -141,6 +156,34 @@ class Anomalies:
 
         print(f"Converged in {ite}/{max_ite} iterations!")
         return E_1
+
+    @staticmethod
+    def true_to_mean(theta, e):
+        E = Anomalies.true_to_eccentric(theta, e)
+        M = Anomalies.eccentric_to_mean(E, e)
+        return M
+
+    @staticmethod
+    def mean_to_true(M, e, *, tol=1e-5, solver="N-R", max_ite = 1000):
+        E = Anomalies.mean_to_eccentric(M, e, tol=tol, solver=solver, max_ite=max_ite)
+        theta = Anomalies.eccentric_to_true(E, e)
+        return theta
+    
+    @staticmethod
+    def true_to_mean_parabolic(theta):
+        M_p = np.tan(theta/2) + (1.0/3.0)*np.tan(theta/2)**3
+        return M_p
+    
+    @staticmethod
+    def mean_to_true_parabolic(M_p):
+        # Using the Cardino solution for a cubic equation s**3 + 3s - 3Mp = 0
+        A = 1.5*M_p
+        B = np.cbrt(A + np.sqrt(A**2 + 1.0))
+        s = B - (1.0 / B)
+        theta = 2.0*np.atan(s)
+        return theta
+
+
     
 class Kepler:
     """
@@ -154,3 +197,17 @@ class Kepler:
     @staticmethod
     def M_to_t(mu, a, delta_M):
         return np.sqrt((a**3) / mu) * delta_M
+    
+class Barker:
+    """
+    Barker's Equation covers the special case of a parabolic trajectory, hence a is undefined and Kepler's
+    Equation is no longer sufficient
+    """
+
+    @staticmethod
+    def t_to_M(mu, p, delta_t):
+        return 2.0*np.sqrt(mu / (p**3)) * delta_t
+    
+    @staticmethod
+    def M_to_t(mu, p, delta_M):
+        return 0.5*np.sqrt(p**3 / mu) * delta_M

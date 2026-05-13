@@ -1,7 +1,7 @@
 import numpy as np
 # from collections import namedtuple
 from typing import NamedTuple
-from utilities import Transformations
+from utilities import Transformations, Anomalies, Kepler, Barker
 
 def angle(a, b):
     return np.arccos(np.clip(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)), -1.0, 1.0))
@@ -28,7 +28,7 @@ class ReferenceFrames:
     """
 
     @staticmethod
-    def coe_from_rv(r, v, mu, *, ref_x = np.array([1, 0, 0]), ref_z = np.array([0, 0, 1])):
+    def rv_to_coe(r, v, mu, *, ref_x = np.array([1, 0, 0]), ref_z = np.array([0, 0, 1])):
         if np.dot(ref_x, ref_z) != 0:
             print("Reference directions are not orthogonal!")
             return
@@ -68,6 +68,12 @@ class ReferenceFrames:
         e_mag = np.linalg.norm(e)
 
         p = h_mag**2 / mu
+
+        if abs(e_mag - 1) < tol:
+            a = np.inf
+        else:
+            a =  p * (1 / (1-e_mag**2))
+
         # a = (h_mag**2 / mu) * (1 / (1 - e_mag**2))
 
         # match e_mag:
@@ -93,6 +99,13 @@ class ReferenceFrames:
                 lambda_true = angle(ref_x, r)
                 if np.dot(ref_y, r) < 0:
                     lambda_true = 2*np.pi - lambda_true
+                
+                if abs(e_mag - 1) < tol:
+                    delta_M = Anomalies.true_to_mean_parabolic(lambda_true)
+                    tor = -Barker.M_to_t(mu, p, delta_M)
+                else:
+                    delta_M = Anomalies.true_to_mean(lambda_true, e_mag)
+                    tor = -Kepler.M_to_t(mu, abs(a), delta_M)
 
             case [True, _]:
                 # orb_case = "Circular"
@@ -106,6 +119,13 @@ class ReferenceFrames:
                 u = angle(r, N)
                 if np.dot(ref_z, r) < 0:
                     u = 2*np.pi - u
+
+                if abs(e_mag - 1) < tol:
+                    delta_M = Anomalies.true_to_mean_parabolic(u)
+                    tor = -Barker.M_to_t(mu, p, delta_M)
+                else:
+                    delta_M = Anomalies.true_to_mean(u, e_mag)
+                    tor = -Kepler.M_to_t(mu, abs(a), delta_M)
 
             case [_, True]:
                 # orb_case = "Equatorial"
@@ -130,17 +150,19 @@ class ReferenceFrames:
             if np.dot(r, v) < 0:
                 theta = 2*np.pi - theta
 
-            if e_mag < 1:
-                e_type = "Elliptic"
-            elif e_mag == 1:
+            if abs(e_mag - 1) < tol:
+                    delta_M = Anomalies.true_to_mean_parabolic(theta)
+                    tor = -Barker.M_to_t(mu, p, delta_M)
+            else:
+                delta_M = Anomalies.true_to_mean(theta, e_mag)
+                tor = -Kepler.M_to_t(mu, abs(a), delta_M)
+
+            if abs(e_mag - 1) < tol:
                 e_type = "Parabolic"
+            elif e_mag < 1:
+                e_type = "Elliptic"
             else:
                 e_type = "Hyperbolic"
-        
-        if abs(e_mag - 1) < tol:
-            a = np.inf
-        else:
-            a =  p * (1 / (1-e_mag**2))
 
             # orb_case = ", ".join([e_type, orb_case])
         
@@ -182,7 +204,7 @@ class ReferenceFrames:
         return elements
     
     @staticmethod
-    def rv_from_coe(coe, mu):
+    def coe_to_rv(coe, mu):
 
         if coe.theta != None:
             anomaly = coe.theta
@@ -228,8 +250,38 @@ class ReferenceFrames:
 
 
         return r, v
-        
+    
+    @staticmethod
+    def inertia_to_fixed(r_i, v_i, theta):
+        matrix = Transformations.Rz(theta)
+        r_f = matrix @ r_i
+        v_f = matrix @ v_i
+        return r_f, v_f
+    
+    @staticmethod
+    def fixed_to_inertia(r_f, v_f, theta):
+        r_i, v_i = ReferenceFrames.inertia_to_fixed(r_f, v_f, -theta)
+        return r_i, v_i
 
+    @staticmethod
+    def inertia_to_RaDec(r_i):
+        alt, Ra, Dec = Transformations.cart_to_spherical(r_i)
+        return Ra, Dec, alt
+
+    @staticmethod
+    def RaDec_to_inertia(Ra, Dec, alt = 1.0):
+        r_i = Transformations.spherical_to_cart(alt, Ra, Dec)
+        return r_i
+    
+    @staticmethod
+    def fixed_to_longlat(r_f):
+        alt, long, lat = Transformations.cart_to_spherical(r_f)
+        return long, lat, alt
+    
+    @staticmethod
+    def longlat_to_fixed(long, lat, alt = 1.0):
+        r_f =  Transformations.spherical_to_cart(alt, long, lat)
+        return r_f
 
 if __name__ == "__main__":
     MU_Sun = 1.32712440042 * 10**11
