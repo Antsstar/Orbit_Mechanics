@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbital_engine"
+version = "1.0.0"
+description = "A hierarchical N-body orbital mechanics engine"
+authors = [
+  { name="Anthony", email="antsstar@hotmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov"  # Helpful for seeing which lines of code aren't tested yet
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

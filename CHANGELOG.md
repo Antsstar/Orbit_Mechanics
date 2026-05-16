@@ -1,0 +1,43 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-05-16
+
+### Added
+- Migrated code to a standardized `src/` layout to ensure package isolation.
+- Implemented `pyproject.toml` with `setuptools` backend for package installation management.
+- Developed a automated test suite using `pytest`, featuring random vector fuzzing and exact boundary condition factories.
+- Configured GitHub Actions pipeline (`ci.yml`) to test code across Python 3.10, 3.11, and 3.12.
+
+### Fixed
+- Patched an equatorial coordinate breakdown within `coe_to_rv` where undefined nodes caused inverted position signs. Rebuilt transformation arrays to fall back to the True Longitude of Periapsis (`omega_true`).
+
+---
+
+## [0.3.0] - 2026-05-13
+### Added
+- Introduced `body.py`, `propagators.py`, and `simulator.py` to establish the baseline simulation control loop.
+- Added `visualisations.ipynb` to process engine telemetry and plot orbital profiles.
+
+---
+
+## [0.2.0] - 2026-04-26
+### Added
+- Refactored monolithic code into domain-specific files (`utilities.py` and `frames.py`).
+- Isolated orbital math into class-level `@staticmethod` blocks to provide a stateless, reusable utility layer.
+
+---
+
+## [0.1.0] - 2026-03-02
+### Added
+- Created `theory.ipynb` outlining core mathematical derivations for two-body Keplerian motion.
+- Drafted functional prototype for state vector reconstruction (`coe_to_rv.py`).
+
+---
+
+## [0.0.1] - 2025-10-03
+### Added
+- Initialized repository, configured remote tracking with SSH keys, and established baseline project structure.
