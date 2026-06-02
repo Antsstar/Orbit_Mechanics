@@ -1,27 +1,50 @@
 import numpy as np
-from .utilities import Units
+# from .utilities import Units
+from .constants import G
 from .frames import ReferenceFrames
+from .database import get_session, BaseBodyORM
 
 class BaseBody:
-    def __init__(self, name, radius, mu=None, rotation_rate = 0, parent=None, *, mass=None):
+    def __init__(self, name: str, radius: float = None, mu: float = None, rotation_rate: float = 0, parent=None, *, mass=None):
         self.name = name
-        self.radius = radius
         self.rotation_rate = rotation_rate
         self.parent = parent
         self.children = []
+        self.physics_models = {}
 
-        if mass != None:
-            self.mass = mass
-            self.mu_self = Units.G * mass
-            # pass #Calculate mu from Units.G
-        elif mu != None:
-            self.mu_self = mu
-            self.mass = mu / Units.G
+        # Initialisation routing
+        if radius == None and mu == None and mass == None:
+            self._load_from_database()
         else:
-            # print("Please input a value for mu or mass of body")
-            # return
-            raise ValueError(f"Body '{name}' requires either mu or mass for initialisation.")
+            # if radius == None:
+            #     raise ValueError(f"Body '{name}' requires a radius for initialisation.") # Not necessary at the moment but will be if collision detection is implemented.
+            self.radius = radius
 
+            if mu != None:
+                self.mu_self = mu
+                self.mass = mu / G
+            elif mass != None:
+                self.mass = mass
+                self.mu_self = G * mass
+            else:
+                raise ValueError(f"Body '{name}' requires either mu or mass for initialisation.")
+
+        # if mass != None:
+        #     self.mass = mass
+        #     # self.mu_self = Units.G * mass
+        #     # # pass #Calculate mu from Units.G
+        #     self.mu_self = G * mass
+        #     # pass #Calculate mu from constants.G
+        # elif mu != None:
+        #     self.mu_self = mu
+        #     # self.mass = mu / Units.G
+        #     self.mass = mu / G
+        # else:
+        #     # print("Please input a value for mu or mass of body")
+        #     # return
+        #     raise ValueError(f"Body '{name}' requires either mu or mass for initialisation.")
+
+        # State Vectors and Orbital Elements
         self.r = np.zeros(3)
         self.v = np.zeros(3)
         self.elements = None
@@ -33,6 +56,25 @@ class BaseBody:
 
         self._system_mu = self.mu_self
         self._dirty = True
+    
+    def _load_from_database(self):
+        """ Querries Database for body parameters."""
+        session = get_session()
+        db_record = session.query(BaseBodyORM).filter_by(name=self.name).first()
+
+        if not db_record:
+            session.close()
+            raise ValueError(f"Body '{self.name}' not found in database."
+                             f" Please provide mu or mass for initialisation manually.")
+        
+        self.radius = db_record.radius
+        self.mu_self = db_record.mu
+        self.mass = self.mu_self / G
+
+        if db_record.physics_models:
+            self.physics_models = db_record.physics_models
+
+        session.close()
 
     def invalidate_cache(self):
         self._dirty = True

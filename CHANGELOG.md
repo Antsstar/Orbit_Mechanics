@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-02
+
+### Added
+- Implemented an `SQLAlchemy` declarative ORM (`database.py`) to manage celestial body invariants.
+- Utilized Single-Table Polymorphic Inheritance to distinguish between `CelestialBodyORM` and `StellarObjectORM` within a unified database structure.
+- Added a JSON column for dynamic `physics_models` registry (e.g., atmospheric drag coefficients).
+- Refactored `BaseBody` initialization to automatically hydrate physical invariants (like $\mu$ and radius) from the SQLite database if not manually overridden.
+- Extracted physical constants to a dedicated `constants.py` module to prevent circular dependencies.
+- Updated `pyproject.toml` with `dev` optional dependencies to support local Jupyter Kernel execution.
+
+---
+
 ## [1.0.0] - 2026-05-16
 
 ### Added
