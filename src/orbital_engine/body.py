@@ -43,7 +43,7 @@ class BaseBody:
         #Reference Frames
         self.ref_x: NDArray[np.float64] = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         self.ref_z: NDArray[np.float64] = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        self.ref_y: NDArray[np.float64] = np.cross(self.ref_z, self.ref_x)
+        self.ref_y: NDArray[np.float64] = np.cross(self.ref_z, self.ref_x).astype(np.float64)
 
         self._system_mu = self.mu_self
         self._dirty = True
