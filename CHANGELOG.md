@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-15
+
+### Added
+- Integrated `mypy` strict static type-checking into GitHub Actions CI/CD pipeline.
+- Implemented a dynamic Model Registry (`register.py`) using the Decorator/Factory pattern (`@register_model`) to instantiate physics classes from database configuration strings.
+
+### Changed
+- Migrated the core math and physics engine to strict static typing.
+- Replaced `NewType` wrappers with standard Type Aliases (e.g., `Radians = float`) to maintain semantic function signatures without mathematical casting bloat.
+- Hardened `frames.py` and `utilities.py` against `None` type traps and NumPy C-struct (`floating[Any]`).
+
+---
+
 ## [1.1.0] - 2026-06-02
 
 ### Added

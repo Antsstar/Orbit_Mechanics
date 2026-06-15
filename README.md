@@ -1,4 +1,5 @@
 # OrbitalEngine
+[![Orbital Engine CI](https://github.com/Antsstar/Orbit_Mechanics/actions/workflows/ci.yml/badge.svg)](https://github.com/Antsstar/Orbit_Mechanics/actions/workflows/ci.yml)
 
 A 2-body orbital mechanics sandbox built to handle state-vector conversions, trajectory propagation, and orbital classifications. Developed to serve as the baseline physics utility for a planned satellite network constellation emulator.
 
@@ -46,7 +47,7 @@ conda activate orbital_env
 Install the package in editable mode along with development and testing dependencies:
 
 ```bash
-pip install -e ".[test]"
+pip install -e ".[dev, test]"
 ```
 
 Using the `-e` flag links the source code to your environment, allowing modifications to propagate instantly when importing the engine inside the `notebooks/` directory.
@@ -95,6 +96,12 @@ To prevent floating-point drift and logic regressions, the engine relies on an a
 ```bash
 # Run the test suite from the project root
 pytest
+```
+
+To run the strict type-checker:
+```bash
+# Run mypy from project root
+mypy src/ --strict
 ```
 
 ### Test Strategy

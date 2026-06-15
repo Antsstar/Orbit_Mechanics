@@ -1,10 +1,13 @@
 import json
 from pathlib import Path
 from sqlalchemy import create_engine, Column, Integer, String, Float, JSON
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from .constants import G
+from .types import Kilograms
 
-Base = declarative_base()
+# Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
 
 class BaseBodyORM(Base):
     __tablename__ = 'bodies'
@@ -25,15 +28,15 @@ class BaseBodyORM(Base):
     }
 
     @property
-    def mass(self):
-        return self.mu / G
+    def mass(self) -> Kilograms:
+        return self.mu / G # type: ignore
     
     @mass.setter
-    def mass(self, new_mass):
+    def mass(self, new_mass: Kilograms) -> None:
         """ Forceful mass update and recalculation of mu. Use with caution! """
-        self.mu = new_mass * G
+        self.mu = new_mass * G # type: ignore
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<{self.__class__.__name__}(name='{self.name}', mu={self.mu})>"
     
 # Child Classes
@@ -65,6 +68,6 @@ engine = create_engine(f'sqlite:///{DB_PATH}', echo=False)
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
-def get_session():
+def get_session() -> Session:
     """ Querrying function for database session."""
     return SessionLocal()

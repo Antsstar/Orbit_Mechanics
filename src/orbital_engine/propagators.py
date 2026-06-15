@@ -1,8 +1,11 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+from .types import Seconds
+
 import numpy as np
 from .utilities import Anomalies, Kepler, Barker
 from . import frames as fr
 
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .body import BaseBody
@@ -11,27 +14,31 @@ tol = 1e-12
 
 class Propagator:
     @staticmethod
-    def propagate(body : "BaseBody", dt : float):
+    def propagate(body: BaseBody, dt: Seconds) -> None:
         raise NotImplementedError
 
 
 class KeplerianPropagator(Propagator):
     @staticmethod
-    def propagate(body, dt):
+    def propagate(body: BaseBody, dt: Seconds) -> None:
 
-        if body.parent == None or body.elements == None:
+        if body.parent is None or body.elements is None:
             return
             
         mu = body.mu_orbit
+        if mu is None:
+            return
+        
         coe = body.elements
 
-        if coe.theta != None:
+        if coe.theta is not None:
             old_anom = coe.theta
             anom_name = "theta"
-        elif coe.u != None:
+        elif coe.u is not None:
             old_anom = coe.u
             anom_name = "u"
         else:
+            assert coe.lambda_true is not None, "No valid true anomaly found in orbital elements."
             old_anom = coe.lambda_true
             anom_name = "lambda_true"
 
@@ -53,7 +60,7 @@ class KeplerianPropagator(Propagator):
             new_anom = Anomalies.mean_to_true(new_M, coe.e)
 
         update_dict = {anom_name: new_anom}
-        body.elements = body.elements._replace(**update_dict)
+        body.elements = body.elements._replace(**update_dict) # type: ignore
         body.sync_state()
 
         

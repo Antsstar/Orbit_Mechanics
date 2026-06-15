@@ -1,37 +1,41 @@
 import numpy as np
-# from collections import namedtuple
-from typing import NamedTuple
+from numpy.typing import NDArray
+from .types import Radians, Kilometers, Seconds
+from typing import NamedTuple, Optional
 from .utilities import Transformations, Anomalies, Kepler, Barker
 
-def angle(a, b):
-    return np.arccos(np.clip(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)), -1.0, 1.0))
+def angle(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
+    """ Returns the angle between two vectors in radians."""
+    return float(np.arccos(np.clip(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)), -1.0, 1.0)))
 
-# OrbitalElements = namedtuple("OrbitalElements", 
-#                              ["family", "a", "e", "i", "Omega", "omega", "theta", "tor", "omega_true", "u", "lambda_true"])
+
 class OrbitalElements(NamedTuple):
     family      : str
-    a           : float
-    p           : float
+    a           : Kilometers
+    p           : Kilometers
     e           : float
-    i           : float
-    Omega       : float
-    omega       : float
-    theta       : float
-    tor         : float
-    omega_true  : float
-    u           : float
-    lambda_true : float
+    i           : Radians
+    Omega       : Optional[Radians]
+    omega       : Optional[Radians]
+    theta       : Optional[Radians]
+    tor         : Optional[Seconds]
+    omega_true  : Optional[Radians]
+    u           : Optional[Radians]
+    lambda_true : Optional[Radians]
 
 
 class ReferenceFrames:
     """
+    Transformation Toolbox for converting between different reference frames and orbital elements.
+        But specifically for orbital mechanics. Regular caretsian to spehrical transformations are available in the Transformations class.
     """
 
     @staticmethod
-    def rv_to_coe(r, v, mu, *, ref_x = np.array([1, 0, 0]), ref_z = np.array([0, 0, 1])):
+    def rv_to_coe(r: NDArray[np.float64], v: NDArray[np.float64], mu: float, *, ref_x: NDArray[np.float64] = np.array([1, 0, 0]), ref_z: NDArray[np.float64] = np.array([0, 0, 1])) -> 'OrbitalElements':
         if np.dot(ref_x, ref_z) != 0:
-            print("Reference directions are not orthogonal!")
-            return
+            # print("Reference directions are not orthogonal!")
+            raise ValueError("Reference directions are not orthogonal!")
+            # return
         
         ref_y = np.cross(ref_z, ref_x)
         tol = 1e-12
@@ -49,23 +53,23 @@ class ReferenceFrames:
         u           = None # omega + theta (N.r) Circular Inclined, True argument of latitude
         lambda_true = None # Omega + omega + theta (x_ref . r) Circular Equatorial, True longitude
 
-        h           = None # Angular Momemntum Vector
-        e           = None # Eccentricity Vector
-        N           = None # Nodal Vector
+        # h           = None # Angular Momemntum Vector
+        # e           = None # Eccentricity Vector
+        # N           = None # Nodal Vector
 
         
         h = np.cross(r, v)
-        h_mag = np.linalg.norm(h)
+        h_mag = float(np.linalg.norm(h))
 
         
         # if h_mag == 0:
         if abs(h_mag) < tol:
-            print("Velocity and displacement are parallel. Entity is not in orbit")
-            return
-        
+            # print("Velocity and displacement are parallel. Entity is not in orbit")
+            raise ValueError("Velocity and displacement are parallel. Entity is not in orbit")
+            # return
 
         e = (np.cross(v, h) / mu) - (r / np.linalg.norm(r))
-        e_mag = np.linalg.norm(e)
+        e_mag = float(np.linalg.norm(e))
 
         p = h_mag**2 / mu
 
@@ -74,22 +78,17 @@ class ReferenceFrames:
         else:
             a =  p * (1 / (1-e_mag**2))
 
-        # a = (h_mag**2 / mu) * (1 / (1 - e_mag**2))
-
-        # match e_mag:
-        #     case 0:
-        #         orb_case = "Circular"
-        #     case 1:
 
         i = np.arccos(np.dot(h, ref_z) / (np.linalg.norm(h) * np.linalg.norm(ref_z)))
 
-        # if [i, e_mag] == [0, 0]:
-        #     orb_case = "Circular, Equatorial"
-        #     lambda_true = angle(ref_x, r)
+
         is_circular     = bool(abs(e_mag) < tol)
         is_equatorial   = bool(abs(i) < tol or abs(i - np.pi) < tol)
         i_type          = ""
         e_type          = ""
+
+        assert a is not None, "Semi-major axis 'a' should not be None at this point."
+        assert p is not None, "Semi-latus rectum 'p' should not be None at this point."
 
         match [is_circular, is_equatorial]:
             case [True, True]:
@@ -100,12 +99,6 @@ class ReferenceFrames:
                 if np.dot(ref_y, r) < 0:
                     lambda_true = 2*np.pi - lambda_true
                 
-                # if abs(e_mag - 1) < tol:
-                #     delta_M = Anomalies.true_to_mean_parabolic(lambda_true)
-                #     tor = -Barker.M_to_t(mu, p, delta_M)
-                # else:
-                #     delta_M = Anomalies.true_to_mean(lambda_true, e_mag)
-                #     tor = -Kepler.M_to_t(mu, abs(a), delta_M)
                 delta_M = Anomalies.true_to_mean(lambda_true, e_mag)
                 tor = -Kepler.M_to_t(mu, abs(a), delta_M)
 
@@ -122,12 +115,6 @@ class ReferenceFrames:
                 if np.dot(ref_z, r) < 0:
                     u = 2*np.pi - u
 
-                # if abs(e_mag - 1) < tol:
-                #     delta_M = Anomalies.true_to_mean_parabolic(u)
-                #     tor = -Barker.M_to_t(mu, p, delta_M)
-                # else:
-                #     delta_M = Anomalies.true_to_mean(u, e_mag)
-                #     tor = -Kepler.M_to_t(mu, abs(a), delta_M)
                 delta_M = Anomalies.true_to_mean(u, e_mag)
                 tor = -Kepler.M_to_t(mu, abs(a), delta_M)
 
@@ -155,8 +142,8 @@ class ReferenceFrames:
                 theta = 2*np.pi - theta
 
             if abs(e_mag - 1) < tol:
-                    delta_M = Anomalies.true_to_mean_parabolic(theta)
-                    tor = -Barker.M_to_t(mu, p, delta_M)
+                    delta_Mp = Anomalies.true_to_mean_parabolic(theta)
+                    tor = -Barker.M_to_t(mu, p, delta_Mp)
             else:
                 delta_M = Anomalies.true_to_mean(theta, e_mag)
                 tor = -Kepler.M_to_t(mu, abs(a), delta_M)
@@ -168,15 +155,6 @@ class ReferenceFrames:
             else:
                 e_type = "Hyperbolic"
 
-            # orb_case = ", ".join([e_type, orb_case])
-        
-        # if i != 0:
-        #     if np.degrees(i) < 90:
-        #         i_type = "Pro-grade"
-        #     elif np.degrees(i) == 90:
-        #         i_type = "Polar"
-        #     else:
-        #         i_type = "Retro-grade"
                 
         if np.degrees(i) < 90:
             i_type = " ".join([i_type, "Prograde"]) if i_type != "" else "Prograde"
@@ -190,54 +168,43 @@ class ReferenceFrames:
 
         orb_case = ", ".join([e_type, i_type])
 
-        # elements = {
-        #     "Class": orb_case,
-        #     "Semi-major axis": a,
-        #     "Eccentricity": e_mag,
-        #     "Inclination": i,
-        #     "RAAN": Omega,
-        #     "Arg of Perigee": omega,
-        #     "True anomaly": theta,
-        #     "True long of periapsis": omega_true,
-        #     "True arg of Lat": u,
-        #     "True long": lambda_true
-        # }
-        elements = OrbitalElements(family=orb_case, a=a, p=p, e=e_mag, i=i, Omega=Omega, omega=omega, theta=theta, 
-                                   tor=tor, omega_true=omega_true, u=u, lambda_true=lambda_true)
+        elements = OrbitalElements(
+            family=orb_case, 
+            a=a, 
+            p=p, 
+            e=e_mag, 
+            i=i, 
+            Omega=Omega if Omega is not None else None, 
+            omega=omega if omega is not None else None, 
+            theta=theta if theta is not None else None,
+            tor=tor if tor is not None else None, 
+            omega_true=omega_true if omega_true is not None else None,
+            u=u if u is not None else None,
+            lambda_true=lambda_true if lambda_true is not None else None
+            )
 
         return elements
     
     @staticmethod
-    def coe_to_rv(coe, mu):
+    def coe_to_rv(coe: 'OrbitalElements', mu: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
 
-        if coe.theta != None:
+        if coe.theta is not None:
             anomaly = coe.theta
-        elif coe.u != None:
+        elif coe.u is not None:
             anomaly = coe.u
-        elif coe.lambda_true != None:
+        elif coe.lambda_true is not None:
             anomaly = coe.lambda_true
         else:
-            print("No valid arguemnt for anomaly")
-            return
+            raise ValueError("No valid argument for anomaly")
+            # print("No valid arguemnt for anomaly")
+            # return
 
 
         r_mag = coe.p / (1 + coe.e*np.cos(anomaly))
         x = np.array([np.cos(anomaly), 0, 0])*r_mag
         y = np.array([0, np.sin(anomaly), 0])*r_mag
 
-        # v = dr/dt, v_theta = h/r, r = h^2/mu * 1/1+ecos_theta
-        # dr/dt =   -h^2/mu * (1+ecos_theta)^-2 * -esin_theta theta_dot
-        # v_theta = mu / h * (1+ecos_theta)
-        # v_r = dr/dt = h^2/mu * (1+ecos_theta)^-2 * esin_theta * v_theta / r
-        # v_r = h^2/mu * ((mu/h^2)(r))^2 * esin_theta * v_theta / r
-        # v_r = mu / h^2 * r * esin_theta * v_theta ## v_theta*r = h!
-        # v_r = mu / h * esin_theta
 
-        # r = xi + yj => v = x_doti + y_dotj
-        # x_dot = dx/dt = r_dot*cos_theta - r*sin_theta*theta_dot = v_r*cos_theta - v_theta*sin_theta
-        # y_dot = dy/dt = r_dot*sin_theta + r*cos_theta*theta_dot = v_r*sin_theta + v_theta*cos_theta
-        # x_dot = mu/h(esin_theta*cos_theta - sin_theta - ecos_theta*sin_theta) = mu/h(-sin_theta)
-        # y_dot = mu/h(esin_theta^2 + cos_theta + ecos_theta^2) = mu/h(e+cos_theta)
 
         mu_h = np.sqrt(mu / coe.p)
         x_dot = np.array([-np.sin(anomaly), 0, 0])*mu_h
@@ -246,9 +213,8 @@ class ReferenceFrames:
         r_p = x + y
         v_p = x_dot + y_dot
 
-        # r = Transformations.Rzxz(-coe.Omega if coe.Omega != None else 0, -coe.i, -coe.omega if coe.omega != None else 0) @ r_p
-        # v = Transformations.Rzxz(-coe.Omega if coe.Omega != None else 0, -coe.i, -coe.omega if coe.omega != None else 0) @ v_p
-        matrix = Transformations.Rzxz(coe.omega if coe.omega != None else (coe.omega_true if coe.omega_true != None else 0), coe.i, coe.Omega if coe.Omega != None else 0)
+        
+        matrix = Transformations.Rzxz(coe.omega if coe.omega is not None else (coe.omega_true if coe.omega_true is not None else Radians(0.0)), coe.i, coe.Omega if coe.Omega is not None else Radians(0.0))
         r = matrix @ r_p
         v = matrix @ v_p
 
@@ -256,44 +222,44 @@ class ReferenceFrames:
         return r, v
     
     @staticmethod
-    def inertia_to_fixed(r_i, v_i, theta):
+    def inertia_to_fixed(r_i: NDArray[np.float64], v_i: NDArray[np.float64], theta: Radians) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         matrix = Transformations.Rz(theta)
         r_f = matrix @ r_i
         v_f = matrix @ v_i
         return r_f, v_f
     
     @staticmethod
-    def fixed_to_inertia(r_f, v_f, theta):
+    def fixed_to_inertia(r_f: NDArray[np.float64], v_f: NDArray[np.float64], theta: Radians) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         r_i, v_i = ReferenceFrames.inertia_to_fixed(r_f, v_f, -theta)
         return r_i, v_i
 
     @staticmethod
-    def inertia_to_RaDec(r_i):
+    def inertia_to_RaDec(r_i: NDArray[np.float64]) -> tuple[Radians, Radians, float]:
         alt, Ra, Dec = Transformations.cart_to_spherical(r_i)
-        return Ra, Dec, alt
+        return Radians(Ra), Radians(Dec), alt
 
     @staticmethod
-    def RaDec_to_inertia(Ra, Dec, alt = 1.0):
+    def RaDec_to_inertia(Ra: Radians, Dec: Radians, alt: float = 1.0) -> NDArray[np.float64]:
         r_i = Transformations.spherical_to_cart(alt, Ra, Dec)
         return r_i
     
     @staticmethod
-    def fixed_to_longlat(r_f):
+    def fixed_to_longlat(r_f: NDArray[np.float64]) -> tuple[Radians, Radians, float]:
         alt, long, lat = Transformations.cart_to_spherical(r_f)
-        return long, lat, alt
-    
+        return Radians(long), Radians(lat), alt
+
     @staticmethod
-    def longlat_to_fixed(long, lat, alt = 1.0):
-        r_f =  Transformations.spherical_to_cart(alt, long, lat)
+    def longlat_to_fixed(long: Radians, lat: Radians, alt: float = 1.0) -> NDArray[np.float64]:
+        r_f = Transformations.spherical_to_cart(alt, long, lat)
         return r_f
 
 if __name__ == "__main__":
     MU_Sun = 1.32712440042 * 10**11
     r = np.array([-145510750, 39268690, 10500])
     v = np.array([-6.995, -29.215, -0.00025])
-    elements = ReferenceFrames.coe_from_rv(r, v, mu=MU_Sun)
+    elements = ReferenceFrames.rv_to_coe(r, v, mu=MU_Sun)
     print(elements)
-    r_new, v_new = ReferenceFrames.rv_from_coe(elements, MU_Sun)
+    r_new, v_new = ReferenceFrames.coe_to_rv(elements, MU_Sun)
 
     # 4. Check results (using np.allclose to handle tiny floating point errors)
     print("Position Match:", np.allclose(r, r_new))

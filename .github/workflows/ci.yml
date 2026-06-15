@@ -27,6 +27,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[test]"
 
+    - name: Run mypy strict type checker
+      run: |
+        mypy src/ --strict
+
     - name: Run Physics Tests via Pytest
       run: |
         pytest
