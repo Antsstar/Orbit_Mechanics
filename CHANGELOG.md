@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-02
+
+### Added
+- Implemented a Data-Oriented Design (DOD) Memory Arena in `simulator.py`, utilizing pre-allocated NumPy matrices (`local_states`, `coe_states`, `mu_array`) for future high-performance vectorized physics integration.
+- Developed a robust Topological Sort algorithm (`_topological_sort`) to dynamically resolve orbital hierarchies, handle disconnected graphs, evaluated Scoped Roots, and defer Vessel Allocations for future Sphere of Influence (SoI) transition events.
+- Added 6 explicit Classical Orbital Elements (COEs) columns ($p, e, i, \Omega, \omega, \theta$) to the database schema for $O(1)$ deserialization and instant SQL querying capabilities.
+- Added root-anchoring logic to explicitly zero-out COEs for any body acting as the absolute spatial origin point.
+
+### Changed
+- Stripped object-oriented physics state from `body.py`. `BaseBody` is now a lightweight, immutable `BodyHandle` dataclass acting strictly as integer pointers to the DOD matrices.
+- Flattened the SQLAlchemy database architecture, elevating `physics_models` to the master `BaseBodyORM` and formally introducing `VirtualNodeORM` and `VessalORM` via Single-Table Polymorphic Inheritance.
+- Renamed `types.py` to `custom_types.py` to resolve Python standard library shadowing conflicts.
+
+---
+
 ## [1.2.0] - 2026-06-15
 
 ### Added

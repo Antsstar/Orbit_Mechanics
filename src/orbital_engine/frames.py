@@ -1,6 +1,6 @@
 import numpy as np
 from numpy.typing import NDArray
-from .types import Radians, Kilometers, Seconds
+from .custom_types import Radians, Kilometers, Seconds
 from typing import NamedTuple, Optional
 from .utilities import Transformations, Anomalies, Kepler, Barker
 

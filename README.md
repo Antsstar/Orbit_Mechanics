@@ -23,11 +23,21 @@ orbital_engine/
 ├── src/                 # Source directory
 │   └── orbital_engine/  # Core package namespace
 │       ├── __init__.py  
+│       ├── body.py      # DOD BodyHandle Dataclass
+│       ├── constants.py # Classic unit conversions or gravitational constants.
+│       ├── custom_types.py# Type Aliases (e.g., Kilometers, Radians)
+│       ├── database.py  # SQLAlchemy ORM and Setup Wizard
+│       ├── exceptions.py# Custom exceptions like NonConvergenceError
 │       ├── frames.py    # Coordinate and state space transformations
-│       ├── simulator.py # Simulation control loops 
 │       ├── propagators.py# Analytical Keplerian and Barker solvers
+│       ├── registry.py  # String to Function handle mapper for usable models.
+│       ├── simulator.py # Simulation control loops, DOD Memory Arena & Matrix Allocation.
 │       └── utilities.py # Orbital anomaly and math utilities
+│       └── data/        # Database
+            └── planets.db
 ├── tests/               # Pytest suite
+├── CHANGELOG.md/        
+├── README.md/           
 └── pyproject.toml       # Package metadata and installation configuration
 ```
 

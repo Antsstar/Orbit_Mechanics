@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
-from .types import Seconds
+from .custom_types import Seconds
 
 import numpy as np
 from .utilities import Anomalies, Kepler, Barker
