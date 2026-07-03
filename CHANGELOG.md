@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-03
+
+### Added
+- Refactored test file structure to better isolate types of tests, unit, system and integration.
+- Added a test configuration script `conftest.py`, to create a temp database for individual test scripts.
+- Implemented an additional DOD pass (3) targeting dynamic mass aggregation for systems.
+- Refactored database definitions to adhere better to modern SQLAlchemy 2.0 typed ORM and type annotations. 
+
+### Fixed
+- Corrected mypy errors.
+
+---
+
 ## [1.3.0] - 2026-07-02
 
 ### Added

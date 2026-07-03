@@ -1,50 +1,52 @@
+from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, ForeignKey
-from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session, relationship
-from .constants import G
-from .custom_types import Kilograms, Kilometers, Radians
+from typing import Optional, Any, List, Dict
 
-# Base = declarative_base()
+from sqlalchemy import create_engine, Integer, String, Float, JSON, ForeignKey
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session, relationship, Mapped, mapped_column
+
+from .constants import G
+from .custom_types import Kilograms, Kilometers, Radians, SquareMeters
+
 class Base(DeclarativeBase):
     pass
 
 class BaseBodyORM(Base):
     __tablename__ = 'bodies'
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), unique=True, nullable=False)
-    parent = Column(String(100), nullable=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    parent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
-    mu = Column(Float, nullable=False, default=0.0)
-    physics_models = Column(JSON, nullable=True)
+    mu: Mapped[float] = mapped_column(Float, default=0.0)
+    physics_models: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    system_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('systems.id'), nullable=True)
 
     # Classical Orbital Elements (COE) stored at Epoch
-    p = Column(Float, nullable=True)  # Semi-latus rectum (km)
-    e = Column(Float, nullable=True)  # Eccentricity
-    i = Column(Float, nullable=True)  # Inclination (rad)
-    raan = Column(Float, nullable=True) # Right Ascension of Ascending Node (rad)
-    arg_pe = Column(Float, nullable=True) # Argument of Periapsis (rad)
-    theta = Column(Float, nullable=True) # True Anomaly (rad)
+    p: Mapped[Optional[Kilometers]] = mapped_column(Float, nullable=True)   # Semi-latus rectum (km)
+    e: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # Eccentricity
+    i: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True)      # Inclination (rad)
+    raan: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True)   # Right Ascension of Ascending Node (rad)
+    arg_pe: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True) # Argument of Periapsis (rad)
+    theta: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True)  # True Anomaly (rad)
 
     # Identifier for the type of celestial body (e.g., 'planet', 'star', 'moon')
-    body_type = Column(String(50), nullable=False)
+    body_type: Mapped[str] = mapped_column(String(50), nullable=False)
     __mapper_args__ = {
         'polymorphic_on': body_type,
         'polymorphic_identity': 'base_body'
     }
 
-    system_id = Column(Integer, ForeignKey('systems.id'), nullable=True)
-
     @property
     def mass(self) -> Kilograms:
-        return self.mu / G # type: ignore
+        return self.mu / G
     
     @mass.setter
     def mass(self, new_mass: Kilograms) -> None:
         """ Forceful mass update and recalculation of mu. Use with caution! """
-        self.mu = new_mass * G # type: ignore
+        self.mu = new_mass * G
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}(name='{self.name}', mu={self.mu})>"
@@ -56,9 +58,8 @@ class CelestialBodyORM(BaseBodyORM):
         'polymorphic_identity': 'celestial_body'
     }
 
-    radius = Column(Float, nullable=True)
-    classification = Column(String(50), nullable=True) # Stellar, Gas-giant, Planetary, Asteroid.
-    # physics_models = Column(JSON, nullable=True)
+    radius: Mapped[Optional[Kilometers]] = mapped_column(Float, nullable=True)
+    classification: Mapped[Optional[str]] = mapped_column(String(50), nullable=True) # Stellar, Gas-giant, Planetary, Asteroid.
 
 class VesselORM(BaseBodyORM):
     """Spacecraft and Satellites"""
@@ -66,10 +67,9 @@ class VesselORM(BaseBodyORM):
         'polymorphic_identity': 'vessel'
     }
 
-    dry_mass = Column(Float, nullable=True)
-    fuel_mass = Column(Float, nullable=True)
-    drag_area = Column(Float, nullable=True)
-    # physics_models = Column(JSON, nullable=True)
+    dry_mass: Mapped[Kilograms] = mapped_column(Float, default=0.0)
+    fuel_mass: Mapped[Optional[Kilograms]] = mapped_column(Float, nullable=True)
+    drag_area: Mapped[Optional[SquareMeters]] = mapped_column(Float, nullable=True)
 
 class VirtualBodyORM(BaseBodyORM):
     """Represents Barycenters and Lagrange Points."""
@@ -77,18 +77,19 @@ class VirtualBodyORM(BaseBodyORM):
         'polymorphic_identity': 'virtual_node'
     }
 
-# Systems table.
+# --- Systems table ---
 class SystemORM(Base):
     __tablename__ = 'systems'
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), unique=True, nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
 
-    body_count = Column(Integer)
-    averaged_j2_effect = Column(Float)
+    body_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    averaged_j2_effect: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
-    barycenter_id = Column(Integer, ForeignKey('bodies.id'))
+    barycenter_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('bodies.id', use_alter=True, name="fk_barycenter_id")
+                                                         , nullable=True)
 
-    bodies = relationship("BaseBodyORM", foreign_keys=[BaseBodyORM.system_id])
+    bodies: Mapped[List["BaseBodyORM"]] = relationship("BaseBodyORM", foreign_keys="[BaseBodyORM.system_id]")
 
 # ----------------------------------------------------------------
 # Session and Engine Setup
@@ -148,7 +149,7 @@ if __name__ == "__main__":
 
     print("--- Running Orbital Engine Database Setup Wizard ---")
 
-    seed_data = [
+    seed_data: List[Dict[str, Any]] = [
         {
             "name": "Sun",
             "parent": None,

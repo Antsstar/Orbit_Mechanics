@@ -34,7 +34,7 @@ orbital_engine/
 │       ├── simulator.py # Simulation control loops, DOD Memory Arena & Matrix Allocation.
 │       └── utilities.py # Orbital anomaly and math utilities
 │       └── data/        # Database
-            └── planets.db
+│           └── planets.db
 ├── tests/               # Pytest suite
 ├── CHANGELOG.md/        
 ├── README.md/           
