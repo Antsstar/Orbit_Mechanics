@@ -390,9 +390,9 @@ class Anomalies:
         # Using the Cardino solution for a cubic equation s**3 + 3s - 3Mp = 0
         _M_p = np.asarray(M_p, dtype=np.float64)
         A = 1.5*_M_p
-        B = np.cbrt(A + np.sqrt(A**2 + 1.0))
+        B = np.cbrt(A + np.sqrt(A**2 + 1.0), dtype=np.float64)
         s = B - (1.0 / B)
-        theta = 2.0*np.arctan(s)
+        theta = 2.0*np.arctan(s, dtype=np.float64)
 
         if _M_p.ndim == 0:
             return Radians(theta.item())
@@ -413,7 +413,7 @@ class Kepler:
         _mu = np.asarray(mu, dtype=np.float64)
         _a = np.asarray(a, dtype=np.float64)
 
-        M = np.sqrt(_mu / np.power(_a, 3)) * delta_t
+        M = np.sqrt(_mu / (_a ** 3), dtype=np.float64) * delta_t
         if _mu.ndim == 0:
             return Radians(M.item())
         # return Radians(np.sqrt(mu / (a**3)) * delta_t)
@@ -425,7 +425,7 @@ class Kepler:
         _a = np.asarray(a, dtype=np.float64)
         _M = np.asarray(delta_M, dtype=np.float64)
 
-        t = np.sqrt(np.power(_a, 3) / _mu) * _M
+        t = np.sqrt((_a ** 3) / _mu) * _M
 
         if t.ndim > 0 and not np.allclose(t, t[0], atol=1e-8):
             raise NotImplementedError(f"This function expects an homogenous time constant between all entries")
@@ -448,7 +448,7 @@ class Barker:
         _mu = np.asarray(mu, dtype=np.float64)
         _p = np.asarray(p, dtype=np.float64)
 
-        M = 2.0 * np.sqrt(_mu / np.power(_p, 3)) * delta_t
+        M = 2.0 * np.sqrt(_mu / (_p ** 3), dtype=np.float64) * delta_t
         if _mu.ndim == 0:
             return float(M.item())
         return M
@@ -460,7 +460,7 @@ class Barker:
         _p = np.asarray(p, dtype=np.float64)
         _M = np.asarray(delta_M, dtype=np.float64)
 
-        t = 0.5*np.sqrt(np.power(_p, 3) /_mu) * _M
+        t = 0.5*np.sqrt((_p ** 3) /_mu) * _M
         # return Seconds(0.5*np.sqrt(p**3 / mu) * delta_M)
         if t.ndim > 0 and not np.allclose(t, t[0], atol=1e-8):
             raise NotImplementedError(f"This function expects an homogenous time constant between all entries")
