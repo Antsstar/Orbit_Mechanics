@@ -392,7 +392,7 @@ class Anomalies:
         A = 1.5*_M_p
         B = np.cbrt(A + np.sqrt(A**2 + 1.0), dtype=np.float64)
         s = B - (1.0 / B)
-        theta = 2.0*np.arctan(s, dtype=np.float64)
+        theta = np.arctan(s, dtype=np.float64) * 2.0
 
         if _M_p.ndim == 0:
             return Radians(theta.item())
