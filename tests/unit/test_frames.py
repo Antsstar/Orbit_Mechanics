@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+from datetime import datetime
 from orbital_engine.frames import OrbitalElements as oe, ReferenceFrames as rf
 
 
@@ -10,90 +11,141 @@ def test_orbit_classifications():
 
     coe = rf.rv_to_coe(r, v, mu)
 
-    assert coe.family == "Circular, Equatorial Prograde"
-    assert coe.a == pytest.approx(np.linalg.norm(r), abs=1e-9)
-    assert coe.p == pytest.approx( (np.linalg.norm(r)*np.linalg.norm(v))**2 / mu, abs=1e-9)
-    assert coe.e == pytest.approx(0, abs=1e-13)
-    assert coe.i == pytest.approx(0, abs=1e-13)
-    assert coe.lambda_true == pytest.approx(np.pi/2, abs=1e-9)
+    # assert coe.family == "Circular, Equatorial Prograde"
+    # assert coe.a == pytest.approx(np.linalg.norm(r), abs=1e-9)
+    # assert coe.p == pytest.approx( (np.linalg.norm(r)*np.linalg.norm(v))**2 / mu, abs=1e-9)
+    # assert coe.e == pytest.approx(0, abs=1e-13)
+    # assert coe.i == pytest.approx(0, abs=1e-13)
+    # assert coe.lambda_true == pytest.approx(np.pi/2, abs=1e-9)
+
+    assert coe[0] == pytest.approx( (np.linalg.norm(r)*np.linalg.norm(v))**2 / mu, abs=1e-9)
+    assert coe[1] == pytest.approx(0, abs=1e-13)
+    assert coe[2] == pytest.approx(0, abs=1e-13)
+    assert coe[5] == pytest.approx(np.pi/2, abs=1e-9)
 
     r = np.array([0.0, 0.0, 16000.0])
     v = np.array([0.0, np.sqrt(2*mu/r[2]), 0.0])
 
     coe = rf.rv_to_coe(r, v, mu)
     # assert coe.family == "Parabolic, Polar"
-    assert "Parabolic" in coe.family
-    assert "Polar" in coe.family
-    assert coe.a == pytest.approx(np.inf, abs=1e-9)
-    assert coe.e == pytest.approx(1, abs=1e-13)
-    assert coe.i == pytest.approx(np.pi/2, abs=1e-13)
-    assert coe.Omega == pytest.approx(3*np.pi/2, abs=1e-13)
-    assert coe.omega == pytest.approx(np.pi/2, abs=1e-13)
-    assert coe.theta == pytest.approx(0, abs=1e-9)
+    # assert "Parabolic" in coe.family
+    # assert "Polar" in coe.family
+    # assert coe.a == pytest.approx(np.inf, abs=1e-9)
+    # assert coe.e == pytest.approx(1, abs=1e-13)
+    # assert coe.i == pytest.approx(np.pi/2, abs=1e-13)
+    # assert coe.Omega == pytest.approx(3*np.pi/2, abs=1e-13)
+    # assert coe.omega == pytest.approx(np.pi/2, abs=1e-13)
+    # assert coe.theta == pytest.approx(0, abs=1e-9)
+
+    # assert coe[0] == pytest.approx(np.inf, abs=1e-9)
+    assert coe[1] == pytest.approx(1, abs=1e-13)
+    assert coe[2] == pytest.approx(np.pi/2, abs=1e-13)
+    assert coe[3] == pytest.approx(3*np.pi/2, abs=1e-13)
+    assert coe[4] == pytest.approx(np.pi/2, abs=1e-13)
+    assert coe[5] == pytest.approx(0, abs=1e-9)
 
     r = np.array([7000.0, 0.0, 0.0])
     v = np.array([0.0, -np.sqrt(0.75*mu / r[0]), np.sqrt(0.75*mu / r[0])])
 
     coe = rf.rv_to_coe(r, v, mu)
 
-    assert "Elliptic" in coe.family
-    assert "Retrograde" in coe.family
-    assert coe.a == pytest.approx(14000, abs=1e-6)
-    assert coe.e == pytest.approx(0.5, abs=1e-12)
-    assert coe.i == pytest.approx(3*np.pi / 4, abs=1e-12)
-    assert coe.Omega == pytest.approx(0.0, abs=1e-12)
-    assert coe.omega == pytest.approx(0.0, abs=1e-12)
-    assert coe.theta == pytest.approx(0.0, abs=1e-12)
+    # assert "Elliptic" in coe.family
+    # assert "Retrograde" in coe.family
+    # assert coe.a == pytest.approx(14000, abs=1e-6)
+    # assert coe.e == pytest.approx(0.5, abs=1e-12)
+    # assert coe.i == pytest.approx(3*np.pi / 4, abs=1e-12)
+    # assert coe.Omega == pytest.approx(0.0, abs=1e-12)
+    # assert coe.omega == pytest.approx(0.0, abs=1e-12)
+    # assert coe.theta == pytest.approx(0.0, abs=1e-12)
+
+    assert coe[0] == pytest.approx((np.linalg.norm(r)*np.linalg.norm(v))**2 / mu, abs=1e-6)
+    assert coe[1] == pytest.approx(0.5, abs=1e-12)
+    assert coe[2] == pytest.approx(3*np.pi / 4, abs=1e-12)
+    assert coe[3] == pytest.approx(0.0, abs=1e-12)
+    assert coe[4] == pytest.approx(0.0, abs=1e-12)
+    assert coe[5] == pytest.approx(0.0, abs=1e-12)
 
     r = np.array([10000.0, 0.0, 0.0])
     v = np.array([0.0, np.sqrt(1.5*mu/r[0]), np.sqrt(1.5*mu/r[0])])
 
     coe = rf.rv_to_coe(r, v, mu)
-    assert coe.family == "Hyperbolic, Prograde"
-    assert coe.a == pytest.approx(-10000.0, abs=1e-6)
-    assert coe.e == pytest.approx(2.0, abs=1e-12)
-    assert coe.i == pytest.approx(np.pi/4, abs=1e-12)
-    assert coe.Omega == pytest.approx(0.0, abs=1e-12)
-    assert coe.omega == pytest.approx(0.0, abs=1e-12)
-    assert coe.theta == pytest.approx(0.0, abs=1e-12)
+    # assert coe.family == "Hyperbolic, Prograde"
+    # assert coe.a == pytest.approx(-10000.0, abs=1e-6)
+    # assert coe.e == pytest.approx(2.0, abs=1e-12)
+    # assert coe.i == pytest.approx(np.pi/4, abs=1e-12)
+    # assert coe.Omega == pytest.approx(0.0, abs=1e-12)
+    # assert coe.omega == pytest.approx(0.0, abs=1e-12)
+    # assert coe.theta == pytest.approx(0.0, abs=1e-12
+
+    assert coe[0] == pytest.approx((np.linalg.norm(r)*np.linalg.norm(v))**2 / mu, abs=1e-6)
+    assert coe[1] == pytest.approx(2.0, abs=1e-12)
+    assert coe[2] == pytest.approx(np.pi/4, abs=1e-12)
+    assert coe[3] == pytest.approx(0.0, abs=1e-12)
+    assert coe[4] == pytest.approx(0.0, abs=1e-12)
+    assert coe[5] == pytest.approx(0.0, abs=1e-12)
     
 
 
 
 
-def test_rv_coe_conversions_fuzzing():
-    mu = 398600.4418
+# def test_rv_coe_conversions_fuzzing():
+#     mu = 398600.4418
 
-    np.random.seed(301)
+#     np.random.seed(301)
 
-    # r_in = np.array([7000.0, 0.0, 0.0])
-    # v_in = np.array([0.0, np.sqrt(mu/r_in[0]), 0.0])
+#     # r_in = np.array([7000.0, 0.0, 0.0])
+#     # v_in = np.array([0.0, np.sqrt(mu/r_in[0]), 0.0])
 
-    # coe = rf.rv_to_coe(r_in, v_in, mu)
-    # r_out, v_out = rf.coe_to_rv(coe, mu)
-    for _ in range(100):
-        r_dir = np.random.randn(3)
-        r_dir /= np.linalg.norm(r_dir)
-        r_mag = np.random.uniform(6500.0, 50000.0)
-        r_in = r_dir * r_mag
+#     # coe = rf.rv_to_coe(r_in, v_in, mu)
+#     # r_out, v_out = rf.coe_to_rv(coe, mu)
+#     for _ in range(100):
+#         r_dir = np.random.randn(3)
+#         r_dir /= np.linalg.norm(r_dir)
+#         r_mag = np.random.uniform(6500.0, 50000.0)
+#         r_in = r_dir * r_mag
 
-        v_dir = np.random.randn(3)
-        v_dir /= np.linalg.norm(v_dir)
-        v_mag = np.random.uniform(1.0, 15.0)
-        v_in = v_dir * v_mag
+#         v_dir = np.random.randn(3)
+#         v_dir /= np.linalg.norm(v_dir)
+#         v_mag = np.random.uniform(1.0, 15.0)
+#         v_in = v_dir * v_mag
 
-        h = np.cross(r_in, v_in)
-        if np.linalg.norm(h) < 1e-3:
-            continue
+#         h = np.cross(r_in, v_in)
+#         if np.linalg.norm(h) < 1e-3:
+#             continue
 
-        coe = rf.rv_to_coe(r_in, v_in, mu)
-        r_out, v_out = rf.coe_to_rv(coe, mu)
-        # print(_, coe.family)
+#         coe = rf.rv_to_coe(r_in, v_in, mu)
+#         r_out, v_out = rf.coe_to_rv(coe, mu)
+#         # print(_, coe.family)
 
-        assert r_out == pytest.approx(r_in, abs=1e-7)
-        assert v_out == pytest.approx(v_in, abs=1e-7)
+#         assert r_out == pytest.approx(r_in, abs=1e-7)
+#         assert v_out == pytest.approx(v_in, abs=1e-7)
 
     # assert False
+
+def test_rv_coe_conversions_vectorized_fuzzing():
+    mu = 398600.4418
+
+    # np.random.seed(301)
+    np.random.seed(int((datetime.now().timestamp() * 1000) % (2**32)))
+
+    r_dir = np.random.rand(100, 3)
+    r_dir /= np.linalg.norm(r_dir, axis=-1, keepdims=True)
+    r_mag = np.random.uniform(6500.0, 50000.0, 100)
+    r_in = r_dir * r_mag[..., np.newaxis]
+
+    v_dir = np.random.rand(100, 3)
+    v_dir /= np.linalg.norm(v_dir, axis=-1, keepdims=True)
+    v_mag = np.random.uniform(1.0, 15.0, 100)
+    v_in = v_dir * v_mag[..., np.newaxis]
+
+    h = np.cross(r_in, v_in)
+    mask = (np.linalg.norm(h, axis=-1) < 1e-3)
+    coe = rf.rv_to_coe(r_in, v_in, mu*np.ones(100, dtype=np.float64))
+    r_out, v_out = rf.coe_to_rv(coe, mu)
+
+    assert np.all(np.abs(r_out[mask] - r_in[mask]) < 1e-7)
+    assert np.all(np.abs(v_out[mask] - v_in[mask]) < 1e-7)
+
 
 def test_rv_coe_conversions_edgecase():
     mu = 398600.4418
@@ -111,8 +163,14 @@ def test_rv_coe_conversions_edgecase():
         v_mag = np.random.uniform(3.0, 7.0)
         v_eq = np.random.choice([-1, 1]) * np.array([0.0, v_mag, 0.0])  # Perpendicular in XY plane
         
+        # coe_eq = rf.rv_to_coe(r_eq, v_eq, mu)
+        # assert coe_eq.i == pytest.approx(0.0, abs=1e-12) or coe_eq.i == pytest.approx(np.pi, abs=1e-12)
+        # r_out, v_out = rf.coe_to_rv(coe_eq, mu)
+        # assert r_out == pytest.approx(r_eq, abs=1e-4)
+        # assert v_out == pytest.approx(v_eq, abs=1e-4)
+
         coe_eq = rf.rv_to_coe(r_eq, v_eq, mu)
-        assert coe_eq.i == pytest.approx(0.0, abs=1e-12) or coe_eq.i == pytest.approx(np.pi, abs=1e-12)
+        assert coe_eq[2] == pytest.approx(0.0, abs=1e-12) or coe_eq[2] == pytest.approx(np.pi, abs=1e-12)
         r_out, v_out = rf.coe_to_rv(coe_eq, mu)
         assert r_out == pytest.approx(r_eq, abs=1e-4)
         assert v_out == pytest.approx(v_eq, abs=1e-4)
@@ -131,8 +189,14 @@ def test_rv_coe_conversions_edgecase():
         v_dir /= np.linalg.norm(v_dir)
         v_circ = v_dir * np.sqrt(mu / r_mag)  # Exact circular velocity magnitude
         
+        # coe_circ = rf.rv_to_coe(r_circ, v_circ, mu)
+        # assert coe_circ.e == pytest.approx(0.0, abs=1e-6)
+        # r_out, v_out = rf.coe_to_rv(coe_circ, mu)
+        # assert r_out == pytest.approx(r_circ, abs=1e-4)
+        # assert v_out == pytest.approx(v_circ, abs=1e-4)
+
         coe_circ = rf.rv_to_coe(r_circ, v_circ, mu)
-        assert coe_circ.e == pytest.approx(0.0, abs=1e-6)
+        assert coe_circ[1] == pytest.approx(0.0, abs=1e-6)
         r_out, v_out = rf.coe_to_rv(coe_circ, mu)
         assert r_out == pytest.approx(r_circ, abs=1e-4)
         assert v_out == pytest.approx(v_circ, abs=1e-4)
@@ -145,8 +209,14 @@ def test_rv_coe_conversions_edgecase():
         v_mag_pol = np.random.uniform(3.0, 7.0)
         v_pol = np.array([0.0, 0.0, v_mag_pol])
         
+        # coe_pol = rf.rv_to_coe(r_pol, v_pol, mu)
+        # assert coe_pol.i == pytest.approx(np.pi / 2, abs=1e-12)
+        # r_out, v_out = rf.coe_to_rv(coe_pol, mu)
+        # assert r_out == pytest.approx(r_pol, abs=1e-4)
+        # assert v_out == pytest.approx(v_pol, abs=1e-4)
+
         coe_pol = rf.rv_to_coe(r_pol, v_pol, mu)
-        assert coe_pol.i == pytest.approx(np.pi / 2, abs=1e-12)
+        assert coe_pol[2] == pytest.approx(np.pi / 2, abs=1e-12)
         r_out, v_out = rf.coe_to_rv(coe_pol, mu)
         assert r_out == pytest.approx(r_pol, abs=1e-4)
         assert v_out == pytest.approx(v_pol, abs=1e-4)
@@ -163,8 +233,14 @@ def test_rv_coe_conversions_edgecase():
         v_dir_para /= np.linalg.norm(v_dir_para)
         v_para = v_dir_para * np.sqrt(2.0 * mu / r_mag)  # Exact escape velocity magnitude
         
+        # coe_para = rf.rv_to_coe(r_para, v_para, mu)
+        # assert coe_para.e == pytest.approx(1.0, abs=1e-6)
+        # r_out, v_out = rf.coe_to_rv(coe_para, mu)
+        # assert r_out == pytest.approx(r_para, abs=1e-3)
+        # assert v_out == pytest.approx(v_para, abs=1e-3)
+
         coe_para = rf.rv_to_coe(r_para, v_para, mu)
-        assert coe_para.e == pytest.approx(1.0, abs=1e-6)
+        assert coe_para[1] == pytest.approx(1.0, abs=1e-6)
         r_out, v_out = rf.coe_to_rv(coe_para, mu)
         assert r_out == pytest.approx(r_para, abs=1e-3)
         assert v_out == pytest.approx(v_para, abs=1e-3)

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .propagators import KeplerianPropagator
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM
 from .body import BodyHandle
+from . import frames as fr
 
 class Simulation:
     """
@@ -199,5 +200,69 @@ class Simulation:
     #     self._history_buffer = []
 
 
+    @property
+    def current_epoch(self) -> datetime:
+        return self.start_epoch + timedelta(seconds=self.t)
+    
+    # # def add_body(self, body: BaseBody) -> None:
+    # #     self.bodies.append(body)
+
+    # #     if body.parent and body.elements is None:
+    # #         body.sync_elements()
+
+    def step(self, dt: Seconds) -> None:
+        # for body in self.bodies:
+        #     KeplerianPropagator.propagate(body, dt)
+        mask = (self.parent_indices != -1)
+        # KeplerianPropagator.propagate(self.coe_states[mask], self.mu_array[mask], self.parent_indices[mask], dt)
+        KeplerianPropagator.propagate(self.coe_states, self.mu_array, self.parent_indices, dt)
+        self.local_states[mask, 0:3], self.local_states[mask, 3:6] = fr.ReferenceFrames.coe_to_rv(self.coe_states[mask], self.mu_array[mask])
+        
+        self.t += dt
+        self._record_state()
+
+    def run(self, duration: Seconds, dt: Seconds) -> None:
+        if self.t == 0:
+            self._record_state()
+
+        steps = int(duration/dt)
+        for _ in range(steps):
+            self.step(dt)
+
+    def _record_state(self) -> None:
+        """Internal helper to snap the current state of all bodies."""
+        current_dt = self.start_epoch + timedelta(seconds=self.t)
+        # for body in self.bodies:
+        #     self._history_buffer.append({
+        #         "timestamp": current_dt,
+        #         "seconds": self.t,
+        #         "body": body.name,
+        #         "x": body.r[0], "y": body.r[1], "z": body.r[2],
+        #         "vx": body.v[0], "vy": body.v[1], "vz": body.v[2],
+        #         "e": body.elements.e if body.elements else None,
+        #         "theta": body.elements.theta if body.elements else None
+        #     })
+        for body in self.name_to_index:
+            index = self.name_to_index[body]
+            self._history_buffer.append({
+                "timestamp": self.current_epoch,
+                "seconds": self.t,
+                "body": body,
+                "x": self.local_states[index, 0], "y": self.local_states[index, 1], "z": self.local_states[index, 2],
+                "vx": self.local_states[index, 3], "vy": self.local_states[index, 4], "vz": self.local_states[index, 5],
+                "e": self.coe_states[index, 1],
+                "theta": self.coe_states[index, 5]
+                })
+
+    @property
+    def history(self) -> pd.DataFrame:
+        return pd.DataFrame(self._history_buffer)
+    
+    def clear_history(self) -> None:
+        self._history_buffer = []
+
 if __name__ == "__main__":
     sim = Simulation(body_names=["Earth", "Moon", "Sun"])
+
+    sim.run(24*(60**2), 0.5*(60.0**2.0))
+    print(sim.history)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orbital_engine"
-version = "1.3.0"
+version = "1.4.0"
 description = "A hierarchical N-body orbital mechanics engine"
 authors = [
   { name="Anthony", email="antsstar@hotmail.com" }

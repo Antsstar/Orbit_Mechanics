@@ -9,6 +9,7 @@ A 2-body orbital mechanics sandbox built to handle state-vector conversions, tra
 - **Singularity Handling**: Analytical fallbacks to handle coordinate breakdowns inherent to circular, equatorial, polar, and parabolic geometries.
 - **Invariant Validation**: Verification of state transitions using conservation of specific mechanical energy and angular momentum.
 - **Package Structure**: Structured package utilizing a standard `src/` directory layout for clean downstream imports.
+- **Data-Oriented Design (DOD):** Built for high-performance scale, the engine pre-allocates contiguous memory arenas and leverages batched `NumPy` tensor operations to propagate thousands of bodies simultaneously with zero memory re-allocation.
 
 ---
 

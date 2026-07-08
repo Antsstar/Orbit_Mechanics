@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-08
+
+### Added
+- Vectorized core physics such as `frames.py` and `utilities.py` to accept N-bodies and perform operations across all of them, intelligently returning the compatiable return type.
+- Upgraded `Transformations` to generate and apply 3D rotation tensors `(N, 3, 3)`, allowing for simultaneous, batched C-optimized matrix multiplication across thousands of bodies.
+- Implemented `KeplerianPropagator.propagate` to handle bulk $N$-body array inputs, natively processing Mean, Eccentric, and True Anomaly advancements.
+
+### Changed
+- Refactored `rv_to_coe` and `coe_to_rv` to natively support multidimensional arrays. Functions now seamlessly handle both single `(3,)` bodies and `(N, 3)` matrices via `np.atleast_2d()` promotion and broadcasting.
+- Replaced procedural `if` blocks with boolean masks to correctly route undefined coordinate singularities (e.g., equatorial, circular) during N-body matrix processing.
+
+---
+
 ## [1.3.1] - 2026-07-03
 
 ### Added
