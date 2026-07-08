@@ -390,7 +390,7 @@ class Anomalies:
         # Using the Cardino solution for a cubic equation s**3 + 3s - 3Mp = 0
         _M_p = np.asarray(M_p, dtype=np.float64)
         A = 1.5*_M_p
-        B = np.cbrt(A + np.sqrt(A**2 + 1.0), dtype=np.float64)
+        B = np.cbrt(A + np.sqrt(A**2 + 1.0, dtype=np.float64), dtype=np.float64)
         s = B - (1.0 / B)
         theta = np.arctan(s, dtype=np.float64) * 2.0
 
