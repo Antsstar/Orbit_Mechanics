@@ -409,15 +409,18 @@ class Kepler:
 
 
     @staticmethod
-    def t_to_M(mu: float | NDArray[np.float64], a: Kilometers | NDArray[np.float64], delta_t: Seconds) -> Radians | NDArray[np.float64]:
+    def t_to_M(mu: float | NDArray[np.float64], a: Kilometers | NDArray[np.float64], delta_t: Seconds) -> tuple[Radians | NDArray[np.float64], NDArray[np.bool_]]:
         _mu = np.asarray(mu, dtype=np.float64)
         _a = np.asarray(a, dtype=np.float64)
 
-        M = np.sqrt(_mu / (_a ** 3), dtype=np.float64) * delta_t
+        valid = np.abs(_a) > 1e-9
+        M = np.zeros_like(a)
+
+        M[valid] = np.sqrt(_mu[valid] / (_a[valid] ** 3), dtype=np.float64) * delta_t
         if _mu.ndim == 0:
-            return Radians(M.item())
+            return Radians(M.item()), valid
         # return Radians(np.sqrt(mu / (a**3)) * delta_t)
-        return M
+        return M, valid
         
     @staticmethod
     def M_to_t(mu: float | NDArray[np.float64], a: Kilometers | NDArray[np.float64], delta_M: Radians | NDArray[np.float64]) -> Seconds:

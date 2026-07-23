@@ -215,6 +215,50 @@ def seed_test_universe() -> None:
     ac_a.parent_id = ac_b.id
     em_bary.parent_id = sun.id
 
+    # ---------------------------------------------------------
+    # JUPITER (J2000 Epoch)
+    # ---------------------------------------------------------
+    # a = 5.2044 AU
+    jupiter = CelestialBodyORM(
+        name="Jupiter",
+        radius=71492.0,
+        mu=1.26686534e8,
+        parent_id=sun.id, 
+        system_id=solar_sys.id,
+        
+        # Classical Orbital Elements
+        #a=778_570_000.0,       # Semi-major axis (km)
+        p=776_707_833.0,
+        e=0.0489,              # Eccentricity
+        i=0.0227,              # Inclination (rad) ~ 1.304 deg
+        raan=1.753,           # RAAN (rad) ~ 100.46 deg
+        arg_pe=4.780,           # Arg of Periapsis (rad) ~ 273.86 deg
+        theta=0.349            # True Anomaly (rad) ~ 20.0 deg
+    )
+    
+    # ---------------------------------------------------------
+    # SATURN (J2000 Epoch)
+    # ---------------------------------------------------------
+    # a = 9.5826 AU
+    saturn = CelestialBodyORM(
+        name="Saturn",
+        radius=60268.0,
+        mu=3.7931187e7,
+        parent_id=sun.id, 
+        system_id=solar_sys.id,
+        
+        # Classical Orbital Elements
+        #a=1_433_530_000.0,     # Semi-major axis (km)
+        p=1_428_954_000.0,
+        e=0.0565,              # Eccentricity
+        i=0.0433,              # Inclination (rad) ~ 2.485 deg
+        raan=1.983,           # RAAN (rad) ~ 113.66 deg
+        arg_pe=5.923,           # Arg of Periapsis (rad) ~ 339.39 deg
+        theta=5.533            # True Anomaly (rad) ~ 317.0 deg
+    )
+
+    session.add_all([jupiter, saturn])
+
     session.commit()
     session.close()
     print("Database Seeded Successfully.")

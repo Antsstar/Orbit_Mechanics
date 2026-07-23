@@ -1,13 +1,13 @@
 from __future__ import annotations
 from typing import List, Optional, Any
-from .custom_types import Seconds
+from .custom_types import Seconds, PropagatorType
 
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
-from .propagators import KeplerianPropagator
+from .propagators import Propagator, KeplerianPropagator
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
 from . import frames as fr
@@ -19,8 +19,13 @@ class Simulation:
     Free-index stack is used to efficiently manage memory and allow for dynamic addition/removal of bodies.
     All results are stored in a history buffer for later analysis or visualization, exported as a pandas DataFrame.
     """
-    def __init__(self, body_names: List[str], system_names, max_capacity: int = 10000, start_epoch: Optional[datetime] = None,
-                 session: Optional[Session] = None) -> None:
+    def __init__(self, 
+                 body_names: List[str], 
+                 system_names, 
+                 max_capacity: int = 10000, 
+                 start_epoch: Optional[datetime] = None,
+                 session: Optional[Session] = None,
+                 default_propagator: Optional[Propagator] | int = PropagatorType.NONE) -> None:
 
         self.start_epoch: datetime = start_epoch if start_epoch is not None else datetime.now()
 
@@ -49,7 +54,8 @@ class Simulation:
         self.is_system = np.zeros(max_capacity, dtype=np.bool_)
         self.is_head = np.zeros(max_capacity, dtype=np.bool_)
         self.body_sys_map = np.full(max_capacity, -1, dtype=np.int32)
-        self.propagator_type = np.zeros(max_capacity, dtype=np.uint8)       # Likely won't be implemented yet
+        self.propagator_type = np.full(max_capacity, PropagatorType.KEPLERIAN,dtype=np.uint8)       # Likely won't be implemented yet
+        self.sys_head_map = np.full(max_capacity, -1, dtype=np.int32)       # Systems refer to children heads, while bodies refer to siblings head
 
 
         self._build_universe(body_names, system_names, session=session)                   # Our goal is to remove the top sort and implement an execution order
@@ -60,21 +66,7 @@ class Simulation:
         if session is None:
             session = get_session()
             local_session = True
-
-            # Current mindset for database
-            # Bodies all have a parent field, which points to a body(This gives their coe's meaning)
-            # They also have a system field, dictating what system they belong to
-            # System is still a separate table, but is simpler and is mearly a connector table.
-            # It stores the "head" of the system, and the "barycenter" VirtualNode of the system
-            # VirtualNode is still in bodies, and has the same form, i.e. has a parent, is part of a system and has coes
-            # So there should be a VirtualNode for every system entry.
-            # So how do we define the sim?
-            # List of bodies to add, then list of systems to add, We need the system information to populate head an is system
-            # Systems needs to add the VirtualNode bodies to the body list
-            # Most virtual Nodes won't have coe's defined still, so this is where we make use of the is system or head
-            # Eventually rehydrate system to properly reference systems and bodies and use all coe's
             
-
 
         orm_bodies = session.query(BaseBodyORM).filter(BaseBodyORM.name.in_(body_names)).all()
         orm_systems = session.query(SystemORM).filter(SystemORM.name.in_(system_names)).all()
@@ -84,7 +76,7 @@ class Simulation:
             missing = set(body_names) - set(found)
             raise ValueError(f"Could not find bodies in database: {missing}")
         
-        all_orm_bodies: List[tuple[BaseBodyORM, SystemORM]] = []
+        all_orm_bodies: List[tuple[BaseBodyORM, Optional[SystemORM]]] = []
 
         for orm_body in orm_bodies:
             if orm_body.system in orm_systems: # Doesn't allow bodies without systems!
@@ -128,9 +120,7 @@ class Simulation:
             idx = self.name_to_index[orm_body.name]
 
             parent = getattr(getattr(orm_body, 'parent', None), 'name', None)
-            # print(parent)
-            bary_name = getattr(getattr(associated_sys, 'barycenter', None), 'name', None)
-            # system_idx = self.name_to_index.get(associated_sys.barycenter.name, -1) # Check that barycenters are members of parent barycenters
+            bary_name = getattr(getattr(associated_sys, 'barycenter', None), 'name', None) # Check that barycenters are members of parent barycenters
             system_idx = self.name_to_index.get(bary_name, -1) # Check that barycenters are members of parent barycenters
             self.body_sys_map[idx] = system_idx # I know they're parent is an outer body, but im not sure if they are also members of parent barycenters
             # Insane foresight this was the problem, whether their system should be self referenced or to the parent barycenter. Been updated to parent barycenter
@@ -140,8 +130,10 @@ class Simulation:
             else:
                 self.parent_indices[idx] = idx
 
-            # if not self.is_system[idx] and associated_sys.head_body_id is None:
-            # print(orm_body.name, getattr(associated_sys, 'head_body_id', orm_body.id))
+            if system_idx == -1 and not self.is_system[idx]: # Need to update all of the is_system logic.
+                system_idx = self.parent_indices[idx] # Follow same self reference or parent logic.
+            self.body_sys_map[idx] = system_idx # Bubbled logic
+
             if not self.is_system[idx] and getattr(associated_sys, 'head_body_id', orm_body.id) is None: # None is only returned if nothing is found(at least thats the idea)
                 # self.parent_indices[idx] = self.name_to_index[associated_sys.barycenter.name] # Check this line
                 self.parent_indices[idx] = self.name_to_index[bary_name]
@@ -159,50 +151,27 @@ class Simulation:
         self._normalize_runtime_graph() # Reparenting function which works I believe
         self._topological_sort()
         self._recalculate_all_barycenters() # Or here!
+        self._zero_roots()
         self._rehydrate_coes()
 
+        head_mask = self.is_head & self.active_mask
+        head_idx = np.where(head_mask)[0].astype(np.int32)
+        sys_head_idx = self.body_sys_map[head_mask]
+        self.sys_head_map[sys_head_idx] = head_idx
+
+        child_mask = ~self.is_head & ~self.is_system & self.active_mask
+        child_idx = np.where(child_mask)[0].astype(np.int32)
+        child_bubbles = self.body_sys_map[child_mask]
+        valid_cbubbles_mask = child_bubbles != -1
+        valid_children = child_idx[valid_cbubbles_mask]
+        valid_cbubbles = child_bubbles[valid_cbubbles_mask]
+
+        self.sys_head_map[valid_children] = self.sys_head_map[valid_cbubbles]
         
         loaded_count = sum(self.active_mask)
         print(f"Universe Built: {loaded_count} bodies loaded.")
         print(f"Mass Array: {self.mu_array[:loaded_count]}")
     
-    # def _topological_sort(self, orm_bodies: List[BaseBodyORM]) -> List[BaseBodyORM]:
-    #     """Ensures a parent body is instantiated before it's children"""
-    #     sorted_bodies: List[BaseBodyORM] = []
-    #     processed_names = set()
-
-    #     # 1. Defer Vessels for Patched Conics
-    #     system_bodies = [b for b in orm_bodies if not isinstance(b, VesselORM)]
-    #     vessels = [b for b in orm_bodies if isinstance(b, VesselORM)]
-
-    #     # 2. Track what the user actually loaded
-    #     loaded_names = {b.name for b in system_bodies}
-
-    #     while len(sorted_bodies) < len(system_bodies):
-    #         start_len = len(sorted_bodies)
-
-    #         for body in system_bodies:
-    #             if body.name in processed_names:
-    #                 continue
-
-    #             # A body is ready to sort if:
-    #             # A. It has no parent
-    #             # B. It's parent exists in DB, but wasn't loaded in the sim
-    #             # C. It's parent has already been sorted
-    #             if body.parent is None or \
-    #                body.parent not in loaded_names or \
-    #                body.parent in processed_names:
-
-    #                 sorted_bodies.append(body)
-    #                 processed_names.add(body.name)
-                
-    #         if start_len == len(sorted_bodies):
-    #             raise ValueError("Circular dependency detected in body hierachy. Ensure all bodies trace back to a single parent.")
-            
-    #     # 3. Safely append all vessels at end of memory block.
-    #     sorted_bodies.extend(vessels)
-
-    #     return sorted_bodies
 
     def _topological_sort(self) -> None:
         active_indices = np.where(self.active_mask)[0].astype(np.uint32)
@@ -250,7 +219,7 @@ class Simulation:
                 idx_m1 = tier[m1]
                 p_m1 = parents[m1]
 
-                local_r, local_v = fr.ReferenceFrames.coe_to_rv(self.coe_states[idx_m1], mu_parents[m1])
+                local_r, local_v, _ = fr.ReferenceFrames.coe_to_rv(self.coe_states[idx_m1], mu_parents[m1])
                 self.global_states[idx_m1, :3] = self.global_states[p_m1, :3] + local_r
                 self.global_states[idx_m1, 3:] = self.global_states[p_m1, 3:] + local_v
 
@@ -260,7 +229,7 @@ class Simulation:
                 idx_m2 = tier[m2]
                 p_m2 = parents[m2]
 
-                local_r, local_v = fr.ReferenceFrames.coe_to_rv(self.coe_states[idx_m2], mu_parents[m2]) 
+                local_r, local_v, _ = fr.ReferenceFrames.coe_to_rv(self.coe_states[idx_m2], mu_parents[m2]) 
                 # I need to collapse this into n-systems rather than m bodies n systems.
 
                 system_r_sums = np.zeros((self.max_capacity, 3), dtype=np.float64)
@@ -307,11 +276,19 @@ class Simulation:
 
             if len(idx) > 0:
                 parent_sys = self.body_sys_map[idx]
-                np.add.at(self.mu_array, parent_sys, self.mu_array[idx])
+                valid_mask = self.is_system[parent_sys]
+                valid_idx = idx[valid_mask]
+                valid_parents = parent_sys[valid_mask]
+
+                # np.add.at(self.mu_array, parent_sys, self.mu_array[idx]) # This line needs to change to not add mass to "bodies" which don't return True from is_system
 
                 # mass_weighted_states = self.global_states[idx] * self.mu_array[idx, None]
                 # np.add.at(self.global_states, parent_sys, mass_weighted_states)
-                np.add.at(mass_weighted_states, parent_sys, mass_weighted_states[idx])
+
+                # np.add.at(mass_weighted_states, parent_sys, mass_weighted_states[idx])
+                if len(valid_idx) > 0:
+                    np.add.at(self.mu_array, valid_parents, self.mu_array[valid_idx])
+                    np.add.at(mass_weighted_states, valid_parents, mass_weighted_states[valid_idx])
 
         valid_sys = (self.mu_array > 0) & sys_mask
         # self.global_states[valid_sys] /= self.mu_array[valid_sys, None]
@@ -325,24 +302,36 @@ class Simulation:
         """
 
         active_bodies = ~self.is_system & self.active_mask
-        # active_systems = self.is_system * self.active_mask
         active_systems = self.is_system & self.active_mask
 
-
         has_system = active_bodies & (self.body_sys_map != -1)
-        self.parent_indices[has_system] = self.body_sys_map[has_system]
+        self.parent_indices[has_system] = self.body_sys_map[has_system] # Ensure all bodies (except root body) point to their system (barycenter or point mass)
 
         sys_db_parents = self.parent_indices[active_systems]
 
-        parent_bubbles = self.body_sys_map[sys_db_parents]
+        # parent_bubbles = self.body_sys_map[sys_db_parents] # Ah so if the parent exists but isn't in a system (its not flagged)
 
-        valid_bubbles = parent_bubbles != -1
+        # valid_bubbles = parent_bubbles != -1
 
-        sys_id_up = np.where(active_systems)[0][valid_bubbles]
-        self.parent_indices[sys_id_up] = parent_bubbles[valid_bubbles]
+        # sys_id_up = np.where(active_systems)[0][valid_bubbles]
+        # self.parent_indices[sys_id_up] = parent_bubbles[valid_bubbles]
+
+        has_db_parent = sys_db_parents != -1
+
+        sys_id_up = np.where(active_systems)[0][has_db_parent]
+        valid_sys_parents = sys_db_parents[has_db_parent]
+
+        parent_bubbles = self.body_sys_map[valid_sys_parents]
+
+        final_targets = np.where(parent_bubbles != -1, parent_bubbles, valid_sys_parents)
+
+        # self.parent_indices[sys_id_up] = valid_sys_parents
+        self.parent_indices[sys_id_up] = final_targets
 
         roots = self.parent_indices == -1
         self.parent_indices[roots] = np.where(roots)[0].astype(np.uint32)
+        # print("Normalize: ", self.body_sys_map[self.active_mask]) # -1 roots
+        # print(self.parent_indices[self.active_mask]) # Self reference
 
     def _rehydrate_coes(self) -> None:
         """
@@ -355,31 +344,125 @@ class Simulation:
             self.global_states[self.parent_indices[self.active_mask]]
         )
 
+        self.coe_states[self.is_head, :] = 0.0 # Question if this should have values.
+        self.coe_states[self.active_mask & (self.parent_indices == np.arange(self.max_capacity))] = 0.0
         valid_mask = self.active_mask & ~self.is_head & (self.parent_indices != np.arange(self.max_capacity))
         # Pick anything that is active, not a head and isn't a self referenced object (root)
 
         # print(rel_r, rel_v)
         if np.any(valid_mask):
-            rel_r = self.local_states[valid_mask, :3]
-            rel_v = self.local_states[valid_mask, 3:]
+            rel_r = self.local_states[valid_mask, :3].copy()
+            rel_v = self.local_states[valid_mask, 3:].copy() # New copy
 
             parents = self.parent_indices[valid_mask]
             children = np.where(valid_mask)[0].astype(np.uint32)
 
             # mu_two_body = self.mu_array[parents] + self.mu_array[children]
             parent_is_sys = self.is_system[parents]
+
+            if np.any(parent_is_sys):
+                m_c = self.mu_array[children[parent_is_sys]]
+                m_s = self.mu_array[parents[parent_is_sys]]
+                m_h = m_s - m_c
+
+                scale = m_s / (m_h  + 1e-20) # avoid div by 0
+                rel_r[parent_is_sys] *= scale[:, None]
+                rel_v[parent_is_sys] *= scale[:, None]
+
+            # mu_head = self.mu_array[parents] - self.mu_array[children]
+            # mu_sys  = self.mu_array[parents]
+
             mu_calc = np.where(
                 parent_is_sys,
                 self.mu_array[parents],
-                self.mu_array[parents] + self.mu_array[children]
+                # (mu_head ** 3) / ((mu_sys ** 2) + 1e-20),
+                # self.mu_array[parents] + self.mu_array[children]
+                self.mu_array[parents]
             )
 
-            self.coe_states[valid_mask] = fr.ReferenceFrames.rv_to_coe(
+            # self.coe_states[valid_mask], _ = fr.ReferenceFrames.rv_to_coe(
+            #     rel_r,
+            #     rel_v,
+            #     mu_calc# mu_two_body
+            # )
+
+            new_coes, success = fr.ReferenceFrames.rv_to_coe(
                 rel_r,
                 rel_v,
                 mu_calc# mu_two_body
             )
 
+            # check_r, check_v, _ = fr.ReferenceFrames.coe_to_rv(new_coes, mu_calc)
+            # # check_r[parent_is_sys] /= scale[:, None]
+            # # check_v[parent_is_sys] /= scale[:, None]
+            # print("r_diff: ", np.abs(rel_r - check_r))
+            # print(rel_r, check_r)
+            # print("v_diff: ", np.abs(rel_v - check_v))
+            # print(rel_v, check_v)
+
+
+            valid_idx = np.where(valid_mask)[0][success]
+            # print(valid_idx)
+            # print("coe_diff: ", np.abs(self.coe_states[valid_mask] - new_coes))
+            # print(self.coe_states[valid_mask], new_coes)
+            self.coe_states[valid_idx] = new_coes[success]
+            # print("Vector length diff: ", np.linalg.norm(self.global_states[0, :3] - self.global_states[2, :3], axis=-1), np.linalg.norm(rel_r[0, :3], axis=-1))
+            # print(self.global_states[0, :3] - self.global_states[2, :3], rel_r[0])
+            # print("Vector length diff: ", np.linalg.norm(self.global_states[0, 3:] - self.global_states[2, 3:], axis=-1), np.linalg.norm(rel_v[0, :3], axis=-1))
+            # print(self.global_states[0, 3:] - self.global_states[2, 3:], rel_v[0])
+
+    def _zero_roots(self) -> None:
+        roots = self.parent_indices == np.arange(self.max_capacity)
+        active_roots = roots & self.active_mask
+
+        if not np.any(active_roots):
+            return
+        
+        shifts = np.zeros_like(self.global_states)
+        shifts[active_roots] = self.global_states[active_roots]
+
+        for tier in self.topological_tiers:
+            has_parent = self.parent_indices[tier] != tier
+            children = tier[has_parent]
+
+            if len(children) > 0:
+                parents = self.parent_indices[children]
+                shifts[children] = shifts[parents]
+
+        self.global_states[self.active_mask] -= shifts[self.active_mask]
+
+    def calc_global(self) -> None:
+        tier_0 = self.topological_tiers[0]
+        self.global_states[tier_0] = 0.0
+
+        # print(self.topological_tiers)
+
+        for tier in self.topological_tiers[1:]:
+
+            parents = self.parent_indices[tier]
+            # parent_sys = self.is_system[parents]
+            # mu_parents = self.mu_array[parents]
+
+            # m1 = ~parent_sys # Any body without a system as a parent
+            # # print(m1)
+            # if np.any(m1):
+            #     idx_m1 = tier[m1]
+            #     p_m1 = parents[m1]
+
+            #     local_r, local_v = fr.ReferenceFrames.coe_to_rv(self.coe_states[idx_m1], mu_parents[m1])
+            #     self.global_states[idx_m1, :3] = self.global_states[p_m1, :3] + local_r
+            #     self.global_states[idx_m1, 3:] = self.global_states[p_m1, 3:] + local_v
+            # parent_sys = self.is_system[parents]
+            # mu_calc = np.where(
+            #     parent_sys,
+            #     self.mu_array[parents],
+            #     self.mu_array[parents] + self.mu_array[tier]
+            # )
+            # local_r, local_v, _ = fr.ReferenceFrames.coe_to_rv(self.coe_states[tier], mu_calc)
+            self.global_states[tier, :3] = self.global_states[parents, :3] + self.local_states[tier, :3]
+            self.global_states[tier, 3:] = self.global_states[parents, 3:] + self.local_states[tier, 3:]
+
+        return
 
     @property
     def current_epoch(self) -> datetime:
@@ -387,13 +470,12 @@ class Simulation:
     
 
     def step(self, dt: Seconds) -> None:
-        # for body in self.bodies:
-        #     KeplerianPropagator.propagate(body, dt)
-        mask = (self.parent_indices != -1)
-        # KeplerianPropagator.propagate(self.coe_states[mask], self.mu_array[mask], self.parent_indices[mask], dt)
-        KeplerianPropagator.propagate(self.coe_states, self.mu_array, self.parent_indices, dt)
-        self.local_states[mask, 0:3], self.local_states[mask, 3:6] = fr.ReferenceFrames.coe_to_rv(self.coe_states[mask], self.mu_array[mask])
-        
+
+        KeplerianPropagator.propagate(dt=dt, primary_states=self.coe_states, secondary_states=self.local_states, mu_array=self.mu_array,
+                                      parent_indices=self.parent_indices, active_mask=self.active_mask, is_head=self.is_head, is_system=self.is_system,
+                                      body_sys_map=self.body_sys_map, sys_head_map=self.sys_head_map)
+        self.calc_global() 
+
         self.t += dt
         self._record_state()
 
@@ -408,25 +490,22 @@ class Simulation:
     def _record_state(self) -> None:
         """Internal helper to snap the current state of all bodies."""
         current_dt = self.start_epoch + timedelta(seconds=self.t)
-        # for body in self.bodies:
-        #     self._history_buffer.append({
-        #         "timestamp": current_dt,
-        #         "seconds": self.t,
-        #         "body": body.name,
-        #         "x": body.r[0], "y": body.r[1], "z": body.r[2],
-        #         "vx": body.v[0], "vy": body.v[1], "vz": body.v[2],
-        #         "e": body.elements.e if body.elements else None,
-        #         "theta": body.elements.theta if body.elements else None
-        #     })
+
         for body in self.name_to_index:
             index = self.name_to_index[body]
             self._history_buffer.append({
                 "timestamp": self.current_epoch,
                 "seconds": self.t,
                 "body": body,
+                "g_x": self.global_states[index, 0], "g_y": self.global_states[index, 1], "g_z": self.global_states[index, 2],
+                "g_vx": self.global_states[index, 3], "g_vy": self.global_states[index, 4], "g_vz": self.global_states[index, 5],
                 "x": self.local_states[index, 0], "y": self.local_states[index, 1], "z": self.local_states[index, 2],
                 "vx": self.local_states[index, 3], "vy": self.local_states[index, 4], "vz": self.local_states[index, 5],
+                # "p": self.coe_states[index, 0],
                 "e": self.coe_states[index, 1],
+                # "i": self.coe_states[index, 2],
+                # "raan": self.coe_states[index, 3],
+                # "arg_pe": self.coe_states[index, 4],
                 "theta": self.coe_states[index, 5]
                 })
 
@@ -447,11 +526,13 @@ if __name__ == "__main__":
     seed_test_universe()
 
     print("\n[ ENGINE BOOTING ]")
-    # system_query = ["Solar System", "Earth-Moon System", "Alpha Centauri System"]
-    system_query = ["Solar System", "Alpha Centauri System"]
+    system_query = ["Solar System", "Earth-Moon System", "Alpha Centauri System"]
+    # system_query = ["Solar System", "Alpha Centauri System"]
+    # system_query = ["Solar System"]
 
 
-    sim = Simulation(body_names=["Sun", "Earth", "Moon", "Alpha Centauri A", "Alpha Centauri B"], system_names=system_query)
+    sim = Simulation(body_names=["Sun", "Earth", "Moon", "Alpha Centauri A", "Alpha Centauri B", "Jupiter", "Saturn"], system_names=system_query)
+    # sim = Simulation(body_names=["Sun", "Earth", "Moon"], system_names=system_query)
 
     idx_to_name = {idx: name for name, idx in sim.name_to_index.items()}
 
@@ -473,6 +554,8 @@ if __name__ == "__main__":
             # Resolve System Name
             sys_idx = sim.body_sys_map[idx]
             sys_name = idx_to_name.get(sys_idx, "None") if sys_idx != -1 else "None"
+            head_idx = sim.sys_head_map[idx]
+            sys_head = idx_to_name.get(head_idx, "None") if head_idx != -1 else "None"
                 
             # Resolve Parent Name
             parent_idx = sim.parent_indices[idx]
@@ -482,6 +565,7 @@ if __name__ == "__main__":
             print(f"  Type      : {'System Barycenter' if sim.is_system[idx] else 'Physical Body'}")
             print(f"  Is Head?  : {sim.is_head[idx]}")
             print(f"  System    : {sys_name}")
+            print(f"  Sys Head  : {'***' if sim.is_head[idx] else sys_head}")
             print(f"  Parent    : {parent_name}")
             print(f"  Mass (mu) : {sim.mu_array[idx]:.4e}")
             print(f"  Global R  : {sim.global_states[idx, :3]}")
@@ -490,3 +574,8 @@ if __name__ == "__main__":
             print("-" * 55)
 
             # Current bug is whether barycenters belong to their parent's system, or the system they define and how this effects the code! RESOLVED
+
+    sim.run(24*(60**2), 0.5*(60.0**2.0))
+    with pd.option_context('display.max_rows', 100):
+        print(sim.history.head(100))
+    # print(sim.history.head(100).to_string())

@@ -1,4 +1,9 @@
 # Custom types for the orbital engine
+import enum
+
+class PropagatorType(enum.IntEnum):
+    NONE = 0
+    KEPLERIAN = 1
 
 # Distances
 Kilometers = float

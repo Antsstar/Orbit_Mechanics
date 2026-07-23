@@ -272,13 +272,16 @@ class ReferenceFrames:
 
     @staticmethod
     # def rv_to_coe(r: NDArray[np.float64], v: NDArray[np.float64], mu: float, *, ref_x: NDArray[np.float64] = np.array([1, 0, 0]), ref_z: NDArray[np.float64] = np.array([0, 0, 1])) -> 'OrbitalElements':
-    def rv_to_coe(r: NDArray[np.float64], v: NDArray[np.float64], mu: float | NDArray[np.float64], *, ref_x: NDArray[np.float64] = np.array([1, 0, 0]), ref_z: NDArray[np.float64] = np.array([0, 0, 1])) -> NDArray[np.float64]:
+    def rv_to_coe(r: NDArray[np.float64], v: NDArray[np.float64], mu: float | NDArray[np.float64], *, ref_x: NDArray[np.float64] = np.array([1, 0, 0]),
+                  ref_z: NDArray[np.float64] = np.array([0, 0, 1])) -> tuple[NDArray[np.float64], NDArray[np.bool_]] :
+        
         if np.any(np.dot(ref_x, ref_z)) != 0:
             raise ValueError("Reference directions are not orthogonal!")
         
         ref_y = np.cross(ref_z, ref_x)
         tol = 1e-12
         _mu = np.asarray(mu)
+        # _mu = np.atleast_1d(mu)
         _r = np.atleast_2d(r)
         _v = np.atleast_2d(v)
 
@@ -290,10 +293,10 @@ class ReferenceFrames:
         Omega       = None # Right Ascension of the Ascending Node (RAAN)
         omega       = None # Argument of Perigee
         theta       = None # True anomaly
-        tor         = None # Time of periapsis passage
-        omega_true  = None # Omega + omega (x_ref.e) Non-Circular Equatorial, True longitude of periapsis
-        u           = None # omega + theta (N.r) Circular Inclined, True argument of latitude
-        lambda_true = None # Omega + omega + theta (x_ref . r) Circular Equatorial, True longitude
+        # tor         = None # Time of periapsis passage
+        # omega_true  = None # Omega + omega (x_ref.e) Non-Circular Equatorial, True longitude of periapsis
+        # u           = None # omega + theta (N.r) Circular Inclined, True argument of latitude
+        # lambda_true = None # Omega + omega + theta (x_ref . r) Circular Equatorial, True longitude
 
         
         h = np.cross(_r, _v)
@@ -301,11 +304,25 @@ class ReferenceFrames:
 
         if np.any(np.abs(h_mag)) < tol:
             raise ValueError("Velocity and displacement are parallel. Entity is not in orbit")
+        
+        valid = np.abs(h_mag) > 1e-9
 
-        e = (np.cross(_v, h) / _mu[..., np.newaxis]) - (_r / np.linalg.norm(_r, axis=-1)[..., np.newaxis])
+        if not np.any(valid):
+            return np.zeros(r.shape, dtype=np.float64), valid
+        
+        # print(valid, valid.shape)
+        # print(h_mag, h_mag.shape)
+        r_v = _r[valid, ...]
+        v_v = _v[valid, ...]
+        h_v = h[valid, ...]
+        h_mag_v = h_mag[valid]
+        mu_v = _mu[valid] if _mu.ndim > 0 else _mu
+
+
+        e = (np.cross(v_v, h_v) / mu_v[..., np.newaxis]) - (r_v / np.linalg.norm(r_v, axis=-1)[..., np.newaxis])
         e_mag = np.linalg.norm(e, axis=-1)
 
-        p = h_mag**2 / _mu
+        p = h_mag_v**2 / mu_v
 
 
         a_mask = (np.abs(e_mag - 1.0) < tol)
@@ -315,7 +332,7 @@ class ReferenceFrames:
 
 
         # i = np.arccos(np.dot(h, ref_z) / (np.linalg.norm(h) * np.linalg.norm(ref_z)))
-        i = np.arccos(np.clip(np.sum(h * ref_z, axis=-1) / (h_mag), -1.0, 1.0))
+        i = np.arccos(np.clip(np.sum(h_v * ref_z, axis=-1) / (h_mag_v), -1.0, 1.0))
 
 
         # is_circular = (np.abs(e_mag) < tol)
@@ -334,64 +351,73 @@ class ReferenceFrames:
         mask_C_Equ = is_circular & is_equatorial        # Circular (N and e are undefined)
 
         coe_states = np.zeros((_r.shape[0], 6), dtype=np.float64)
-        coe_states[:, 0] = p
-        coe_states[:, 1] = e_mag
-        coe_states[:, 2] = i
+        coe_states[valid, 0] = p
+        coe_states[valid, 1] = e_mag
+        coe_states[valid, 2] = i
+        Omega = np.zeros_like(i)
+        omega = np.zeros_like(i)
+        theta = np.zeros_like(i)
 
         # a . b = |a||b|cos(<ab)
         # a x b = /n\ |a||b|sin(<ab)
         # a x b / a.b = /n\ tan(<ab)
         # /n\ . a x b / a.b = tan(<ab)
 
-        h_hat = h / h_mag[..., np.newaxis]
-        N = np.cross(ref_z, h)
+        h_hat = h_v / h_mag_v[..., np.newaxis]
+        N = np.cross(ref_z, h_v)
 
         mask_NE = ~is_equatorial
         mask_NC = ~is_circular
 
+        print("valid: ", valid)
+        print("mask_NC_NEqu: ", mask_NC_NEqu.shape)
+        print("mask_NC: ", mask_NC.shape)
+        # print(valid)
+
         # if np.any(~is_equatorial):
         if np.any(mask_NE):
             # coe_states[~is_equatorial, 3] = angle(ref_x, N[~is_equatorial], ref_z) # Regular Omega
-            coe_states[mask_NE, 3] = angle(ref_x, N[mask_NE], ref_z) # Regular Omega
+            # coe_states[mask_NE, 3] = angle(ref_x, N[mask_NE], ref_z) # Regular Omega
+            Omega[mask_NE] = angle(ref_x, N[mask_NE], ref_z) # Regular Omega
         
         # if np.any(~is_circular):
         #     coe_states[~is_circular, 5] = angle(e[~is_circular], _r[~is_circular], h_hat[~is_circular]) # Regular theta
         if np.any(mask_NC):
-            coe_states[mask_NC, 5] = angle(e[mask_NC], _r[mask_NC], h_hat[mask_NC]) # Regular theta
+            # coe_states[mask_NC, 5] = angle(e[mask_NC], r_v[mask_NC], h_hat[mask_NC]) # Regular theta
+            theta[mask_NC] = angle(e[mask_NC], r_v[mask_NC], h_hat[mask_NC])
 
         if np.any(mask_NC_Equ):
-            coe_states[mask_NC_Equ, 4] = angle(ref_x, e[mask_NC_Equ], h_hat[mask_NC_Equ]) # omega absorb Omega
+            # coe_states[mask_NC_Equ, 4] = angle(ref_x, e[mask_NC_Equ], h_hat[mask_NC_Equ]) # omega absorb Omega
+            omega[mask_NC_Equ] = angle(ref_x, e[mask_NC_Equ], h_hat[mask_NC_Equ])
         
         if np.any(mask_C_NEqu):
-            coe_states[mask_C_NEqu, 5] = angle(N[mask_C_NEqu], _r[mask_C_NEqu], h_hat[mask_C_NEqu]) # theta absorb omega
+            # coe_states[mask_C_NEqu, 5] = angle(N[mask_C_NEqu], r_v[mask_C_NEqu], h_hat[mask_C_NEqu]) # theta absorb omega
+            theta[mask_C_NEqu] = angle(N[mask_C_NEqu], r_v[mask_C_NEqu], h_hat[mask_C_NEqu])
         
         if np.any(mask_NC_NEqu):
-            coe_states[mask_NC_NEqu, 4] = angle(N[mask_NC_NEqu], e[mask_NC_NEqu], h_hat[mask_NC_NEqu]) # Regular omega
+            # coe_states[mask_NC_NEqu, 4] = angle(N[mask_NC_NEqu], e[mask_NC_NEqu], h_hat[mask_NC_NEqu]) # Regular omega
+            omega[mask_NC_NEqu] = angle(N[mask_NC_NEqu], e[mask_NC_NEqu], h_hat[mask_NC_NEqu])
 
         if np.any(mask_C_Equ):
-            coe_states[mask_C_Equ, 5] = angle(ref_x, _r[mask_C_Equ], h_hat[mask_C_Equ]) # theta absorbs Omega and omega
+            # coe_states[mask_C_Equ, 5] = angle(ref_x, r_v[mask_C_Equ], h_hat[mask_C_Equ]) # theta absorbs Omega and omega
+            theta[mask_C_Equ] = angle(ref_x, r_v[mask_C_Equ], h_hat[mask_C_Equ])
 
         
+        coe_states[valid, 3] = Omega
+        coe_states[valid, 4] = omega
+        coe_states[valid, 5] = theta
+
         if r.ndim == 1:
-            return cast(NDArray[np.float64], coe_states[0])
-        return coe_states
+            return (cast(NDArray[np.float64], coe_states[0]), valid)
+        return coe_states, valid
     
     @staticmethod
     # def coe_to_rv(coe: 'OrbitalElements', mu: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    def coe_to_rv(coe: NDArray[np.float64], mu: float | NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    def coe_to_rv(coe: NDArray[np.float64], mu: float | NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]: #Now return a success array
 
-        # if coe.theta is not None:
-        #     anomaly = coe.theta
-        # elif coe.u is not None:
-        #     anomaly = coe.u
-        # elif coe.lambda_true is not None:
-        #     anomaly = coe.lambda_true
-        # else:
-        #     raise ValueError("No valid argument for anomaly")
-        #     # print("No valid arguemnt for anomaly")
-        #     # return
         _coe = np.atleast_2d(coe)
         _mu = np.asarray(mu)
+        # _mu = np.atleast_1d(mu)
 
         p = _coe[..., 0]
         e = _coe[..., 1]
@@ -400,14 +426,23 @@ class ReferenceFrames:
         omega = _coe[..., 4]
         anomaly = _coe[..., 5]
 
+        valid = (p > 1e-12) & ~np.isnan(anomaly)
+        Vect = np.zeros_like(_coe)
 
-        # r_mag = coe.p / (1 + coe.e*np.cos(anomaly))
-        # x = np.array([np.cos(anomaly), 0, 0])*r_mag
-        # y = np.array([0, np.sin(anomaly), 0])*r_mag
+        if not np.any(valid):
+            return Vect[..., :3], Vect[..., 3:], valid
+        
+        _mu_v = _mu[valid] if _mu.ndim > 0 else _mu
+        p_v = p[valid]
+        e_v = e[valid]
+        i_v = i[valid]
+        Omega_v = Omega[valid]
+        omega_v = omega[valid]
+        anomaly_v = anomaly[valid]
 
-        r_mag = p / (1.0 + e * np.cos(anomaly))
-        r_x = r_mag * np.cos(anomaly)
-        r_y = r_mag * np.sin(anomaly)
+        r_mag = p_v / (1.0 + e_v * np.cos(anomaly_v))
+        r_x = r_mag * np.cos(anomaly_v)
+        r_y = r_mag * np.sin(anomaly_v)
         rv_z = np.zeros_like(r_mag)
 
 
@@ -416,9 +451,9 @@ class ReferenceFrames:
         # x_dot = np.array([-np.sin(anomaly), 0, 0])*mu_h
         # y_dot = np.array([0, coe.e + np.cos(anomaly), 0])*mu_h
 
-        mu_h = np.sqrt(_mu / p)
-        v_x = -mu_h * np.sin(anomaly)
-        v_y = mu_h * (e + np.cos(anomaly))
+        mu_h = np.sqrt(_mu_v / p_v)
+        v_x = -mu_h * np.sin(anomaly_v)
+        v_y = mu_h * (e_v + np.cos(anomaly_v))
 
         # r_p = x + y
         # v_p = x_dot + y_dot
@@ -429,14 +464,16 @@ class ReferenceFrames:
         # matrix = Transformations.Rzxz(coe.omega if coe.omega is not None else (coe.omega_true if coe.omega_true is not None else Radians(0.0)), coe.i, coe.Omega if coe.Omega is not None else Radians(0.0))
         # r = matrix @ r_p
         # v = matrix @ v_p
-        matrix = Transformations.Rzxz(omega, i, Omega)
+        matrix = Transformations.Rzxz(omega_v, i_v, Omega_v)
         r = (matrix @ r_p[..., np.newaxis])[..., 0]
         v = (matrix @ v_p[..., np.newaxis])[..., 0]
 
         if coe.ndim == 1:
-            return r[0], v[0]
+            return r[0], v[0], valid
 
-        return r, v
+        Vect[valid, :3] = r
+        Vect[valid, 3:] = v
+        return Vect[..., :3], Vect[..., 3:], valid
     
     @staticmethod
     def inertia_to_fixed(r_i: NDArray[np.float64], v_i: NDArray[np.float64], theta: Radians | NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -476,9 +513,9 @@ if __name__ == "__main__":
     MU_Sun = 1.32712440042 * 10**11
     r = np.array([-145510750, 39268690, 10500])
     v = np.array([-6.995, -29.215, -0.00025])
-    elements = ReferenceFrames.rv_to_coe(r, v, mu=MU_Sun)
+    elements, _ = ReferenceFrames.rv_to_coe(r, v, mu=MU_Sun)
     print(elements)
-    r_new, v_new = ReferenceFrames.coe_to_rv(elements, MU_Sun)
+    r_new, v_new, _ = ReferenceFrames.coe_to_rv(elements, MU_Sun)
 
     # 4. Check results (using np.allclose to handle tiny floating point errors)
     print("Position Match:", np.allclose(r, r_new))
