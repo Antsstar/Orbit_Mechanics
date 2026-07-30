@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from datetime import datetime
-from orbital_engine.frames import OrbitalElements as oe, ReferenceFrames as rf
+from orbital_engine.frames import ReferenceFrames as rf
 
 
 def test_orbit_classifications():

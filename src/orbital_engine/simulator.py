@@ -380,11 +380,6 @@ class Simulation:
                 self.mu_array[parents]
             )
 
-            # self.coe_states[valid_mask], _ = fr.ReferenceFrames.rv_to_coe(
-            #     rel_r,
-            #     rel_v,
-            #     mu_calc# mu_two_body
-            # )
 
             new_coes, success = fr.ReferenceFrames.rv_to_coe(
                 rel_r,
@@ -392,24 +387,10 @@ class Simulation:
                 mu_calc# mu_two_body
             )
 
-            # check_r, check_v, _ = fr.ReferenceFrames.coe_to_rv(new_coes, mu_calc)
-            # # check_r[parent_is_sys] /= scale[:, None]
-            # # check_v[parent_is_sys] /= scale[:, None]
-            # print("r_diff: ", np.abs(rel_r - check_r))
-            # print(rel_r, check_r)
-            # print("v_diff: ", np.abs(rel_v - check_v))
-            # print(rel_v, check_v)
-
 
             valid_idx = np.where(valid_mask)[0][success]
-            # print(valid_idx)
-            # print("coe_diff: ", np.abs(self.coe_states[valid_mask] - new_coes))
-            # print(self.coe_states[valid_mask], new_coes)
             self.coe_states[valid_idx] = new_coes[success]
-            # print("Vector length diff: ", np.linalg.norm(self.global_states[0, :3] - self.global_states[2, :3], axis=-1), np.linalg.norm(rel_r[0, :3], axis=-1))
-            # print(self.global_states[0, :3] - self.global_states[2, :3], rel_r[0])
-            # print("Vector length diff: ", np.linalg.norm(self.global_states[0, 3:] - self.global_states[2, 3:], axis=-1), np.linalg.norm(rel_v[0, :3], axis=-1))
-            # print(self.global_states[0, 3:] - self.global_states[2, 3:], rel_v[0])
+
 
     def _zero_roots(self) -> None:
         roots = self.parent_indices == np.arange(self.max_capacity)
