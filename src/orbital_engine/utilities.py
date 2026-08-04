@@ -424,11 +424,11 @@ class Anomalies:
     def mean_to_true_parabolic(M_p: Numeric) -> Radians:
         """Parabolic Mean Anomaly to True Anomaly, Solution to Cardion cubic equation s^3 + 3s - 3M_p = 0."""
         # Using the Cardino solution for a cubic equation s**3 + 3s - 3Mp = 0
-        _M_p = np.asarray(M_p, dtype=np.float64)
+        _M_p = np.asarray(M_p)
         A = 1.5 * _M_p
-        B = np.cbrt(A + np.sqrt(A**2 + 1.0), dtype=np.float64)
+        B = np.cbrt(A + np.sqrt(A**2 + 1.0))
         s = B - (1.0 / B)
-        theta = 2.0 * np.arctan(s, dtype=np.float64)
+        theta = 2.0 * np.arctan(s)
 
         if _M_p.ndim == 0:
             return theta.item()
@@ -454,7 +454,7 @@ class Kepler:
         valid = np.abs(_a) > 1e-9
         M = np.zeros_like(_a)
 
-        M[valid] = np.sqrt(_mu[valid] / (_a[valid] ** 3), dtype=np.float64) * delta_t
+        M[valid] = np.sqrt(_mu[valid] / (_a[valid] ** 3)) * delta_t
         if _mu.ndim == 0:
             return M.item(), valid
         # return Radians(np.sqrt(mu / (a**3)) * delta_t)
@@ -492,7 +492,7 @@ class Barker:
         _mu = np.asarray(mu, dtype=np.float64)
         _p = np.asarray(p, dtype=np.float64)
 
-        M = 2.0 * np.sqrt(_mu / (_p ** 3), dtype=np.float64) * delta_t
+        M = 2.0 * np.sqrt(_mu / (_p ** 3)) * delta_t
         if _mu.ndim == 0:
             return M.item()
         return M
