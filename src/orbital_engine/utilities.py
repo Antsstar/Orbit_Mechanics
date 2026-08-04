@@ -431,8 +431,8 @@ class Anomalies:
         theta = 2.0 * np.arctan(s)
 
         if _M_p.ndim == 0:
-            return theta.item()
-        return cast(Radians | NDArray[np.float64], theta)
+            return float(theta.item())
+        return cast(Radians, theta)
 
 # ==========================================================================================================================================================
 # Kepler and Barker Static Classes: Time <-> Mean Anomaly conversions for basic propagation logic on all orbital types.
@@ -456,7 +456,7 @@ class Kepler:
 
         M[valid] = np.sqrt(_mu[valid] / (_a[valid] ** 3)) * delta_t
         if _mu.ndim == 0:
-            return M.item(), valid
+            return float(M.item()), valid
         # return Radians(np.sqrt(mu / (a**3)) * delta_t)
         return M, valid
         
@@ -474,7 +474,7 @@ class Kepler:
             raise NotImplementedError(f"This function expects an homogenous time constant between all entries")
         
         if t.ndim == 0:
-            return t.item()
+            return float(t.item())
         return cast(Seconds, t[0]) # We'll prob return an array when we start doing orbital transfers i.e. Laplace Equation
     
         # return Seconds(np.sqrt((a**3) / mu) * delta_M)
