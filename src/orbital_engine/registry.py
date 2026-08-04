@@ -1,6 +1,14 @@
-from typing import Callable, Dict, Type, Any
+from __future__ import annotations
+from typing import Callable, Dict, Type, Any, TYPE_CHECKING
+from .custom_types import PropagatorType
+
+
+if TYPE_CHECKING:
+    from .propagators import Propagator
+
 
 _MODEL_REGISTRY: Dict[str, Type[Any]] = {}
+_PROPAGATOR_REGISTRY: Dict[int, Type[Propagator]] = {}
 
 def register_model(name: str) -> Callable[..., Type[Any]]:
     """
@@ -24,3 +32,15 @@ def get_model(name: str) -> Type[Any]:
             f" Available models: {list(_MODEL_REGISTRY.keys())}"
             )
     return _MODEL_REGISTRY[name]
+
+def register_propagator(prop_type: PropagatorType, prop_class: Type[Propagator]) -> None:
+    """
+    Register an instantiated propagator to specific IntEnum ID.
+    """
+    _PROPAGATOR_REGISTRY[prop_type.value] = prop_class
+
+def get_propagators() -> Dict[int, Any]:
+    """
+    Returns the dictionary of all registered propagators.
+    """
+    return _PROPAGATOR_REGISTRY

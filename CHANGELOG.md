@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-04
+
+### Added
+- **Barycentric Entity-Component-System (ECS):** Implemented a multi-stage `Simulation._build_universe` pipeline that fully supports complex $N$-body systems by dynamically deriving and locating mass-weighted Barycenters (`VirtualNodes`).
+- **Hybrid Modularity Engine:** Engine now supports "Hybrid Modularity", gracefully degrading from strict N-Body Barycentric physics to classic 2-Body Point-Mass physics based solely on whether a user queries a System bubble or isolated Bodies.
+- **Dynamic Orbital Rehydration:** `_rehydrate_coes` method now dynamically recalculates exact two-body $\mu$ values ($G(m_1 + m_2)$ for Barycentric motion, and for Point-Mass orphans).
+- **System Head Reflex Kick:** Added mathematical infrastructure to counter-balance unloaded local clusters using a mass-moment "Reflex Kick" on primary attractors (System Heads) to prevent invalid Angular Momentum ($\vec{h} = 0$) singularities.
+- **Topological Graph Sorting:** Introduced `_stratify_arena` to execute vectorized Breadth-First Searches (BFS) on relationship pointers, guaranteeing perfectly ordered zero-allocation matrix cascades during rendering and mass aggregation.
+- **Refkex Routing Graph (`sys_head_map`):** Implemented an $O(1)$ topological mapping  that isolates Barycentric Reflex Kick logic from standard orbital propagation.
+- Refactored the `m2` barycentric propagator mask to natively support Hybrid Modularity with boolean masks to skip point-mass reflex kicks.
+
+### Changed
+- Refactored `database.py` schema to adhere to strict Adjacency List standards for recursive relationships, introducing a dedicated connector table (`SystemORM`) and utilizing `remote_side` for `parent_id` lookups.
+- Centralized all physical propagation logic into a Strategy Pattern, decoupling `simulator.py` from specific integration techniques and shifting analytical Keplerian physics directly into `propagators.py`.
+- Decoupled the kinematic rendering tree (`body_sys_map`) from the Keplerian two-body motion (`parent_indices`). 
+
+### Fixed
+- Prevented double-multiplication mass moment bugs during hierarchical system mass aggregation.
+- Patched NumPy array `-1` wrap-around vulnerability when calculating relative Cartesian offsets for Root-level nodes.
+- Resolved Gravitational Paramater precision loss during `coe -> rv -> coe` by synchronizing the mass parameter to use a combined parameter ($\mu_{1} + \mu_{2}$) across all interactions.
+
+---
+
 ## [1.4.1] - 2026-07-08
 
 ### Changed

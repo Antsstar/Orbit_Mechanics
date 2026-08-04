@@ -1,126 +1,135 @@
 from __future__ import annotations
-from typing import Optional, Any
-from .custom_types import Radians, Kilometers, Seconds
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, cast
+import numpy as np
 from numpy.typing import NDArray
 
-import numpy as np
-# from .utilities import Units
-from .constants import G
-from .frames import ReferenceFrames, OrbitalElements
-from .database import get_session, BaseBodyORM
-from .registry import get_model
+from .custom_types import (
+    Numeric,
+    ScalarFloat,
+    ArrayFloat,
+    ScalarKilometers,
+    KmPerSec,
+    ScalarGravitationalParameter
+)
+from .exceptions import TopologyError
 
-# class BaseBody:
-#     def __init__(self, name: str, radius: Optional[float] = None, mu: Optional[float] = None, rotation_rate: float = 0, parent: Optional[BaseBody] = None, *, mass: Optional[float] = None) -> None:
-#         self.name = name
-#         self.rotation_rate = rotation_rate
-#         self.parent = parent
-#         self.children: list[BaseBody] = []
-#         self.physics_models: dict[str, Any] = {}
+if TYPE_CHECKING:
+    from .simulator import Simulation
 
-#         # Initialisation routing
-#         if radius is None and mu is None and mass is None:
-#             self._load_from_database()
-#         else:
-#             # if radius is None:
-#             #     raise ValueError(f"Body '{name}' requires a radius for initialisation.") # Not necessary at the moment but will be if collision detection is implemented.
-#             self.radius = radius
-
-#             if mu is not None:
-#                 self.mu_self = mu
-#                 self.mass = mu / G
-#             elif mass is not None:
-#                 self.mass = mass
-#                 self.mu_self = G * mass
-#             else:
-#                 raise ValueError(f"Body '{name}' requires either mu or mass for initialisation.")
-
-#         # State Vectors and Orbital Elements
-#         self.r: NDArray[np.float64] = np.zeros(3, dtype=np.float64)
-#         self.v: NDArray[np.float64] = np.zeros(3, dtype=np.float64)
-#         self.elements: Optional[OrbitalElements] = None
-
-#         #Reference Frames
-#         self.ref_x: NDArray[np.float64] = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-#         self.ref_z: NDArray[np.float64] = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-#         self.ref_y: NDArray[np.float64] = np.cross(self.ref_z, self.ref_x).astype(np.float64)
-
-#         self._system_mu = self.mu_self
-#         self._dirty = True
-    
-#     def _load_from_database(self) -> None:
-#         """ Querries Database for body parameters."""
-#         session = get_session()
-#         db_record = session.query(BaseBodyORM).filter_by(name=self.name).first()
-
-#         if not db_record:
-#             session.close()
-#             raise ValueError(f"Body '{self.name}' not found in database."
-#                              f" Please provide mu or mass for initialisation manually.")
-        
-#         self.radius = db_record.radius # type: ignore
-#         self.mu_self = db_record.mu # type: ignore
-#         self.mass = self.mu_self / G
-
-#         if db_record.physics_models:
-#             # self.physics_models = db_record.physics_models
-#             for model_type, model_name in db_record.physics_models.items(): # Will outline if it is a AtmosphericModel, GravityModel, etc. and the name of the model to load.
-#                 try:
-#                     model_class = get_model(model_name)
-#                     self.physics_models[model_type] = model_class()
-#                 except ValueError as e:
-#                     raise ValueError(f"Failed to load physics model for {self.name}: {e}")
-
-#         session.close()
-
-#     def invalidate_cache(self) -> None:
-#         self._dirty = True
-#         if self.parent:
-#             if self.mu_self / self.parent.mu_self > 1e-9:
-#                 self.parent.invalidate_cache()
-
-#     def add_child(self, child: 'BaseBody') -> None:
-#         self.children.append(child)
-#         child.parent = self
-#         self.invalidate_cache()
-
-#     @property
-#     def mu_system(self) -> float:
-#         if self._dirty:
-#             divisor = self.mu_self if self.mu_self > 0 else 1e-20
-#             children_mu = sum(c.mu_system for c in self.children if c.mu_self / divisor > 1e-9)
-#             self._system_mu = self.mu_self + children_mu
-#             self._dirty = False
-#         return self._system_mu
-    
-#     @property
-#     def mu_orbit(self) -> Optional[float]:
-#         if not self.parent:
-#             return None
-#         return self.parent.mu_self + self.mu_system
-
-#     def sync_state(self) -> None:
-#         if not self.parent:
-#             return
-#         assert self.elements is not None, "Orbital elements must be defined to sync state."
-#         assert self.mu_orbit is not None, "Parent body must have a defined mu to sync state."
-#         r, v = ReferenceFrames.coe_to_rv(self.elements, self.mu_orbit)
-#         self.r, self.v = r, v
-#         return
-
-#     def sync_elements(self) -> None:
-#         if not self.parent:
-#             return
-#         assert self.mu_orbit is not None, "Parent body must have a defined mu to sync elements."
-#         elements = ReferenceFrames.rv_to_coe(self.r, self.v, self.mu_orbit)
-#         self.elements = elements
-#         return
-
-from dataclasses import dataclass
-# from typing import Optional
 @dataclass(frozen=True)
 class BodyHandle:
+    """
+    Lightweight, Immutable UI pointer to identify data in the central Data-Oriented Design (DOD) memory arena.
+    
+    *Architecture Note*
+    - This class owns no kinematic data. All of this data is held in the host simulation arena, and is availiable on demand
+    using self.index to slice the array.
+    - Helps us avoid memory duplication, pointer chasing, and memory reuse efficiently optimising code execution.
+    """
     name: str
     index: int
+    _sim: Simulation
     parent_name: Optional[str] = None
-    
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+    # Safe Guarding
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def is_active(self) -> bool:
+        """Checks if this entity is currently alive in the simulation arena."""
+        return bool(self._sim.active_mask[self.index] and self.name in self._sim.name_to_index)
+
+    @property
+    def is_head(self) -> bool:
+        """Check if this entity is the head body of its allocated system."""
+        return bool(self._sim.is_head[self.index] and self.is_active)
+
+    @property
+    def is_barycenter(self) -> bool:
+        """Check if this entity is defined as a system barycenter."""
+        return bool(self._sim.is_system[self.index] and self.is_active)
+
+    @property
+    def is_vessel(self) -> None:
+        """Check if this entity is an active vessel."""
+        pass
+
+    @property
+    def parent_index(self) -> Optional[int]:
+        """Return the integer arena index of this body's gravitational parent."""
+        return int(self._sim.parent_indices[self.index]) if self.is_active else None
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+    # Dynamic invariant properties (Mass, S.O.I, Physical Scale)
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def mu(self) -> Optional[ScalarGravitationalParameter]:
+        """Gravitational Parameter G*M (km^3 / s^2)."""
+        return self._sim.mu_array[self.index] if self.is_active else None
+        # return cast(ScalarFloat, float)
+
+    @property
+    def soi_radius(self) -> Optional[ScalarKilometers]:
+        """
+        Static Sphere of Influence (S.O.I) or Hill Sphere radius in Kilometers.
+        Used for high-speed BVH boundary routing during propagation.
+        """
+        pass
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+    # Kinematic properties (Displacement, Velocity)
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+
+    @property
+    def r_local(self) -> Optional[ArrayFloat]:
+        """
+        Local Cartesian Position Vector respective to the entities allocated system barycenter.
+        **Returns a NumPy View (not copy) of the data**.
+        """
+        return self._sim.local_states[self.index, :3] if self.is_active else None
+
+    @property
+    def v_local(self) -> Optional[ArrayFloat]:
+        """
+        Local Cartesian Velocity Vector respective to the entities allocated system barycenter.
+        **Returns a NumPy View (not copy) of the data**.
+        """
+        return self._sim.local_states[self.index, 3:] if self.is_active else None
+
+    @property
+    def r_global(self) -> Optional[ArrayFloat]:
+        """
+        Global Cartesian Position Vector respective to the Simulation root.
+        **Returns a NumPy View (not copy) of the data**.
+        """
+        return self._sim.global_states[self.index, :3] if self.is_active else None
+
+    @property
+    def v_global(self) -> Optional[ArrayFloat]:
+        """
+        Global Cartesian Velocity Vector respective to the Simulation root.
+        **Returns a NumPy View (not copy) of the data**.
+        """
+        return self._sim.global_states[self.index, 3:] if self.is_active else None
+
+    @property
+    def coe(self) -> Optional[ArrayFloat]:
+        """
+        Classical Orbital Elements [p, e, i, Omega, omega, theta] relative to local parent.
+        **Returns a NumPy View (not copy) of the data.**
+        """
+        return self._sim.coe_states[self.index] if self.is_active else None
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+    # Dynamic in-place state mutators
+    # -----------------------------------------------------------------------------------------------------------------------------------------------
+    def apply_impulsive_delta_v(self, del_v: ArrayFloat) -> None:
+        pass
+
+    def __repr__(self) -> str:
+        status = "ACTIVE" if self.is_active else "DEPRICATED"
+        role = "BARYCENTER" if self.is_barycenter else ("HEAD" if self.is_head else "Body")
+        return f"<BodyHandle [{status}] '{self.name}' (idx={self.index}, role={role}, parent='{self.parent_name}')>"

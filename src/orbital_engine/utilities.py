@@ -1,30 +1,28 @@
 # Defining functions and tools for a orb sandbox.
 
-import math
+from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
-from .custom_types import Radians, Kilometers, Seconds
-from typing import Union, cast
+from .custom_types import Radians, Kilometers, Seconds, ArrayFloat, ScalarFloat, Numeric, GravitationalParameter
+from typing import Union, cast, overload
 from .exceptions import ConvergenceError
 
 
+# ==========================================================================================================================================================
+# Transformations Static Class: Rotations, Coordinate Transformations
+# ==========================================================================================================================================================
 
 class Transformations:
     """ 
-    Rotation Matrix Toolbox - Takes radians as inputs for euler angles about classic X,Y or Z definitions.
-        Also includes cartesian to spherical and vice versa conversions.
+    Rotation Matrix & Spherical Coordinates Toolbox. 
+    - Takes radians as inputs for euler angles about classic X, Y or Z definitions.
+    - Also includes cartesian to spherical and vice versa conversions.
+    - All angles must be provided in Radians.
     """
 
-
-
     @staticmethod
-    # def Rx(angle: Radians) -> NDArray[np.float64]:
-    #     return np.array([
-    #         [1, 0, 0],
-    #         [0, np.cos(angle), -np.sin(angle)],
-    #         [0, np.sin(angle), np.cos(angle)]
-    #         ])
-    def Rx(angle: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
+    def Rx(angle: Radians) -> ArrayFloat:
+        """Returns 3x3 Euler Matrix for a rotation about the X-axis."""
         _angle = np.atleast_1d(angle)
         c, s = np.cos(_angle), np.sin(_angle)
 
@@ -41,7 +39,8 @@ class Transformations:
         return mat
     
     @staticmethod
-    def Ry(angle: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
+    def Ry(angle: Radians) -> ArrayFloat:
+        """Returns 3x3 Euler Matrix for a rotation about the Y-axis."""
         _angle = np.atleast_1d(angle)
         c, s = np.cos(_angle), np.sin(_angle)
 
@@ -58,7 +57,8 @@ class Transformations:
         return mat
     
     @staticmethod
-    def Rz(angle: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
+    def Rz(angle: Radians) -> ArrayFloat:
+        """Returns 3x3 Euler Matrix for a rotation about the Z-axis."""
         _angle = np.atleast_1d(angle)
         c, s = np.cos(_angle), np.sin(_angle)
 
@@ -75,58 +75,75 @@ class Transformations:
         return mat
     
     @staticmethod
-    def Rxyz(alpha: Radians | NDArray[np.float64], beta: Radians | NDArray[np.float64], gamma: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
+    def Rxyz(alpha: Radians, beta: Radians, gamma: Radians) -> ArrayFloat:
+        """Returns resultant 3x3 Euler Matrix after a rotation about X, then Y, and finally Z in that specific order."""
         return Transformations.Rz(gamma) @ Transformations.Ry(beta) @ Transformations.Rx(alpha)
     
     @staticmethod
-    def Rzyx(alpha: Radians | NDArray[np.float64], beta: Radians | NDArray[np.float64], gamma: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
+    def Rzyx(alpha: Radians, beta: Radians, gamma: Radians) -> ArrayFloat:
+        """Returns resultant 3x3 Euler Matrix after a rotation about Z, then Y, and finally X in that specific order."""
         return Transformations.Rx(gamma) @ Transformations.Ry(beta) @ Transformations.Rz(alpha)
     
     @staticmethod
-    def Rzxz(alpha: Radians | NDArray[np.float64], beta: Radians | NDArray[np.float64], gamma: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
+    def Rzxz(alpha: Radians, beta: Radians, gamma: Radians) -> ArrayFloat:
+        """Returns resultant 3x3 Euler Matrix after a rotation about Z, then Y, and finally Z again."""
         return Transformations.Rz(gamma) @ Transformations.Rx(beta) @ Transformations.Rz(alpha)
     
-    @staticmethod
-    def cart_to_spherical(vec: NDArray[np.float64]) -> tuple[float, Radians, Radians] | tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-        # r = np.linalg.norm(vec)
-        _r = np.atleast_2d(vec)
-        r = np.linalg.norm(_r, axis=-1)
-        azimuth = np.arctan2(_r[..., 1], _r[..., 0])
-        elevation = np.arcsin(np.clip(_r[..., 2] / r, -1.0, 1.0))
-        if vec.ndim == 1:
-            return r.item(), Radians(azimuth.item()), Radians(elevation.item())
-        return r, azimuth, elevation
+    @staticmethod #Up to here!
+    def cart_to_sphe(V_cart: ArrayFloat) -> ArrayFloat:
+        """
+        Converts a Cartesian Coordinate defined Vector: V_cart = [x, y, z], 
+        to a Spherical Coordinate defined Vector: V_sphe = [r, azimuth, elevation].
+        *Angles in Radians
+        *azimuth: Azimuthal angle in xy-plane [0, 2pi]
+        *elevation: Elevation angle from xy-plane [-pi/2, pi/2]
+        **Note elevation, not inclination*.
+        """
+
+        r = np.linalg.norm(V_cart, axis=-1) # ... Unpacks to fit ndims - any actualy indexed values. i.e. [..., 1] for a (3,) unpacks to [1]
+        azimuth = np.arctan2(V_cart[..., 1], V_cart[..., 0]) # for (2, 3) it unpacks to [:, 1], (1, 2, 3) -> [:, :, 1].
+        elevation = np.where(r > 1e-15, np.arcsin(np.clip(V_cart[..., 2] / r, -1.0, 1.0)), 0.0) # Avoid div by zero errors
+        return np.stack([r, azimuth, elevation], axis=-1)
     
     @staticmethod
-    def spherical_to_cart(r: float | NDArray[np.float64], azimuth: Radians | NDArray[np.float64], elevation: Radians | NDArray[np.float64]) -> NDArray[np.float64]:
-        _r = np.asarray(r)
-        _azimuth = np.asarray(azimuth)
-        _elevation = np.asarray(elevation)
+    def sphe_to_cart(V_sphe: ArrayFloat) -> ArrayFloat:
+        """
+        Converts a Spherical Coordinate defined Vector: V_sphe = [r, azimuth, elevation],
+        to a Cartesian Coordinate defined Vector: V_cart = [x, y, z].
+        *Angles in Radians
+        *azimuth: Azimuthal angle in xy-plane [0, 2pi]
+        *elevation: Elevation angle from xy-plane [-pi/2, pi/2]
+        **Note elevation, not inclination*.
+        """
 
-        x = r * np.cos(_elevation) * np.cos(_azimuth)
-        y = r * np.cos(_elevation) * np.sin(_azimuth)
-        z = r * np.sin(_elevation)
+        _r = V_sphe[..., 0]
+        _azimuth = V_sphe[..., 1]
+        _elevation = V_sphe[..., 2]
 
-        # return np.array([x, y, z])
-        # vec = np.stack((x, y, z), axis=-1)
+        c_ele = np.cos(_elevation)
+        x = _r * c_ele * np.cos(_azimuth)
+        y = _r * c_ele * np.sin(_azimuth)
+        z = _r * np.sin(_elevation)
 
-        # if _r.ndim == 0:
-        #     return vec
-        # return vec
         return np.stack((x, y, z), axis=-1)
 
+
+# ==========================================================================================================================================================
+# Anomalies Static Class: Orbital Anomaly transformations between True, Eccentric/Hyperbolic, and Mean Anomalies. Includes conversions for Parabolic cases
+# ==========================================================================================================================================================
 
 class Anomalies:
     """
     Anomaly Toolbox - Conversions between true, eccentric and mean anomalies for Elliptic, Parabolic and Hyperbolic orbits.
-        All angles are in radians, except for parbolic mean anomaly which is dimensionless. Cardino solution used to solve the cubic from parabolic mean to true anomaly.
+        All angles are in radians, except for parbolic mean anomaly which is dimensionless. 
+        Cardino solution used to solve the cubic from parabolic mean to true anomaly.
     """
 
 
 
     @staticmethod
-    # def true_to_eccentric(theta: Union[Radians, NDArray[np.float64]], e: Union[float, NDArray[np.float64]]) -> Union[Radians, NDArray[np.float64]]:
-    def true_to_eccentric(theta: Radians | NDArray[np.float64], e: float | NDArray[np.float64]) -> Radians | NDArray[np.float64]:
+    def true_to_eccentric(theta: Radians, e: Numeric) -> Radians:
+        """True Anomaly (theta) to Eccentric/Hyperbolic Anomaly (E or H)."""
 
         # 1. Cast to numpy arrays
         _theta = np.asarray(theta, dtype=np.float64)
@@ -163,25 +180,15 @@ class Anomalies:
 
         # 7. Scalar Guard
         if _theta.ndim == 0:
-            return Radians(E.item())
+            return E.item()
         
         return E
 
     
 
     @staticmethod
-    # def eccentric_to_true(E: Radians, e: float) -> Radians:
-    def eccentric_to_true(E: Radians | NDArray[np.float64], e: float | NDArray[np.float64]) -> Radians | NDArray[np.float64]:
-
-        # if E == np.pi:
-        #     return Radians(np.pi)
-        # if e < 0:
-        #     raise ValueError(f"Eccentricity cannot be negative. Received e = {e}")
-        # if e <= 1:
-        #     tanTheta_2 = np.sqrt( (1 + e) / (1 - e)) * np.tan(E / 2)
-        # else:
-        #     tanTheta_2 = np.sqrt( (e + 1) / (e - 1)) * np.tanh(E / 2)
-        # return Radians(2*np.atan(tanTheta_2))
+    def eccentric_to_true(E: Radians, e: Numeric) -> Radians:
+        """Eccentric/Hyperbolic Anomaly (E or H) to True Anomaly (theta)."""
 
         # 1. Cast to numpy arrays
         _E = np.asarray(E, dtype=np.float64)
@@ -205,10 +212,9 @@ class Anomalies:
             e_ell = _e[ell_mask]
             E_ell = _E[ell_mask]
 
-            # tanE_2 = np.sqrt( (1.0 + e_ell) / (1.0 - e_ell) ) * np.tan(E_ell / 2.0)
             y = np.sqrt(1.0 + e_ell) * np.sin(E_ell / 2.0)
             x = np.sqrt(1.0 - e_ell) * np.cos(E_ell / 2.0)
-            # theta[ell_mask] = 2.0 * np.arctan(tanE_2)
+
             theta[ell_mask] = 2.0 * np.arctan2(y, x)
 
         # 6. Hyperbolic cases
@@ -221,22 +227,15 @@ class Anomalies:
 
         # 7. Scalar Guard
         if _E.ndim == 0:
-            return Radians(theta.item())
+            return theta.item()
         
         return theta
 
 
 
     @staticmethod
-    # def eccentric_to_mean(E: Radians, e: float) -> Radians:
-    def eccentric_to_mean(E: Radians | NDArray[np.float64], e: float | NDArray[np.float64]) -> Radians | NDArray[np.float64]:
-
-        # if e < 0:
-        #     raise ValueError(f"Eccentricity cannot be negative. Received e = {e}")
-        # if e <= 1:
-        #     return Radians(E - e*np.sin(E))
-        # else:
-        #     return Radians(e*np.sinh(E) - E)
+    def eccentric_to_mean(E: Radians, e: Numeric) -> Radians:
+        """Eccentric/Hyperbolic Anomaly (E or H) to Mean Anomaly (M)"""
 
         # 1. Cast to numpy arrays
         _E = np.asarray(E, dtype=np.float64)
@@ -257,29 +256,27 @@ class Anomalies:
 
         # 5. Ellipitcal (+ Circular) cases
         if np.any(ell_mask):
-            e_ell = _e[ell_mask]
+            # e_ell = _e[ell_mask]
             E_ell = _E[ell_mask]
 
-            # tanE_2 = np.sqrt( (1.0 + e_ell) / (1.0 - e_ell) ) * np.tan(E_ell / 2.0)
-            M[ell_mask] = E_ell - e_ell * np.sin(E_ell)
+            M[ell_mask] = E_ell - _e[ell_mask] * np.sin(E_ell)
 
         # 6. Hyperbolic cases
         if np.any(hyp_mask):
-            e_hyp = _e[hyp_mask]
+            # e_hyp = _e[hyp_mask]
             E_hyp = _E[hyp_mask]
 
-            # tanhE_2 = np.sqrt( (e_hyp + 1.0) / (e_hyp - 1.0) ) * np.tanh(E_hyp / 2.0)
-            M[hyp_mask] = e_hyp * np.sinh(E_hyp) - E_hyp
+            M[hyp_mask] = _e[hyp_mask] * np.sinh(E_hyp) - E_hyp
 
         # 7. Scalar Guard
         if _E.ndim == 0:
-            return Radians(M.item())
+            return M.item()
         
         return M
 
     @staticmethod
-    # def mean_to_eccentric(M: Radians, e: float, *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians:
-    def mean_to_eccentric(M: Radians | NDArray[np.float64], e: float | NDArray[np.float64], *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians | NDArray[np.float64]:
+    def mean_to_eccentric(M: Radians, e: Numeric, *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians:
+        """Mean Anomaly (M) to Eccentric/Hyperbolic Anomaly (E or H)"""
 
         _M = np.asarray(M, dtype=np.float64)
         _e = np.asarray(e, dtype=np.float64)
@@ -353,30 +350,69 @@ class Anomalies:
                                     f"Failed entries values: M={_M[active]}, e={_e[active]}, element mask={active}")
 
         if _M.ndim == 0:
-            return Radians(E.item())
+            return E.item()
         return E
 
 
-
-
-
     @staticmethod
-    # def true_to_mean(theta: Radians, e: float) -> Radians:
-    def true_to_mean(theta: Radians | NDArray[np.float64], e: float | NDArray[np.float64]) -> Radians | NDArray[np.float64]:
-        E = Anomalies.true_to_eccentric(theta, e)
-        M = Anomalies.eccentric_to_mean(E, e)
+    def true_to_mean(theta: Radians, e: Numeric) -> Radians | Numeric: # Merge this with the true_to_mean_parabolic! #Got to here
+        """
+        Compressed function, Converts Mean Anomaly to True Anomaly by:
+        Circular, Elliptic, Hyperbolic: theta -> E/H -> M
+        Parabolic:                      theta -> M_p
+        """
+        # E = Anomalies.true_to_eccentric(theta, e)
+        # M = Anomalies.eccentric_to_mean(E, e)
+        # return M
+        _theta = np.asarray(theta, dtype=np.float64)
+        _e = np.asarray(e, dtype=np.float64)
+        par = np.abs(_e - 1.0) < 1e-8
+        n_par = ~par
+
+        M = np.empty_like(_theta)
+        if np.any(n_par):
+            E = Anomalies.true_to_eccentric(_theta[n_par], _e[n_par])
+            M[n_par] = Anomalies.eccentric_to_mean(E, _e[n_par])
+        if np.any(par):
+            M[par] = Anomalies.true_to_mean_parabolic(_theta[par])
+
+        if _theta.ndim == 0:
+            return M.item()
         return M
 
     @staticmethod
-    # def mean_to_true(M: Radians, e: float, *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians:
-    def mean_to_true(M: Radians | NDArray[np.float64], e: float | NDArray[np.float64], *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians | NDArray[np.float64]:
-        E = Anomalies.mean_to_eccentric(M, e, tol=tol, solver=solver, max_ite=max_ite)
-        theta = Anomalies.eccentric_to_true(E, e)
+    def mean_to_true(M: Radians | Numeric, e: Numeric, *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians:
+        """
+        Compressed function, Converts True Anomaly to Mean Anomaly by:
+        Circular, Elliptic, Hyperbolic: M -> E/H -> theta
+        Parabolic:                      M_p -> theta
+        """
+        # E = Anomalies.mean_to_eccentric(M, e, tol=tol, solver=solver, max_ite=max_ite)
+        # theta = Anomalies.eccentric_to_true(E, e)
+        # return theta
+        _M = np.asarray(M, dtype=np.float64)
+        _e = np.asarray(e, dtype=np.float64)
+
+        par = np.abs(_e - 1.0) < 1e-8
+        n_par = ~par
+
+        theta = np.zeros_like(_M)
+
+        if np.any(n_par):
+            E = Anomalies.mean_to_eccentric(_M[n_par], _e[n_par], tol=tol, solver=solver, max_ite=max_ite)
+            theta[n_par] = Anomalies.eccentric_to_true(E, _e[n_par])
+
+        if np.any(par):
+            theta[par] = Anomalies.mean_to_true_parabolic(_M[par])
+
+        if _M.ndim == 0:
+            return theta.item()
         return theta
+        
 
     @staticmethod
-    # def true_to_mean_parabolic(theta: Radians) -> float:
-    def true_to_mean_parabolic(theta: Radians | NDArray[np.float64]) -> float | NDArray[np.float64]:
+    def true_to_mean_parabolic(theta: Radians) -> Numeric:
+        """Parabolic True Anomaly to Mean Anomaly, Using Cardino Solutions."""
         _theta = np.asarray(theta, dtype=np.float64)
         M_p = np.tan(_theta/2) + (1.0/3.0)*np.tan(_theta/2)**3
         
@@ -385,20 +421,22 @@ class Anomalies:
         return M_p
     
     @staticmethod
-    # def mean_to_true_parabolic(M_p: float) -> Radians:
-    def mean_to_true_parabolic(M_p: float | NDArray[np.float64]) -> Radians | NDArray[np.float64]:
+    def mean_to_true_parabolic(M_p: Numeric) -> Radians:
+        """Parabolic Mean Anomaly to True Anomaly, Solution to Cardion cubic equation s^3 + 3s - 3M_p = 0."""
         # Using the Cardino solution for a cubic equation s**3 + 3s - 3Mp = 0
-        _M_p = np.asarray(M_p, dtype=np.float64)
+        _M_p = np.asarray(M_p)
         A = 1.5 * _M_p
-        B = np.cbrt(A + np.sqrt(A**2 + 1.0), dtype=np.float64)
+        B = np.cbrt(A + np.sqrt(A**2 + 1.0))
         s = B - (1.0 / B)
-        theta = 2.0 * np.arctan(s, dtype=np.float64)
+        theta = 2.0 * np.arctan(s)
 
         if _M_p.ndim == 0:
-            return Radians(theta.item())
-        return cast(Radians | NDArray[np.float64], theta)
+            return float(theta.item())
+        return cast(Radians, theta)
 
-
+# ==========================================================================================================================================================
+# Kepler and Barker Static Classes: Time <-> Mean Anomaly conversions for basic propagation logic on all orbital types.
+# ==========================================================================================================================================================
     
 class Kepler:
     """
@@ -407,20 +445,25 @@ class Kepler:
     """
 
 
-
     @staticmethod
-    def t_to_M(mu: float | NDArray[np.float64], a: Kilometers | NDArray[np.float64], delta_t: Seconds) -> Radians | NDArray[np.float64]:
+    def t_to_M(mu: Numeric, a: Kilometers, delta_t: Seconds) -> tuple[Radians, NDArray[np.bool_]]:
+        """Change in Time to change in Mean Anomaly. **Also returns an info array which highlights which entries the function worked on."""
         _mu = np.asarray(mu, dtype=np.float64)
         _a = np.asarray(a, dtype=np.float64)
 
-        M = np.sqrt(_mu / (_a ** 3), dtype=np.float64) * delta_t
+        valid = np.abs(_a) > 1e-9
+        M = np.zeros_like(_a)
+
+        M[valid] = np.sqrt(_mu[valid] / (_a[valid] ** 3)) * delta_t
         if _mu.ndim == 0:
-            return Radians(M.item())
+            return float(M.item()), valid
         # return Radians(np.sqrt(mu / (a**3)) * delta_t)
-        return M
+        return M, valid
         
     @staticmethod
-    def M_to_t(mu: float | NDArray[np.float64], a: Kilometers | NDArray[np.float64], delta_M: Radians | NDArray[np.float64]) -> Seconds:
+    def M_to_t(mu: Numeric, a: Kilometers, delta_M: Radians) -> Seconds:
+        """Change in Mean Anomaly to change in Time. *For now only returns a homogenous time constant! 
+        **Also returns an info array which highlights which entries the function worked on."""
         _mu = np.asarray(mu, dtype=np.float64)
         _a = np.asarray(a, dtype=np.float64)
         _M = np.asarray(delta_M, dtype=np.float64)
@@ -431,8 +474,9 @@ class Kepler:
             raise NotImplementedError(f"This function expects an homogenous time constant between all entries")
         
         if t.ndim == 0:
-            return Seconds(t.item())
-        return Seconds(t[0])
+            return float(t.item())
+        return cast(Seconds, t[0]) # We'll prob return an array when we start doing orbital transfers i.e. Laplace Equation
+    
         # return Seconds(np.sqrt((a**3) / mu) * delta_M)
     
 class Barker:
@@ -442,20 +486,21 @@ class Barker:
     """
 
 
-
     @staticmethod
-    def t_to_M(mu: float | NDArray[np.float64], p: Kilometers | NDArray[np.float64], delta_t: Seconds) -> float | NDArray[np.float64]:
+    def t_to_M(mu: Numeric, p: Kilometers, delta_t: Seconds) -> Numeric:
+        """Change in Time to change in Parabolic Mean Anomaly."""
         _mu = np.asarray(mu, dtype=np.float64)
         _p = np.asarray(p, dtype=np.float64)
 
-        M = 2.0 * np.sqrt(_mu / (_p ** 3), dtype=np.float64) * delta_t
+        M = 2.0 * np.sqrt(_mu / (_p ** 3)) * delta_t
         if _mu.ndim == 0:
-            return float(M.item())
+            return M.item()
         return M
         # return float(2.0*np.sqrt(mu / (p**3)) * delta_t)
     
     @staticmethod
-    def M_to_t(mu: float | NDArray[np.float64], p: Kilometers | NDArray[np.float64], delta_M: float | NDArray[np.float64]) -> Seconds:
+    def M_to_t(mu: Numeric, p: Kilometers, delta_M: Numeric) -> Seconds:
+        """Change in Parabolic Mean Anomaly to change in Time. *For now only returns a homogenous time constant!"""
         _mu = np.asarray(mu, dtype=np.float64)
         _p = np.asarray(p, dtype=np.float64)
         _M = np.asarray(delta_M, dtype=np.float64)
@@ -466,5 +511,5 @@ class Barker:
             raise NotImplementedError(f"This function expects an homogenous time constant between all entries")
         
         if t.ndim == 0:
-            return Seconds(t.item())
-        return Seconds(t[0])
+            return t.item()
+        return cast(Seconds, t[0])
