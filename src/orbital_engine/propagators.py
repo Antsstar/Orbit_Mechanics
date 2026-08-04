@@ -37,44 +37,83 @@ class KeplerianPropagator(Propagator):
         max_capacity: int                   = len(local_states)
 
 
-        # copy = coe_states.copy()
-        parent_mu = mu_array[parent_indices]
+        # 1. Find all active bodies that are not heads
+        sib_mask = active_mask & ~is_head
+        sibs = np.where(sib_mask)[0]
 
-        KeplerianPropagator._step_anomalies(dt=dt,
-                                            coe_states=coe_states,
-                                            # mu_array=mu_array,
-                                            mu_array=parent_mu,
-                                            mask=active_mask)
+        # heads = parent_indices[sibs]
+        # Pre-allocate zeroed kicks to ensure they remain in scope.
+        kick_r = np.zeros((max_capacity, 3), dtype=np.float64)
+        kick_v = np.zeros((max_capacity, 3), dtype=np.float64)
 
+        if len(sibs) > 0:
+            # 2. Strict Parent Focus
+            parents = parent_indices[sibs]
+            mu_calc = mu_array[sibs] + mu_array[parents]
 
-        r, v, success = fr.ReferenceFrames.coe_to_rv(coe_states[active_mask], parent_mu[active_mask]) # Eventually just implement in place value returns.
-        valid_idx = np.where(active_mask)[0][success]
-        parents = parent_indices[active_mask]
-        parent_is_sys = is_system[parents]
+            # In-place Anomaly update, need to pass entire array, with mask to avoid copying.
+            KeplerianPropagator._step_anomalies(dt, coe_states, mu_array + mu_array[parent_indices], sib_mask)
 
-        if np.any(parent_is_sys):
-            m_c = mu_array[active_mask][parent_is_sys]
-            m_s = mu_array[parents][parent_is_sys]
-            m_h = m_s - m_c
+            # Generate Pure relative vectors anchored strictly to parent_indices.
+            r_rel, v_rel, success = fr.ReferenceFrames.coe_to_rv(coe_states[sibs], mu_calc)
 
-            scale = m_s / (m_h  + 1e-20) # avoid div by 0
-            r[parent_is_sys] /= scale[:, None]
-            v[parent_is_sys] /= scale[:, None]
+            valid_sibs = sibs[success]
+            valid_parents = parents[success]
 
+            # --- True Topological Filter ---
 
-        local_states[valid_idx, :3] = r[success]
-        local_states[valid_idx, 3:] = v[success] 
+            # Condition 1: Are we in a Barycentric System?
+            systems = body_sys_map[valid_sibs]
+            is_bary_sys = (systems != -1) & (is_system[systems]) # Guard to avoid -1 indexing
 
-        KeplerianPropagator._reflex_kick(local_states=local_states,
-                                         mu_array=mu_array,
-                                         mask=active_mask,
-                                         is_head=is_head,
-                                         is_system=is_system,
-                                         body_sys_map=body_sys_map,
-                                         sys_head_map=sys_head_map)
+            # Condition 2: Explicitly orbiting the System head?
+            heads = sys_head_map[valid_sibs]
+            orbits_head = valid_parents == heads
 
+            # Filter Arrays
+            is_bary_sib = is_bary_sys & orbits_head
+
+            bary_sibs = valid_sibs[is_bary_sib]
+            bary_heads = valid_parents[is_bary_sib]
+
+            if len(bary_sibs) > 0:
+                # 1. Accumulate mass-weighted relative vectors for each head
+                r_sums = np.zeros_like(kick_r)
+                v_sums = np.zeros_like(kick_v)
+                sib_mass = mu_array[bary_sibs]
+                # m_sums = np.zeros(max_capacity, dtype=np.float64)
+
+                np.add.at(r_sums, bary_heads, r_rel[success][is_bary_sib] * sib_mass[:, None])
+                np.add.at(v_sums, bary_heads, v_rel[success][is_bary_sib] * sib_mass[:, None])
+                # np.add.at(m_sums, valid_heads, sib_mass)
+
+                # total_mass = m_sums + mu_array
+                # 2. O(1) Total Mass Lookup directly from Barycenter's mu_array.
+                barycenters = body_sys_map[bary_heads]
+                total_mass = mu_array[barycenters]
+
+                # valid_sys = total_mass > 0
+                valid_sys = total_mass > 0 #& is_head
+                # print(valid_sys.shape, kick_r[valid_sys].shape)
+
+                kick_r[bary_heads[valid_sys]] = -r_sums[bary_heads[valid_sys]] / total_mass[valid_sys, None] # Just to avoid div by zero.
+                kick_v[bary_heads[valid_sys]] = -v_sums[bary_heads[valid_sys]] / total_mass[valid_sys, None]
+
+            # 3. Finalize Sibling Local States.
+            # Base state: Every sibling gets its pure relative vector from its parent.
+            local_states[valid_sibs, :3] = r_rel[success]
+            local_states[valid_sibs, 3:] = v_rel[success]
+
+            # Shift ONLY the barycentric Siblings that orbit the Head
+            local_states[bary_sibs, :3] += kick_r[bary_heads]
+            local_states[bary_sibs, 3:] += kick_v[bary_heads]
+
+        # 4. Finalize Head Local States.
+        active_heads = np.where(active_mask & is_head)[0]
+        if len(active_heads) > 0:
+            local_states[active_heads, :3] = kick_r[active_heads]
+            local_states[active_heads, 3:] = kick_v[active_heads]
         
-
 
         return
 
@@ -133,37 +172,6 @@ class KeplerianPropagator(Propagator):
             theta_col[is_parabolic] = Anomalies.mean_to_true_parabolic(new_M)
 
         coe_states[mask, 5] = theta_col
-
-    @staticmethod
-    def _reflex_kick(local_states: NDArray[np.float64], mu_array: NDArray[np.float64], mask: NDArray[np.bool_], 
-                     is_head: NDArray[np.bool_], is_system: NDArray[np.bool_], body_sys_map: NDArray[np.int32], sys_head_map: NDArray[np.int32]) -> None:
-        """Calculate position adjustment for system heads due to other bodies motion, to ensure a fixed barycenter."""
-        if not np.any(is_head):
-            return
-        
-        # child_mask = ~is_head & ~is_system & mask & (body_sys_map != -1)
-        child_mask = ~is_head & mask & (body_sys_map != -1)
-        if not np.any(child_mask):
-            return
-        
-        sys_moments = np.zeros_like(local_states)
-        mass_weighted_states = local_states[child_mask] * mu_array[child_mask, None]
-        np.add.at(sys_moments, body_sys_map[child_mask], mass_weighted_states)
-
-        head_mask = is_head & mask
-        head_sys_id = body_sys_map[head_mask]
-
-        local_states[head_mask] = -sys_moments[head_sys_id] / mu_array[head_sys_id, None]
-
-        # heads_of_children = sys_head_map[body_sys_map[child_mask]]
-        heads_of_children = sys_head_map[child_mask]
-        valid_head_mask = heads_of_children != -1
-
-        valid_children = np.where(child_mask)[0][valid_head_mask]
-        valid_heads = heads_of_children[valid_head_mask]
-
-        local_states[valid_children] += local_states[valid_heads]
-
 
 
 register_propagator(PropagatorType.KEPLERIAN, KeplerianPropagator)

@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, Integer, String, Float, JSON, ForeignKey, 
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session, relationship, Mapped, mapped_column
 
 from .constants import G
-from .custom_types import Kilograms, Kilometers, Radians, SquareMeters
+from .custom_types import ScalarKilograms, ScalarKilometers, ScalarRadians, ScalarSquareMeters
 
 
 # ==========================================================================================================================================================
@@ -54,12 +54,12 @@ class BaseBodyORM(Base):
     system_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('systems.id'), nullable=True)  # What system bubble does this belong to. I.e. Moon in Earth-Moon subsystem
 
     # Classical Orbital Elements (COE) stored at Epoch
-    p: Mapped[Optional[Kilometers]] = mapped_column(Float, nullable=True)   # Semi-latus rectum (km)
+    p: Mapped[Optional[ScalarKilometers]] = mapped_column(Float, nullable=True)   # Semi-latus rectum (km)
     e: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # Eccentricity
-    i: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True)      # Inclination (rad)
-    raan: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True)   # Right Ascension of Ascending Node (rad)
-    arg_pe: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True) # Argument of Periapsis (rad)
-    theta: Mapped[Optional[Radians]] = mapped_column(Float, nullable=True)  # True Anomaly (rad)
+    i: Mapped[Optional[ScalarRadians]] = mapped_column(Float, nullable=True)      # Inclination (rad)
+    raan: Mapped[Optional[ScalarRadians]] = mapped_column(Float, nullable=True)   # Right Ascension of Ascending Node (rad)
+    arg_pe: Mapped[Optional[ScalarRadians]] = mapped_column(Float, nullable=True) # Argument of Periapsis (rad)
+    theta: Mapped[Optional[ScalarRadians]] = mapped_column(Float, nullable=True)  # True Anomaly (rad)
 
     system = relationship("SystemORM", foreign_keys=[system_id], back_populates="members")              # All bodies in the system
     parent = relationship("BaseBodyORM", remote_side=[id], foreign_keys=[parent_id])
@@ -71,11 +71,11 @@ class BaseBodyORM(Base):
     }
 
     @property
-    def mass(self) -> Kilograms:
+    def mass(self) -> ScalarKilograms:
         return self.mu / G
     
     @mass.setter
-    def mass(self, new_mass: Kilograms) -> None:                            # Setter functions might become important for defining Parents!
+    def mass(self, new_mass: ScalarKilograms) -> None:                            # Setter functions might become important for defining Parents!
         """ Forceful mass update and recalculation of mu. Use with caution! """
         self.mu = new_mass * G
 
@@ -91,7 +91,7 @@ class CelestialBodyORM(BaseBodyORM):                                        # Ba
         'polymorphic_identity': 'celestial_body'
     }
 
-    radius: Mapped[Optional[Kilometers]] = mapped_column(Float, nullable=True)
+    radius: Mapped[Optional[ScalarKilometers]] = mapped_column(Float, nullable=True)
     classification: Mapped[Optional[str]] = mapped_column(String(50), nullable=True) # Stellar, Gas-giant, Planetary, Asteroid.
 
 class VesselORM(BaseBodyORM):                                               # Craft that we make with special propulsion methods and insignificant mass
@@ -100,9 +100,9 @@ class VesselORM(BaseBodyORM):                                               # Cr
         'polymorphic_identity': 'vessel'
     }
 
-    dry_mass: Mapped[Kilograms] = mapped_column(Float, default=0.0)
-    fuel_mass: Mapped[Optional[Kilograms]] = mapped_column(Float, nullable=True)
-    drag_area: Mapped[Optional[SquareMeters]] = mapped_column(Float, nullable=True)
+    dry_mass: Mapped[ScalarKilograms] = mapped_column(Float, default=0.0)
+    fuel_mass: Mapped[Optional[ScalarKilograms]] = mapped_column(Float, nullable=True)
+    drag_area: Mapped[Optional[ScalarSquareMeters]] = mapped_column(Float, nullable=True)
 
 class VirtualBodyORM(BaseBodyORM):                                          # Mathematical construct to help define system barycenters, 
     """Represents Barycenters and Lagrange Points."""                       # Lagrange Points, Reference Frames.
@@ -271,70 +271,5 @@ def seed_test_universe() -> None:
     print("Database Seeded Successfully.")
 
 if __name__ == "__main__":
-    # Base.metadata.create_all(engine)
-
-    # session = get_session()
-
-    # print("--- Running Orbital Engine Database Setup Wizard ---")
-
-    # seed_data: List[Dict[str, Any]] = [
-    #     {
-    #         "name": "Sun",
-    #         "parent": None,
-    #         "mu": 1.32712440042e11,
-    #         "radius": 696340.0,
-    #         "classification": "Star",
-    #         "physics_models": {},
-    #         "p": 0.0, "e": 0.0, "i": 0.0, "raan": 0.0, "arg_pe": 0.0, "theta": 0.0
-    #     },
-    #     {
-    #         "name": "Earth",
-    #         "parent": "Sun",
-    #         "mu": 3.986004418e5,
-    #         "radius": 6371.0,
-    #         "classification": "Planet",
-    #         "physics_models": {
-    #             "atmosphere": {
-    #                 "ExponentialDrag": {"rho_0": 1.225e-9, "H": 8.5, "h_0": 0.0}
-    #             }
-    #         },
-    #         "p": 149556260.0,             # p = a * (1 - e^2)
-    #         "e": 0.0167086,               
-    #         "i": 0.0,                     # Earth defines the ecliptic plane
-    #         "raan": math.radians(-11.26), # Longitude of Ascending Node
-    #         "arg_pe": math.radians(114.2),# Argument of Perihelion
-    #         "theta": math.radians(102.34) # True Anomaly at J2000
-    #     },
-    #     {
-    #         "name": "Moon",
-    #         "parent": "Earth",
-    #         "mu": 4.9048695e3,
-    #         "radius": 1737.4,
-    #         "classification": "Moon",
-    #         "physics_models": {},
-    #         "p": 383241.0,                 # p = a * (1 - e^2)
-    #         "e": 0.0549,
-    #         "i": math.radians(5.145),      # Inclination to the ecliptic
-    #         "raan": math.radians(125.08),  # RAAN
-    #         "arg_pe": math.radians(318.15),# Argument of Perigee
-    #         "theta": math.radians(115.0)   # Approximate True Anomaly at J2000
-    #     }
-    # ]
-
-    # for data in seed_data:
-    #     existing_body = session.query(CelestialBodyORM).filter_by(name=data["name"]).first()
-
-    #     if not existing_body:
-    #         new_body = CelestialBodyORM(**data) #Dictionary unpacking technique to list as keywrds=param structure.
-    #         session.add(new_body)
-    #         print(f"[+] Inserted: {data['name']} (Parent: {data['parent']})")
-    #     else:
-    #         print(f"[~] Skipped: {data['name']} already exists.")
-
-    # # Commit and close
-    # session.commit()
-    # session.close()
-
-    # print("--- Database Setup Complete ---")
     seed_test_universe()
     inspect_registry()

@@ -10,6 +10,7 @@ A 2-body orbital mechanics sandbox built to handle state-vector conversions, tra
 - **Singularity Handling**: Analytical fallbacks to handle coordinate breakdowns inherent to circular, equatorial, polar, and parabolic geometries.
 - **Invariant Validation**: Verification of state transitions using conservation of specific mechanical energy and angular momentum.
 - **Dynamic Topology Sorting:** Automated Breadth-First Search (BFS) graph stratification allowing for cyclic-dependency breaking and perfect $O(1)$ cascaded coordinate rendering.
+- **Decoupled Physics & Kinematics Graphs:** Utilizes `body_sys_map` to highlight local vectors of bodies in their respective system bubbles, and `parent_indices` to calculate the local Keplerian motion (COE) of bodies relative to their parent.
 - **Strategy Pattern Integration:** Pure separation of concerns allowing the core Simulation manager to hot-swap between Analytical Keplerian propagators and High-Fidelity numerical integrators.
 - **Package Structure**: Structured package utilizing a standard `src/` directory layout for clean downstream imports.
 

@@ -88,7 +88,8 @@ class ReferenceFrames:
         h_mag = np.linalg.norm(h, axis=-1)
 
         if np.any(h_mag < tol):
-            raise SingularityError("Velocity and displacement are parallel. Entity is not in orbit")
+            # raise SingularityError("Velocity and displacement are parallel. Entity is not in orbit")
+            pass
         
         valid = np.abs(h_mag) > 1e-9
 
