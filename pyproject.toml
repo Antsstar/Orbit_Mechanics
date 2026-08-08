@@ -31,3 +31,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --strict-markers turns a typo'd @pytest.mark.foo into an error rather than a silently ignored
+# marker; --strict-config does the same for unknown keys in this block.
+addopts = "--strict-markers --strict-config"

@@ -126,7 +126,7 @@ def test_orbit_closes_after_integer_periods(db_session, n_periods):
     assert vector_drift(v0, v1) < CLOSURE_VEL_TOL_KMS
 
 
-def test_closure_error_is_independent_of_step_size(db_session):
+def test_closure_error_is_independent_of_step_size(db_session_factory):
     """
     An analytic propagator solves Kepler's equation directly, so slicing time more finely must not
     change the answer. A numerical integrator's error would fall with dt; this one's must not move.
@@ -134,22 +134,20 @@ def test_closure_error_is_independent_of_step_size(db_session):
     This is what distinguishes "analytic" from "accidentally accurate at the step size we happened
     to test", and it is the check that will fail loudly if the propagator is ever swapped for a
     numerical one without the test suite being told.
+
+    Uses the factory fixture so each step size gets a genuinely independent database rather than
+    sharing one and deleting rows between runs - a shared session would let state from the previous
+    iteration leak into the next.
     """
     period = _orbital_period(SEMI_MAJOR_KM, EARTH_MU)
     residuals = []
 
     for n_steps in (10, 100, 1000):
-        sim = _build_two_body(db_session)
+        sim = _build_two_body(db_session_factory())
         r0, _ = _state(sim, "Satellite")
         sim.run(period, period / n_steps)
         r1, _ = _state(sim, "Satellite")
         residuals.append(vector_drift(r0, r1))
-
-        # Each run reseeds the same names, so clear the session for the next iteration.
-        db_session.rollback()
-        for orm in db_session.query(CelestialBodyORM).all():
-            db_session.delete(orm)
-        db_session.commit()
 
     assert all(res < CLOSURE_POS_TOL_KM for res in residuals), residuals
 

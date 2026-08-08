@@ -1,22 +1,58 @@
+"""
+Shared pytest fixtures.
+
+Every test gets its own isolated in-memory database. Nothing here touches the git-tracked
+`src/orbital_engine/data/planets.db`, and nothing should ever be added that does.
+"""
+from __future__ import annotations
+
+from typing import Callable, Iterator, List, Tuple
+
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
 from orbital_engine.database import Base
 
-@pytest.fixture(scope="function") # Every test function will get a new database session
-def db_session():
+
+@pytest.fixture
+def db_session_factory() -> Iterator[Callable[[], Session]]:
     """
-    Creates a fresh, isolated in-memory SQLite database for every test.
+    Returns a callable that produces an independent, empty in-memory database on each call.
+
+    Use this when one test needs several databases that must not see each other's rows - for example
+    running the same scenario at three step sizes without the second run inheriting the first's
+    bodies. For the ordinary single-database case use `db_session` below.
+
+    Why StaticPool: every new connection to `sqlite:///:memory:` gets its *own* fresh database. With
+    the default pool a second connection would silently open an empty one, so a session that looked
+    connected would find no tables. StaticPool holds a single connection for the engine's lifetime,
+    which is what makes the in-memory database stable across sessions built from it.
     """
+    created: List[Tuple[Engine, Session]] = []
 
-    engine = create_engine("sqlite:///:memory:", echo=False) # Define a memory location for database
-    Base.metadata.create_all(engine) # Create the database schema at that memory location
+    def _make() -> Session:
+        engine = create_engine(
+            "sqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        created.append((engine, session))
+        return session
 
-    SessionLocal = sessionmaker(bind=engine)
-    session = SessionLocal()
+    yield _make
 
-    yield session # <--- This is where testing happens,
+    # Teardown runs even when the test fails, so a raised assertion cannot leak connections.
+    for engine, session in created:
+        session.close()
+        engine.dispose()  # The in-memory database ceases to exist with its last connection.
 
-    # - Cleanup after testing has finished
-    session.close()
-    Base.metadata.drop_all(engine)
+
+@pytest.fixture
+def db_session(db_session_factory: Callable[[], Session]) -> Session:
+    """A single fresh in-memory database. The common case."""
+    return db_session_factory()
