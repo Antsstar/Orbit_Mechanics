@@ -14,6 +14,18 @@ class PropagatorType(enum.IntEnum):
     SGP4        = 5 # LEO Analytical Drag & J2-J4 Harmonics
     LUNAR_MASCON= 6 # Lunar-centric high-fidelity gravity field
 
+class COEIndex(enum.IntEnum):
+    """
+    Helper class, column indices for Classical Orbital Elements (COE) arrays.
+    *Special Cases such as **True longitude of perapsis**, **True argument of latitude**, and **True longitude** reduce to fit by zeroing respective entries*
+    """
+    P           = 0 # Semi-Latus rectum (km) p = h^2 / mu
+    E           = 1 # Eccentricity
+    I           = 2 # Inclination (rad)
+    RAAN        = 3 # Right Ascension of the Ascending Node (Omega, rad)
+    ARG_PE      = 4 # Argument of Periapsis (omega, rad)
+    THETA       = 5 # True Anomaly (rad)
+
 
 # ==========================================================================================================================================================
 # Core Data-oriented types

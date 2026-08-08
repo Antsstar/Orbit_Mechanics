@@ -1,16 +1,15 @@
 # Classical Orbital Elements definitions and Body-fixed <-> Inertial Reference frame transformations.
 
 from __future__ import annotations
-import enum
 import numpy as np
 from numpy.typing import NDArray
-from .custom_types import Radians, Kilometers, Seconds, ArrayFloat, Numeric
+from .custom_types import COEIndex, Radians, Kilometers, Seconds, ArrayFloat, Numeric
 from typing import Optional, cast
 from .utilities import Transformations, Anomalies, Kepler, Barker
 from .exceptions import SingularityError
 
 # ==========================================================================================================================================================
-# Helper functions. Vector math and indexing definitions
+# Helper functions. Vector math
 # ==========================================================================================================================================================
 
 def angle(a: ArrayFloat, b: ArrayFloat, n: Optional[ArrayFloat] = None) -> Radians:
@@ -29,19 +28,6 @@ def angle(a: ArrayFloat, b: ArrayFloat, n: Optional[ArrayFloat] = None) -> Radia
     if a.ndim == 1 and b.ndim == 1:
         return theta.item()
     return theta
-
-
-class COEIndex(enum.IntEnum):
-    """
-    Helper class, column indices for Classical Orbital Elements (COE) arrays.
-    *Special Cases such as **True longitude of perapsis**, **True argument of latitude**, and **True longitude** reduce to fit by zeroing respective entries*
-    """
-    P           = 0 # Semi-Latus rectum (km) p = h^2 / mu
-    E           = 1 # Eccentricity
-    I           = 2 # Inclination (rad)
-    RAAN        = 3 # Right Ascension of the Ascending Node (Omega, rad)
-    ARG_PE      = 4 # Argument of Periapsis (omega, rad)
-    THETA       = 5 # True Anomaly (rad)
 
 # ==========================================================================================================================================================
 # ReferenceFrames Static Class: Orbital focused, Cartesian Vectors <-> Classical Orbital Elements, Reference frame transition body-fixed or inertial frame.
