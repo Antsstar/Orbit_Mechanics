@@ -1,135 +1,196 @@
 # OrbitalEngine
 [![Orbital Engine CI](https://github.com/Antsstar/Orbit_Mechanics/actions/workflows/ci.yml/badge.svg)](https://github.com/Antsstar/Orbit_Mechanics/actions/workflows/ci.yml)
 
-A 2-body orbital mechanics sandbox built to handle state-vector conversions, trajectory propagation, and orbital classifications. Developed to serve as the baseline physics utility for a planned satellite network constellation emulator.
+A hierarchical orbital mechanics engine built on Data-Oriented Design, developed as an educational
+platform for comparing orbital models against one another.
 
-## Core Functionality
-
-- **Barycentric ECS Engine:** A strict Data-Oriented Design (DOD) memory arena capable of effortlessly hot-swapping between isolated 2-Body Point-Mass physics and complex N-Body Barycentric wobbles via a unified vectorized pipeline.
-- **State Space Transformations**: Bi-directional conversion between Cartesian state vectors (r, v) and Classical Orbital Elements (COE).
-- **Singularity Handling**: Analytical fallbacks to handle coordinate breakdowns inherent to circular, equatorial, polar, and parabolic geometries.
-- **Invariant Validation**: Verification of state transitions using conservation of specific mechanical energy and angular momentum.
-- **Dynamic Topology Sorting:** Automated Breadth-First Search (BFS) graph stratification allowing for cyclic-dependency breaking and perfect $O(1)$ cascaded coordinate rendering.
-- **Decoupled Physics & Kinematics Graphs:** Utilizes `body_sys_map` to highlight local vectors of bodies in their respective system bubbles, and `parent_indices` to calculate the local Keplerian motion (COE) of bodies relative to their parent.
-- **Strategy Pattern Integration:** Pure separation of concerns allowing the core Simulation manager to hot-swap between Analytical Keplerian propagators and High-Fidelity numerical integrators.
-- **Package Structure**: Structured package utilizing a standard `src/` directory layout for clean downstream imports.
-
+**Direction.** Most astrodynamics libraries treat *running a simulation* as the primary operation.
+This one is being built the other way round: the intended main loop is a **sweep** — one scenario run
+under many model configurations, diffed against a common reference — so that the effect of a
+modelling assumption on accuracy, stability and runtime is a measurable output rather than a
+footnote. Model configurations are therefore designed to be enumerable data, not code paths.
 
 ---
 
-## Directory Architecture
+## Current capabilities
 
-The repository isolates core engine logic from exploratory analysis and testing configurations:
+- **Barycentric DOD arena.** All state lives in flat, pre-allocated NumPy arrays indexed by integer
+  slot; no object owns per-body state. The same vectorised pipeline handles isolated two-body
+  point-mass motion and nested N-body barycentric systems, selected by how the scenario is
+  described rather than by branching in the physics.
+- **Decoupled physics and kinematics graphs.** `parent_indices` records what a body's orbital
+  elements are measured against; `body_sys_map` records what its Cartesian state is measured
+  against. The two deliberately diverge — the Moon's elements are relative to Earth while its
+  position is relative to the Earth–Moon barycenter.
+- **Topological stratification.** A vectorised breadth-first sort groups bodies into dependency
+  tiers so each tier resolves in one array operation, and sibling bodies within a system are
+  processed together as barycentric calculations require.
+- **State-space transformations.** Bidirectional Cartesian ↔ classical orbital elements, vectorised
+  over `(N, 6)` inputs, with analytic fallbacks for the circular, equatorial, polar and parabolic
+  singularities and a success mask for states that admit no valid orbit.
+- **Full anomaly stack.** True ↔ eccentric ↔ mean for elliptic, parabolic and hyperbolic regimes,
+  with Newton–Raphson and successive-substitution solvers, plus Kepler's and Barker's equations.
+- **Reflex-kick barycenters.** A head body wobbles about its own system's centre of mass rather than
+  sitting fixed, which keeps angular momentum well defined when a system's members are only
+  partially loaded.
+
+Column 0 of the element array is the **semi-latus rectum** `p`, not the semi-major axis, so parabolic
+trajectories stay representable throughout.
+
+### Not yet wired
+
+Propagators are written as stateless kernels and a registry exists, but `Simulation.step()` currently
+calls the Keplerian propagator directly rather than dispatching through it. Perturbation models,
+numerical integrators and the sweep harness are in progress. See `CLAUDE.md` for the current state of
+play, including known-broken code.
+
+---
+
+## Verification
+
+| | |
+|---|---|
+| Tests | 120 passing |
+| Type checking | `mypy --strict`, clean across 11 modules |
+| CI | GitHub Actions on Python 3.10 / 3.11 / 3.12, every branch |
+| Coverage | 72% overall |
+
+The suite is split along the **Verification and Validation** distinction used in computational
+science — *are we solving the equations right* versus *are we solving the right equations*:
 
 ```text
-orbital_engine/
-├── .github/workflows/   # GitHub Actions multi-version CI configuration
-├── notebooks/           # Reference derivations and data visualizations
-├── src/                 # Source directory
-│   └── orbital_engine/  # Core package namespace
-│       ├── __init__.py  
-│       ├── body.py      # DOD BodyHandle Dataclass
-│       ├── constants.py # Classic unit conversions or gravitational constants.
-│       ├── custom_types.py# Type Aliases (e.g., Kilometers, Radians)
-│       ├── database.py  # SQLAlchemy ORM and Setup Wizard
-│       ├── exceptions.py# Custom exceptions like NonConvergenceError
-│       ├── frames.py    # Coordinate and state space transformations
-│       ├── propagators.py# Analytical Keplerian and Barker solvers
-│       ├── registry.py  # String to Function handle mapper for usable models.
-│       ├── simulator.py # Simulation control loops, DOD Memory Arena & Matrix Allocation.
-│       └── utilities.py # Orbital anomaly and math utilities
-│       └── data/        # Database
-│           └── planets.db
-├── tests/               # Pytest suite
-├── CHANGELOG.md/        
-├── README.md/           
-└── pyproject.toml       # Package metadata and installation configuration
+tests/
+├── unit/         # Isolated transformations. Analytic geometries and round-trip properties.
+├── integration/  # ORM polymorphism and simulation construction from the database.
+└── validation/   # Physical correctness against closed-form and conserved-quantity references.
+```
+
+**Validation tests assert a stated expected error magnitude, not merely that nothing crashed.** This
+is deliberate: the failure mode in orbital mechanics is rarely an exception. A sign error or a
+transposed term produces a trajectory that integrates cleanly, plots plausibly, and is wrong by a few
+percent. Some examples of what the suite pins down:
+
+- **Conserved quantities.** Specific energy and angular momentum over a full orbit; angular momentum
+  is compared as a *vector*, since a propagator that preserved `|h|` while rotating the orbital plane
+  would pass a magnitude check and still be wrong.
+- **Step-size independence.** An analytic propagator solves Kepler's equation in closed form, so its
+  closure error must not scale with `dt`. Measured flat from 1e-11 to 7e-10 km across 10/100/1000
+  steps per period. This also acts as a tripwire if the propagator is ever silently replaced by a
+  numerical one.
+- **Barycentric mass moments.** `mu_Sun·r_Sun + mu_EMB·r_EMB = 0` is a definition rather than an
+  approximation, so it holds to floating-point noise and any error in the mass aggregation or the
+  reflex kick surfaces immediately as a drifting centre of mass.
+- **Predicted discrepancies.** The Earth–Moon barycenter does *not* inherit Earth's seeded ellipse;
+  it differs by `Δp/p ≈ 2·Δv/v ≈ 8.5e-4`, derived from Earth's monthly circulation about the
+  barycenter. The test asserts that prediction, with a lower bound so a collapsed barycenter cannot
+  satisfy it trivially.
+- **Reproducible randomness.** Property tests seed an explicit `np.random.default_rng`, so a failure
+  can be replayed exactly and no global state leaks between tests.
+
+---
+
+## Directory layout
+
+```text
+Orbit_Mechanics/
+├── .claude/agents/      # Subagent definitions with model and effort pinned per task type
+├── .github/workflows/   # Multi-version CI
+├── docs/
+│   ├── historical/      # Superseded design documents, retained for provenance only
+│   └── model-delegation.md
+├── notebooks/           # Derivations and visualisation
+├── src/orbital_engine/
+│   ├── body.py          # BodyHandle dataclass (arena pointer, not state)
+│   ├── constants.py     # Physical and unit constants
+│   ├── custom_types.py  # Type aliases and column-index enums
+│   ├── database.py      # Polymorphic SQLAlchemy 2.0 ORM
+│   ├── exceptions.py    # Domain-specific error hierarchy
+│   ├── frames.py        # Coordinate and state-space transformations
+│   ├── propagators.py   # Stateless propagation kernels
+│   ├── registry.py      # Model and propagator registration
+│   ├── simulator.py     # DOD memory arena and simulation control
+│   ├── utilities.py     # Anomalies, Kepler, Barker, rotations, perturbations
+│   └── data/planets.db
+├── tests/
+├── CLAUDE.md            # Engine ground truth: invariants, conventions, known-broken code
+└── pyproject.toml
 ```
 
 ---
 
-## Installation and Setup
-
-### 1. Environment Isolation
-Isolate the workspace using Conda or your preferred virtual environment manager:
+## Installation
 
 ```bash
 conda create -n orbital_env python=3.11 -y
 conda activate orbital_env
+pip install -e ".[dev,test]"
 ```
 
-### 2. Editable Development Installation
-Install the package in editable mode along with development and testing dependencies:
+Editable mode links the source into the environment so changes propagate to the notebooks
+immediately.
 
 ```bash
-pip install -e ".[dev, test]"
+pytest                    # test suite
+mypy src/ --strict        # type checking
+pytest --cov=orbital_engine --cov-report=term-missing
 ```
 
-Using the `-e` flag links the source code to your environment, allowing modifications to propagate instantly when importing the engine inside the `notebooks/` directory.
+> **Note.** Do not run `python -m orbital_engine.simulator`. Its `__main__` block calls
+> `seed_test_universe()`, which drops and rewrites the git-tracked database. Build an in-memory
+> SQLite session the way `tests/conftest.py` does instead.
 
 ---
 
-## Code Verification Examples
-
-Click to expand the examples below to see standard execution routines for the engine.
+## Usage
 
 <details>
-<summary><b>State Vector to Classical Orbital Elements (rv_to_coe)</b></summary>
+<summary><b>State vector to classical orbital elements</b></summary>
 
 ```python
 import numpy as np
-import orbital_engine.frames as rf
+from orbital_engine.frames import ReferenceFrames
 
 mu = 398600.4418
 r = np.array([7000.0, 0.0, 0.0])
 v = np.array([0.0, np.sqrt(mu / 7000.0), 0.0])
 
-coe = rf.rv_to_coe(r, v, mu)
-print(coe)
+coe, success = ReferenceFrames.rv_to_coe(r, v, mu)
+# coe -> [p, e, i, RAAN, arg_pe, theta]; success flags states with no valid orbit
 ```
 </details>
 
 <details>
-<summary><b>Classical Orbital Elements to State Vector (coe_to_rv)</b></summary>
+<summary><b>Classical orbital elements back to a state vector</b></summary>
 
 ```python
-import orbital_engine.frames as rf
-
-# Resolves coordinate singularities natively via omega_true fallback logic
-r_out, v_out = rf.coe_to_rv(coe, mu)
-print(f"Position Vector: {r_out}")
-print(f"Velocity Vector: {v_out}")
+r_out, v_out, valid = ReferenceFrames.coe_to_rv(coe, mu)
 ```
+
+Both directions are vectorised: pass `(N, 3)` or `(N, 6)` arrays to convert many bodies at once.
+Coordinate singularities resolve through analytic fallbacks rather than raising.
 </details>
 
 ---
 
-## Testing and Verification
+## Roadmap
 
-To prevent floating-point drift and logic regressions, the engine relies on an automated test suite executed via `pytest`.
+Ordered so that each stage makes the next one safe rather than merely possible.
 
-```bash
-# Run the test suite from the project root
-pytest
-```
+1. **Validation infrastructure** — reference-data ingestion, invariant and convergence-order
+   harnesses. In progress; this is what makes later physics safe to accept quickly.
+2. **Arena compaction and compiled kernels** — dense active-slot packing so hot-loop operations are
+   contiguous views rather than gathers, then Numba on the kernels.
+3. **Force-model interface and event system** — bitmask composition so enabling a perturbation is a
+   value rather than a code path, plus exact-time event handling for impulsive manoeuvres.
+4. **Benchmark harness** — scenario sweeps across model configurations, reporting error against
+   reference versus wall time.
+5. **Model library** — geopotential harmonics, atmospheric drag across fidelity tiers, solar
+   radiation pressure with shadow geometry, third-body perturbations, continuous and impulsive
+   thrust, Cowell and Encke formulations, symplectic integrators, and an SGP4 bridge.
+6. **Constellation and inter-satellite link modelling** — the eventual application this engine is
+   being shaped for.
 
-To run the strict type-checker:
-```bash
-# Run mypy from project root
-mypy src/ --strict
-```
-
-### Test Strategy
-* **Property-Based Fuzzing**: Generates 100+ randomized, valid state vectors to verify that round-trip conversions (`rv_to_coe` to `coe_to_rv`) resolve back to original inputs within fixed limits.
-* **Boundary Validation**: Generates mathematically exact geometric edge cases (e.g., forcing orthogonal position and velocity vectors via cross-products) to ensure stability at classification limits.
-* **Continuous Integration**: GitHub Actions runs the test matrix automatically on every push, validating compatibility across Python 3.10, 3.11, and 3.12.
-
----
-
-## Planned Extensions
-
-- **Analytical Perturbation Theories**: Implement variation of parameters formulations utilizing Gauss Variational Equations (GVE) and Lagrange Planetary Equations (LPE) to track secular element drift.
-- **High-Fidelity Numerical Propagation**: Integrate specialized differential equation solvers, specifically implementing Cowell’s formulation for direct integration and Encke’s method for tracking deviations from a reference osculating orbit.
-- **Symplectic & Geometric Integrators**: Develop structure-preserving symplectic integration algorithms to minimize artificial energy drift during long-duration chaotic n-body simulations.
-- **Environmental Perturbation Forces**: Incorporate non-Keplerian acceleration models, including atmospheric drag profiles, high-degree geopotential harmonics (e.g., J2), and solar radiation pressure.
-- **Trajectory Maneuver Loops**: Implement impulsive delta-v burns and continuous low-thrust propulsion profiles to support constellation deployment and station-keeping control logic.
+Established external implementations are wrapped rather than reimplemented — SGP4, atmospheric
+density models, planetary ephemerides and IAU frame/time transformations all have well-tested
+libraries, and the interesting question here is how models *compare*, not whether they can be
+retyped.
