@@ -128,6 +128,13 @@ interchange format between representations.
 
 ---
 
+## Check before debugging
+
+`docs/engineering-log.md` records problems already hit on this project and how they were resolved —
+environment quirks, traps in the code, and mistakes made while working on it. Check it when
+something behaves unexpectedly; it is cheaper than rediscovering. Add to it when a problem costs you
+more than a few minutes.
+
 ## Do not trust
 
 `docs/historical/` is superseded material kept for provenance only. It describes modules that were
