@@ -57,6 +57,9 @@ class Simulation:
         self.propagator_type = np.full(max_capacity, PropagatorType.KEPLERIAN,dtype=np.uint8)       # Likely won't be implemented yet
         self.sys_head_map = np.full(max_capacity, -1, dtype=np.int32)       # Systems refer to sibling heads, while bodies refer to siblings head
 
+        # Scalar potential field
+        self.g_env = np.zeros((max_capacity, 3), dtype=np.float64)
+
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
 

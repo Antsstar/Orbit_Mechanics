@@ -3,8 +3,8 @@
 from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
-from .custom_types import Radians, Kilometers, Seconds, ArrayFloat, ScalarFloat, Numeric, GravitationalParameter
-from typing import Union, cast, overload
+from .custom_types import COEIndex, Radians, Kilometers, Seconds, ArrayFloat, ScalarFloat, Numeric, GravitationalParameter
+from typing import Union, Optional, cast, overload
 from .exceptions import ConvergenceError
 
 
@@ -513,3 +513,67 @@ class Barker:
         if t.ndim == 0:
             return t.item()
         return cast(Seconds, t[0])
+
+# ==========================================================================================================================================================
+# Perturbations Static Class: VoP Approach
+# ==========================================================================================================================================================
+class Perturbations:
+    """
+    Toolbox consisting of special methods for modeling orbital perturbations. Well known methods consist of Cowell's and Encke's methods of "kicks",
+    and Varitation of Parameters (VoP) approaches such as Gauss Variational Parameters (GVP) and Lagrange Planetary Equations (LPE).
+    """
+    @staticmethod
+    def GVP_COE(coe: ArrayFloat, a_rsw: ArrayFloat, mu: GravitationalParameter, *, out_rates: Optional[ArrayFloat] = None) -> ArrayFloat:
+        """
+        Maps the net (N, 3) perturbing acceleration `a_rsw` into an (N, 6) array of COE rates of change.
+        """
+
+        # Extraction
+        p = coe[..., COEIndex.P]
+        e = coe[..., COEIndex.E]
+        i = coe[..., COEIndex.I]
+        # Omega = coe[..., COEIndex.RAAN]
+        omega = coe[..., COEIndex.ARG_PE]
+        theta = coe[..., COEIndex.THETA]
+
+        a_R = a_rsw[..., 0]
+        a_S = a_rsw[..., 1]
+        a_W = a_rsw[..., 2]
+
+        h = np.sqrt(mu * p)
+        r = p / (1.0 + e + np.cos(theta))
+
+        if out_rates is not None:
+            rates = np.atleast_2d(out_rates)
+        else:
+            rates = np.zeros_like(coe)
+
+        # dp/dt
+        rates[..., COEIndex.P] = (2.0 * p / h) (p / r) * a_S
+
+        # de/dt
+        rates[..., COEIndex.E] = (1.0 / h) * (
+                                p * np.sin(theta) * a_R + 
+                                ((p + r) * np.cos(theta) + r * e) * a_S
+                            )
+
+        # di/dt
+        rates[..., COEIndex.I] = (r / h) * np.cos(theta + omega) * a_W
+
+        # dOmega/dt (RAAN)
+        sin_i = np.sin(i)
+        safe_sin_i = np.where(sin_i == 0, 1e-12, sin_i)
+
+        rates[..., COEIndex.RAAN] = (r / (h * safe_sin_i)) * np.sin(theta + omega) * a_W
+
+        # domega/dt (Argument of Periapsis)
+        safe_e = np.where(e == 0, 1e-17, e)
+
+        term_1 = (1.0 / (h * safe_e)) * (-p * np.cos(theta) * a_R + (p + r) * np.sin(theta) * a_S)
+        term_2 = rates[..., COEIndex.RAAN] * np.cos(i)
+        rates[..., COEIndex.ARG_PE] = term_1 - term_2
+
+        # dtheta/dt (True anomaly)
+        rates[..., COEIndex.THETA] = (h / (r**2)) + (1.0 / (h * safe_e)) + (p * np.cos(theta) * a_R - (p + r) * np.sin(theta) * a_S)
+
+        return rates
