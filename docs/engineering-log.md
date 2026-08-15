@@ -319,6 +319,23 @@ changing either side.**
 
 ---
 
+### PowerShell here-strings break on embedded double quotes
+
+**Symptom.** `git commit -m @'...'@` failed with `error: pathspec 'Python' did not match any file(s)`.
+The commit message had been split into separate git arguments.
+
+**Cause.** The message contained a double-quoted phrase. A single-quoted here-string should treat it
+literally, but when the command is wrapped and re-parsed by the tooling layer the quotes terminate
+the string early, and the remainder of the message reaches git as pathspecs.
+
+**Fix.** Write the message to a file and use `git commit -F <file>`. Robust regardless of message
+content — quotes, backticks, `$`, apostrophes.
+
+**How to avoid.** Use `-F` for any commit message longer than one line. The failure is loud here
+because git rejected it, but the same class of quoting bug can silently truncate a message instead.
+
+---
+
 ### PowerShell `Select-Object -First N` reports a false failure
 
 **Symptom.** `python benchmarks/bench_step.py 2>&1 | Select-Object -First 8` exited with code 255 and
