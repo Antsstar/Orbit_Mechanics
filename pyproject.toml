@@ -25,12 +25,18 @@ dependencies = [
 perf = [
     "numba>=0.60"
 ]
+# Independent truth generation for validation. scipy is needed only by reference.py, which no part
+# of the engine imports at runtime, so it stays out of the base install.
+reference = [
+    "scipy>=1.10"
+]
 test = [
     "pytest",
     "pytest-cov",  # Helpful for seeing which lines of code aren't tested yet
     "mypy",
     "pandas-stubs",
-    "numba>=0.60"  # Included so CI gates the compiled path, not only the fallback.
+    "numba>=0.60",  # Included so CI gates the compiled path, not only the fallback.
+    "scipy>=1.10"   # Needed by tests/validation/test_reference_agreement.py.
 ]
 dev = [
     "ipykernel",
@@ -40,8 +46,18 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# scipy ships no type information and scipy-stubs is a separate, partial package. reference.py is
+# the only module that touches it, behind a lazy import, so silencing it here is narrower than
+# taking on a stub dependency that CI would then have to keep in step.
+[[tool.mypy.overrides]]
+module = ["scipy.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # --strict-markers turns a typo'd @pytest.mark.foo into an error rather than a silently ignored
 # marker; --strict-config does the same for unknown keys in this block.
 addopts = "--strict-markers --strict-config"
+markers = [
+    "perf: architectural scaling invariants, timed. Ratios between configurations rather than absolute thresholds, but still timing-dependent -- deselect with -m 'not perf' on a contended machine.",
+]

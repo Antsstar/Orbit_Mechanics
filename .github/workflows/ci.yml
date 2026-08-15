@@ -59,9 +59,11 @@ jobs:
         python-version: "3.12"
 
     - name: Install without the perf extra
+      # scipy comes in via [reference] because the reference-trajectory tests should run here too;
+      # numba is the only thing deliberately withheld.
       run: |
         python -m pip install --upgrade pip
-        pip install -e .
+        pip install -e ".[reference]"
         pip install pytest pytest-cov mypy pandas-stubs
 
     - name: Confirm numba is absent
