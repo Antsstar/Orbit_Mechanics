@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from typing import List, Optional, Any, cast
 from .custom_types import ScalarSeconds, PropagatorType
 from numpy.typing import NDArray
@@ -12,6 +13,11 @@ from .propagators import Propagator, KeplerianPropagator
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
 from . import frames as fr
+
+# A library must not write to stdout. Build-time diagnostics go to the logger, where an application
+# can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
+logger = logging.getLogger(__name__)
+
 
 class Simulation:
     """
@@ -96,7 +102,7 @@ class Simulation:
 
         # print(all_orm_bodies)
         sys_barycenters = set(getattr(id, 'barycenter_id', -1) for _, id in all_orm_bodies)     # Index of all barycenters in simulation.
-        print(sys_barycenters)
+        logger.debug("Barycenter ids in scenario: %s", sys_barycenters)
 
         for orm_body, associated_sys in all_orm_bodies:
             idx = self.free_indices.pop()
@@ -118,9 +124,10 @@ class Simulation:
             if getattr(associated_sys, 'head_body_id', None) == orm_body.id:
                 self.is_head[idx] = True
         
-        print(self.name_to_index)
-        print(self.is_system[self.active_mask]) # Interesting behaviour. An empty barycenter isn't seen as a system (because noone references it!)
-        print(self.is_head[self.active_mask])   # I think that's fine honestly.
+        # Note: an unreferenced barycenter is not flagged as a system, because nothing points at it.
+        logger.debug("Slot map: %s", self.name_to_index)
+        logger.debug("is_system: %s", self.is_system[self.active_mask])
+        logger.debug("is_head:   %s", self.is_head[self.active_mask])
 
         for orm_body, associated_sys in all_orm_bodies:
             idx = self.name_to_index[orm_body.name]
@@ -145,13 +152,13 @@ class Simulation:
 
         self._build_sys_head_map()  # Build a mapping from each body to the head of its local system bubble, allowing for efficient lookups.
 
-        print(self.parent_indices[self.active_mask])
-        print(self.body_sys_map[self.active_mask])
-        print(self.sys_head_map[self.active_mask])
-        # print(self.name_to_index)
+        logger.debug("parent_indices: %s", self.parent_indices[self.active_mask])
+        logger.debug("body_sys_map:   %s", self.body_sys_map[self.active_mask])
+        logger.debug("sys_head_map:   %s", self.sys_head_map[self.active_mask])
+
         self._topological_sort(self.parent_indices) # Topological sort based on DB parent_indices. Provides an schematic for the initial positions of all bodies.
         self._unfold_database_to_global() # Using our topological map, compute global positions for all bodies based on local states and reference parents.
-        print(self.parent_indices[self.active_mask])
+        logger.debug("parent_indices after unfold: %s", self.parent_indices[self.active_mask])
 
         # Re-sort based on system mapping, This means barycentric referencing (and point-mass in extremes) for all bodies.
         self._topological_sort(self.body_sys_map)   # This ensures all siblings (+head) are processed at the same step, allowing for proper barycentric calculations.
@@ -160,9 +167,9 @@ class Simulation:
         self._rehydrate_coes()                      # Recompute the local states and coes based on new global positions and parenting. Also provides barycenters coe values.
 
         
-        loaded_count = sum(self.active_mask)
-        print(f"Universe Built: {loaded_count} bodies loaded.")
-        print(f"Mass Array: {self.mu_array[:loaded_count]}")
+        loaded_count = int(np.count_nonzero(self.active_mask))
+        logger.info("Universe built: %d slots loaded.", loaded_count)
+        logger.debug("mu_array: %s", self.mu_array[:loaded_count])
     
 
     def _resolve_circular(self) -> None:
@@ -173,7 +180,7 @@ class Simulation:
 
         circular_mask = self.active_mask & (gp_idx == idx) & (p_idx != idx)
         if np.any(circular_mask):
-            print(circular_mask[self.active_mask])
+            logger.debug("Circular parent pairs detected: %s", circular_mask[self.active_mask])
             mu_self = self.mu_array
             mu_parent = self.mu_array[p_idx]
 
@@ -240,8 +247,8 @@ class Simulation:
             self.topological_tiers.append(next_tier)
             processed_count += len(next_tier)
             current_tier = next_tier
-        
-        print(self.topological_tiers)
+
+        logger.debug("Topological tiers: %s", self.topological_tiers)
 
     def _unfold_database_to_global(self) -> None:
         tier_0 = self.topological_tiers[0]

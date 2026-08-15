@@ -17,12 +17,19 @@ someone's analysis six months later.
 """
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
-from orbital_engine.database import CelestialBodyORM, SystemORM, VirtualBodyORM
+from orbital_engine.scenarios import (
+    EARTH_E,
+    EARTH_P,
+    MOON_E,
+    MOON_P,
+    MU_EARTH,
+    MU_MOON,
+    MU_SUN,
+    sun_earth_moon,
+)
 from orbital_engine.simulator import Simulation
 
 from .invariants import (
@@ -33,73 +40,15 @@ from .invariants import (
     vector_drift,
 )
 
-MU_SUN = 1.32712440042e11   # km^3/s^2
-MU_EARTH = 3.986004418e5
-MU_MOON = 4.9048695e3
-
-EARTH_P = 149556260.0       # semi-latus rectum, km
-EARTH_E = 0.0167086
-MOON_P = 383241.0
-MOON_E = 0.0549
-
 SIM_DURATION_S = 365.25 * 86400.0
 SIM_STEP_S = 12.0 * 3600.0
 
-
-def _build_sun_earth_moon(session) -> Simulation:
-    """
-    Sun at the head of the Solar System; Earth at the head of a nested Earth-Moon system whose
-    barycenter is itself a member of the Solar System.
-
-    This is the configuration that makes the two graphs diverge: the Moon's COE is measured against
-    Earth (`parent_indices`), while its Cartesian state is measured against the Earth-Moon
-    barycenter (`body_sys_map`).
-    """
-    ssb = VirtualBodyORM(name="SSB")
-    emb = VirtualBodyORM(name="EMB")
-    session.add_all([ssb, emb])
-    session.flush()
-
-    solar = SystemORM(name="Solar System", barycenter_id=ssb.id)
-    earth_moon = SystemORM(name="Earth-Moon System", barycenter_id=emb.id)
-    session.add_all([solar, earth_moon])
-    session.flush()
-
-    sun = CelestialBodyORM(
-        name="Sun", mu=MU_SUN, system_id=solar.id, radius=696340.0,
-        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
-    )
-    session.add(sun)
-    session.flush()
-    solar.head_body_id = sun.id
-
-    earth = CelestialBodyORM(
-        name="Earth", mu=MU_EARTH, system_id=earth_moon.id, parent_id=sun.id, radius=6371.0,
-        p=EARTH_P, e=EARTH_E, i=0.0,
-        raan=math.radians(-11.26), arg_pe=math.radians(114.2), theta=math.radians(102.34),
-    )
-    session.add(earth)
-    session.flush()
-    earth_moon.head_body_id = earth.id
-
-    moon = CelestialBodyORM(
-        name="Moon", mu=MU_MOON, system_id=earth_moon.id, parent_id=earth.id, radius=1737.4,
-        p=MOON_P, e=MOON_E, i=math.radians(5.145),
-        raan=math.radians(125.08), arg_pe=math.radians(318.15), theta=math.radians(115.0),
-    )
-    session.add(moon)
-
-    # The Earth-Moon barycenter is itself a body of the Solar System, orbiting the Sun.
-    emb.parent_id = sun.id
-    emb.system_id = solar.id
-    session.commit()
-
-    return Simulation(
-        body_names=["Sun", "Earth", "Moon"],
-        system_names=["Solar System", "Earth-Moon System"],
-        session=session,
-        max_capacity=64,
-    )
+# The scenario itself lives in `orbital_engine.scenarios` so that the benchmark harness and this
+# suite measure the identical universe. Seeded constants are imported rather than restated for the
+# same reason: a test that hard-codes its own copy stops testing the engine the moment the two
+# drift apart. The assertions below still verify engine behaviour, not the constants - the constants
+# are inputs, and what is checked is what the engine does with them.
+_build_sun_earth_moon = sun_earth_moon
 
 
 def _physical_bodies(sim: Simulation) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
