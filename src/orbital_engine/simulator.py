@@ -60,7 +60,7 @@ class Simulation:
         self._hist_local: List[NDArray[np.float64]] = []
         self._hist_coe: List[NDArray[np.float64]] = []
         self._recorded_names: List[str] = []
-        self._recorded_slots = np.empty(0, dtype=np.int64)
+        self._recorded_slots: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
         self.max_capacity = max_capacity                                    # Simulation rated capacity
 
@@ -96,8 +96,14 @@ class Simulation:
 
         # Active sibling/head slots as integer indices. These change only when the active set does,
         # so they are cached rather than recomputed from the masks on every step.
-        self._sib_idx = np.empty(0, dtype=np.int64)
-        self._head_idx = np.empty(0, dtype=np.int64)
+        #
+        # Annotated explicitly rather than inferred: `np.empty(0, ...)` infers the *narrow* shape
+        # type `ndarray[tuple[int], ...]` under some numpy versions, which then rejects the
+        # `ndarray[tuple[int, ...], ...]` that `flatnonzero(...).astype(...)` returns in
+        # `_refresh_active_indices`. It resolved differently on 3.10 than on 3.11/3.12 and only CI
+        # caught it.
+        self._sib_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._head_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
 

@@ -319,6 +319,38 @@ changing either side.**
 
 ---
 
+### `mypy --strict` passed locally and failed on Python 3.10 in CI
+
+**Symptom.** Clean locally (3.11), three `[assignment]` errors on the 3.10 CI job:
+
+```
+Incompatible types in assignment (expression has type
+  "ndarray[tuple[int, ...], dtype[signedinteger[_64Bit]]]", variable has type
+  "ndarray[tuple[int],      dtype[signedinteger[_64Bit]]]")
+```
+
+**Cause.** An attribute initialised as `self._sib_idx = np.empty(0, dtype=np.int64)` has its type
+*inferred* from that first assignment. Some numpy versions type `np.empty(0, ...)` with the narrow
+shape `tuple[int]` (definitely 1-D), while `np.flatnonzero(...).astype(...)` returns the general
+`tuple[int, ...]`. Reassigning the second to the first is then an error. Which numpy resolves per
+interpreter differs, so 3.11 and 3.12 passed and 3.10 did not.
+
+**Fix.** Annotate the attribute with the general type instead of letting it be inferred:
+
+```python
+self._sib_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+```
+
+**How to avoid.** Annotate any array attribute whose first assignment is a placeholder — `np.empty`,
+`np.zeros(0)`, or similar. The placeholder is the *least* representative value it will ever hold, so
+inferring from it is close to guaranteed to be too narrow.
+
+More generally: a green local `mypy` on one interpreter does not predict the matrix. This is the
+second time the CI matrix has caught something invisible locally, and it is the argument for gating
+every branch rather than only main.
+
+---
+
 ### PowerShell here-strings break on embedded double quotes
 
 **Symptom.** `git commit -m @'...'@` failed with `error: pathspec 'Python' did not match any file(s)`.
