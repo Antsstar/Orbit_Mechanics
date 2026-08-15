@@ -194,6 +194,13 @@ interchange format between representations.
 
 ---
 
+## Why the engine is shaped this way
+
+`docs/architecture.md` holds the reasoning this file only summarises — the module map, why the two
+graphs diverge, why the reflex kick uses a real head rather than a virtual one (time-invariance), and
+what is deliberately not built. Read it before proposing a structural change; several decisions that
+look accidental are load-bearing.
+
 ## Check before debugging
 
 `docs/engineering-log.md` records problems already hit on this project and how they were resolved —
