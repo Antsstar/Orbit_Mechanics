@@ -5,13 +5,18 @@ Run with:
 
     <env>/python.exe benchmarks/bench_step.py
 
-Reports three things, because they answer three different questions:
+Reports four things, because they answer four different questions:
 
-1. **Cost per step by scenario** - the headline number, and what a regression would show up in.
-2. **Cost per step against body count** - separates per-body cost from fixed per-step overhead.
-   A flat line here means the engine is dispatch-bound, not arithmetic-bound, and that array sizes
-   are irrelevant at this scale.
-3. **Component breakdown** - where inside the step the time actually goes.
+1. **Reference against compiled kernel** - the headline. Both compute the same thing, to within the
+   tolerance asserted in `tests/validation/test_kernel_equivalence.py`, so the ratio is pure cost.
+2. **Cost per step by scenario** - what a performance regression would show up in.
+3. **Cost per step against body count** - separates per-body cost from fixed per-step overhead. A
+   flat line means the engine is dispatch-bound rather than arithmetic-bound.
+4. **Component breakdown** - where inside a step the remaining time goes.
+
+History recording is disabled throughout. It appends one dict per body per step, which is the right
+behaviour for analysis and pure overhead for a sweep that reads only final state; leaving it on would
+measure the recorder rather than the physics.
 
 Nothing here asserts. Thresholds belong in the test suite; this is the instrument, not the gate.
 """
@@ -20,17 +25,27 @@ from __future__ import annotations
 import sys
 from typing import Callable
 
+import numpy as np
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from orbital_engine import scenarios
+from orbital_engine import kernels, scenarios
 from orbital_engine.benchmark import measure
 from orbital_engine.database import Base
 from orbital_engine.propagators import KeplerianPropagator
 from orbital_engine.simulator import Simulation
 
 DT = 3600.0
+
+Builder = Callable[[Session], Simulation]
+
+SCENARIOS: list[tuple[str, Builder]] = [
+    ("two_body", lambda s: scenarios.two_body(s)),
+    ("sun_earth_moon", lambda s: scenarios.sun_earth_moon(s)),
+    ("constellation-60", lambda s: scenarios.earth_constellation(s, n_sats=60)),
+    ("constellation-600", lambda s: scenarios.earth_constellation(s, n_sats=600)),
+]
 
 
 def fresh_session() -> Session:
@@ -41,71 +56,99 @@ def fresh_session() -> Session:
     return sessionmaker(bind=engine)()
 
 
-def stepper(sim: Simulation) -> Callable[[], None]:
-    """A step that does not accumulate history, so the buffer cannot grow during timing."""
-    def _step() -> None:
-        sim.step(DT)
-        sim.clear_history()
-    return _step
+def build(builder: Builder) -> Simulation:
+    sim = builder(fresh_session())
+    sim.record_history = False
+    return sim
 
 
-def rule(title: str) -> None:
-    print(f"\n{title}\n{'-' * len(title)}")
-
-
-def bench_scenarios() -> None:
-    rule("Cost per step by scenario")
-    print(f"{'scenario':<24}{'bodies':>8}{'tiers':>8}{'us/step':>12}{'noise':>9}")
-
-    cases: list[tuple[str, Callable[[Session], Simulation]]] = [
-        ("two_body", lambda s: scenarios.two_body(s)),
-        ("sun_earth_moon", lambda s: scenarios.sun_earth_moon(s)),
-        ("constellation-60", lambda s: scenarios.earth_constellation(s, n_sats=60)),
-    ]
-    for name, build in cases:
-        sim = build(fresh_session())
-        m = measure(stepper(sim))
-        n = int(sim.active_mask.sum())
-        print(f"{name:<24}{n:>8}{len(sim.topological_tiers):>8}{m.best:>12.1f}{m.noise_ratio:>8.2f}x")
-
-
-def bench_scaling() -> None:
-    rule("Cost per step against body count (flat topology)")
-    print(f"{'satellites':>12}{'slots':>8}{'us/step':>12}{'us/body':>12}")
-
-    for n_sats in (6, 12, 60, 240, 600):
-        sim = scenarios.earth_constellation(fresh_session(), n_sats=n_sats, n_planes=6)
-        m = measure(stepper(sim), inner=20)
-        slots = int(sim.active_mask.sum())
-        print(f"{n_sats:>12}{slots:>8}{m.best:>12.1f}{m.best / slots:>12.3f}")
-
-
-def bench_components() -> None:
-    rule("Component breakdown (sun_earth_moon)")
-    sim = scenarios.sun_earth_moon(fresh_session())
-
-    def propagate() -> None:
+def reference_call(sim: Simulation) -> Callable[[], None]:
+    def _run() -> None:
         KeplerianPropagator.propagate(
             dt=DT, primary_states=sim.coe_states, secondary_states=sim.local_states,
             mu_array=sim.mu_array, parent_indices=sim.parent_indices,
             active_mask=sim.active_mask, is_head=sim.is_head, is_system=sim.is_system,
             body_sys_map=sim.body_sys_map, sys_head_map=sim.sys_head_map,
         )
+    return _run
 
-    parts: list[tuple[str, Callable[[], object]]] = [
-        ("propagate", propagate),
-        ("calc_global", sim.calc_global),
-        ("_record_state", sim._record_state),
-        ("full step", stepper(sim)),
-    ]
-    print(f"{'component':<20}{'us':>10}{'share':>9}")
-    results = [(label, measure(fn).best) for label, fn in parts]
-    total = dict(results)["full step"]
-    for label, us in results:
-        print(f"{label:<20}{us:>10.1f}{us / total * 100:>8.0f}%")
+
+def kernel_call(sim: Simulation) -> Callable[[], None]:
+    def _run() -> None:
+        kernels.kepler_propagate(
+            DT, sim.coe_states, sim.local_states, sim.mu_array, sim.parent_indices,
+            sim.body_sys_map, sim.sys_head_map, sim.is_system,
+            sim._sib_idx, sim._head_idx, sim._kick, sim._accum,
+        )
+    return _run
+
+
+def rule(title: str) -> None:
+    print(f"\n{title}\n{'-' * len(title)}")
+
+
+def bench_propagators() -> None:
+    rule("Propagator: NumPy reference against compiled kernel")
+    print(f"{'scenario':<20}{'slots':>7}{'reference':>12}{'kernel':>10}{'speedup':>10}{'us/body':>10}")
+
+    for name, builder in SCENARIOS:
+        sim = build(builder)
+        slots = int(sim.active_mask.sum())
+        inner = 50 if slots < 400 else 10
+        ref = measure(reference_call(sim), inner=inner).best
+        ker = measure(kernel_call(sim), inner=inner).best
+        print(f"{name:<20}{slots:>7}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x{ker / slots:>10.3f}")
+
+
+def bench_scenarios() -> None:
+    rule("Full step by scenario")
+    print(f"{'scenario':<20}{'slots':>7}{'tiers':>7}{'us/step':>10}{'noise':>9}")
+
+    for name, builder in SCENARIOS:
+        sim = build(builder)
+        slots = int(sim.active_mask.sum())
+        m = measure(lambda: sim.step(DT), inner=50 if slots < 400 else 10)
+        print(f"{name:<20}{slots:>7}{len(sim.topological_tiers):>7}{m.best:>10.1f}{m.noise_ratio:>8.2f}x")
+
+
+def bench_scaling() -> None:
+    rule("Full step against body count (flat topology)")
+    print(f"{'satellites':>12}{'slots':>8}{'us/step':>12}{'us/body':>12}")
+
+    for n_sats in (6, 12, 60, 240, 600, 2400):
+        sim = build(lambda s: scenarios.earth_constellation(s, n_sats=n_sats, n_planes=6))
+        slots = int(sim.active_mask.sum())
+        m = measure(lambda: sim.step(DT), inner=50 if slots < 400 else 10)
+        print(f"{n_sats:>12}{slots:>8}{m.best:>12.1f}{m.best / slots:>12.3f}")
+
+
+def bench_components() -> None:
+    for label, builder in (("sun_earth_moon", SCENARIOS[1][1]), ("constellation-600", SCENARIOS[3][1])):
+        rule(f"Component breakdown ({label})")
+        sim = build(builder)
+        slots = int(sim.active_mask.sum())
+        inner = 50 if slots < 400 else 10
+
+        propagate = kernel_call(sim) if sim.use_compiled_kernel else reference_call(sim)
+        parts: list[tuple[str, Callable[[], object]]] = [
+            ("propagate", propagate),
+            ("calc_global", sim.calc_global),
+            ("_record_state", sim._record_state),
+        ]
+        total = measure(lambda: sim.step(DT), inner=inner).best
+
+        print(f"{'component':<20}{'us':>10}{'share':>9}   (history off in `full step`)")
+        for name, fn in parts:
+            us = measure(fn, inner=inner).best
+            print(f"{name:<20}{us:>10.2f}{us / total * 100:>8.0f}%")
+            if name == "_record_state":
+                sim.clear_history()
+        print(f"{'full step':<20}{total:>10.2f}{100:>8.0f}%")
 
 
 def main() -> int:
+    print(f"numba available: {kernels.NUMBA_AVAILABLE}")
+    bench_propagators()
     bench_scenarios()
     bench_scaling()
     bench_components()

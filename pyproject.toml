@@ -10,7 +10,8 @@ authors = [
   { name="Anthony", email="antsstar@hotmail.com" }
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+# 3.10+ to match the CI matrix and numba's own floor. Was >=3.9, which no configuration tested.
+requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "pandas",
@@ -18,11 +19,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Compiled kernels. Optional by design: without numba the kernels in kernels.py still run as
+# interpreted Python and the engine falls back to the vectorised NumPy propagator, so the package
+# works uninstalled - just ~180x slower on a small hierarchical scenario.
+perf = [
+    "numba>=0.60"
+]
 test = [
     "pytest",
     "pytest-cov",  # Helpful for seeing which lines of code aren't tested yet
     "mypy",
-    "pandas-stubs"
+    "pandas-stubs",
+    "numba>=0.60"  # Included so CI gates the compiled path, not only the fallback.
 ]
 dev = [
     "ipykernel",

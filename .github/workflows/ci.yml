@@ -8,8 +8,10 @@ on:
 
 jobs:
   test-suite:
+    name: Tests (compiled kernels) - Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false      # a failure on one interpreter should not hide the others
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
 
@@ -27,9 +29,44 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[test]"
 
+    - name: Confirm numba is active
+      # The compiled and interpreted paths are meant to be equivalent, so a silent fallback here
+      # would turn this whole job into a duplicate of the one below without anyone noticing.
+      run: |
+        python -c "from orbital_engine.kernels import NUMBA_AVAILABLE; assert NUMBA_AVAILABLE, 'numba missing from the [test] extra'"
+
     - name: Run mypy strict type checker
       run: |
         mypy src/ --strict
+
+    - name: Run Physics Tests via Pytest
+      run: |
+        pytest
+
+  fallback-suite:
+    name: Tests (NumPy fallback, no numba)
+    runs-on: ubuntu-latest
+    # numba is an optional extra, so a plain `pip install orbital_engine` gets the pure-NumPy
+    # propagator and the interpreted kernels. That path ships to users and therefore has to be
+    # gated too - otherwise it is only ever exercised by whoever happens not to install [perf].
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v7
+
+    - name: Setup Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+
+    - name: Install without the perf extra
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install pytest pytest-cov mypy pandas-stubs
+
+    - name: Confirm numba is absent
+      run: |
+        python -c "from orbital_engine.kernels import NUMBA_AVAILABLE; assert not NUMBA_AVAILABLE, 'numba leaked into the base install'"
 
     - name: Run Physics Tests via Pytest
       run: |
