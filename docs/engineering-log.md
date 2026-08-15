@@ -185,6 +185,79 @@ the way `tests/conftest.py` does.
 
 ---
 
+### Coverage under numba reports ~15% for a module that is ~88% covered
+
+**Symptom.** `kernels.py` showed 15% coverage despite being exercised by every propagation test in
+the suite.
+
+**Cause.** `coverage.py` traces Python bytecode. A function compiled by `@njit` executes as machine
+code, so its body is never traced and every line inside it reads as unhit.
+
+**Fix.** Measure coverage with numba disabled, which runs the same kernels as interpreted Python:
+
+```
+PYTHONPATH=<dir containing a numba.py that raises ImportError> pytest --cov=orbital_engine
+```
+
+`kernels.py` then reports 88% and the project total moves 70% -> 79%.
+
+**How to avoid.** Treat the numba-enabled coverage figure as invalid for any compiled module, not as
+a gap to fill. The reverse mistake is worse: chasing that 15% by writing tests for code already
+covered wastes effort and adds nothing. Note the interpreted run is also ~4x slower (22s against 5s),
+which is another reason it belongs in a separate invocation rather than the default one.
+
+---
+
+### The `np.any()` guard is an anti-optimisation on small arrays
+
+**Symptom.** 37 `np.any()` calls per step, accounting for 21% of the entire step budget - 18855
+reduction calls across 500 steps of a *five body* simulation.
+
+**Cause.** The pattern `if np.any(mask): x[mask] = ...` guards a masked operation so no work happens
+when the mask is empty. On a large array that is a real saving. On a five-element array the guard
+costs ~5 us of Python and NumPy dispatch to avoid ~1.5 us of work, and the masked operation on an
+empty selection would have been nearly free anyway.
+
+Worse, two of the guards inside `mean_to_eccentric`'s Newton loop were **loop-invariant** - the same
+`np.any(mask_ell)` and `np.any(mask4)` recomputed on every iteration, over quantities that could not
+change.
+
+**Fix.** Split the population once, up front, and iterate over contiguous subarrays. Where a loop
+needs an active set, hold it as an **integer index array** rather than a boolean mask: the
+termination test becomes `active.size`, a Python attribute lookup, instead of `np.any(active)`, a
+NumPy reduction.
+
+**How to avoid.** Guards are worth their cost in proportion to the work they skip. Below roughly a
+thousand elements, dispatch dominates and the guard is a net loss.
+
+---
+
+### Optimisation order was wrong until it was measured
+
+**Symptom.** None - the plan simply had the phases in the wrong order, and would have delivered a
+fraction of the gain for most of the effort.
+
+**Cause.** The plan sequenced arena compaction and tier-slicing first, with compiled kernels last as
+polish. Profiling showed `calc_global` - the thing tier-slicing targets - was **26 us of a 630 us
+step**, about 4%. The remaining 96% was Python-level NumPy dispatch inside the propagator, which only
+compilation removes.
+
+The tell was the scaling measurement: step cost was **flat** from arena capacity 64 to 10000, and 3
+bodies cost 542 us against 602 bodies at 3583 us. Fitting that gives ~490 us of fixed per-step
+overhead and ~5 us marginal per body. A cost that does not move with problem size is not a data
+problem.
+
+**Fix.** Reordered to compile first. Final result 556 -> 3.0 us/step, of which the arena work
+contributed a small part and compilation almost all.
+
+**How to avoid.** Re-profile after *every* change, not once at the start. The ordering flipped twice:
+after the propagator was compiled, `calc_global` went from 4% to **87%** of the step and genuinely
+became the next target; after that, `_record_state` at 600 bodies turned out to cost 1875 us, ten
+times the physics step it was recording. None of those three were predictable from the code alone,
+and each was invisible until the one before it was fixed.
+
+---
+
 ## Mistakes made while working, and their corrections
 
 Recorded honestly, because the correction is the reusable part.
@@ -243,6 +316,19 @@ That converts a test into a snapshot and destroys its value. Derive the expected
 the derivation matches the observation, the tolerance follows from the derivation. If it doesn't,
 you have found a real bug. **A failing test may be the test's fault — establish which before
 changing either side.**
+
+---
+
+### PowerShell `Select-Object -First N` reports a false failure
+
+**Symptom.** `python benchmarks/bench_step.py 2>&1 | Select-Object -First 8` exited with code 255 and
+looked like a crash. The same command with `-Last 20` completed cleanly.
+
+**Cause.** `-First` stops the pipeline as soon as it has N objects, closing the pipe under the still
+running process. The non-zero exit is the broken pipe, not the script.
+
+**How to avoid.** Use `-Last N` to trim long output, or redirect to a file and read that. Do not
+conclude a failure from an exit code when the command was piped into `-First`.
 
 ---
 

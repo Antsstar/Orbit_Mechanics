@@ -21,8 +21,17 @@ C:/Users/antss/miniconda3/envs/orbital_env/python.exe
 | Tests | `<env>/python.exe -m pytest -q` |
 | Types | `<env>/python.exe -m mypy src/ --strict` |
 | Coverage | `<env>/python.exe -m pytest -q --cov=orbital_engine --cov-report=term-missing` |
+| Benchmarks | `<env>/python.exe benchmarks/bench_step.py` |
+| Skip timing tests | `<env>/python.exe -m pytest -q -m "not perf"` |
 
-CI gates on `mypy --strict` across Python 3.10 / 3.11 / 3.12. It must stay clean.
+CI gates on `mypy --strict` across Python 3.10 / 3.11 / 3.12, plus a second job that installs
+*without* numba to gate the fallback path. Both must stay clean.
+
+**Coverage is under-reported for `kernels.py`.** `coverage.py` traces bytecode, and `@njit` functions
+run as machine code, so the compiled run shows ~15% for a module that is ~88% covered. Measure it
+with numba disabled — see `docs/engineering-log.md`. Do not write tests to chase that phantom gap.
+
+Optional extras: `[perf]` = numba, `[reference]` = scipy. Neither is needed to run the engine.
 
 **Never run `python -m orbital_engine.simulator`.** Its `__main__` block calls `seed_test_universe()`,
 which drops and rewrites the git-tracked `src/orbital_engine/data/planets.db`. To exercise the engine,
@@ -71,6 +80,10 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 | `utilities.Kepler` / `utilities.Barker` | Time ↔ mean anomaly for elliptic/hyperbolic and parabolic cases (`utilities.py:441`, `:482`) |
 | `simulator._topological_sort` | Vectorised BFS tier stratification — generic over any parent-index array (`simulator.py:219`) |
 | `database.py` | Polymorphic ORM: `BaseBodyORM` / `CelestialBodyORM` / `VesselORM` / `VirtualBodyORM` plus `SystemORM`. `VesselORM` already carries `dry_mass`, `fuel_mass`, `drag_area` |
+| `kernels.py` | Compiled scalar kernels: `kepler_propagate`, `calc_global_states`, plus reusable `coe_to_rv_scalar` / `solve_kepler_scalar` / `advance_true_anomaly` |
+| `scenarios.py` | `two_body`, `sun_earth_moon`, `earth_constellation(n_sats=…)` — shared by tests and benchmarks. **Build scenarios from here, never inline in a test** |
+| `reference.py` | `reference_for(sim, times)` → DOP853 N-body truth trajectory. Independent of all engine code |
+| `benchmark.py` | `measure(fn)` → min-of-batches timing with noise ratio |
 
 ---
 
@@ -94,21 +107,70 @@ design; use `"N-R"` there.
 
 ### Unwired scaffolding — do not build on without discussing first
 
-`_PROPAGATOR_REGISTRY` (`registry.py`) is written and never read; `step()` (`simulator.py:459`)
-hardcodes `KeplerianPropagator`; `propagator_type` and `g_env` are allocated and never read;
-`BodyHandle` (`body.py`) is never instantiated and `sim.bodies` is always empty.
+`_PROPAGATOR_REGISTRY` (`registry.py`) is written and never read; `propagator_type` and `g_env` are
+allocated and never read; `BodyHandle` (`body.py`) is never instantiated and `sim.bodies` is always
+empty.
+
+`step()` still selects Keplerian propagation unconditionally — it now dispatches between the compiled
+kernel and the NumPy reference on `use_compiled_kernel`, but that is an *implementation* choice, not
+a model choice. Per-body propagator selection through the registry is deliberately deferred to the
+force-model phase, where it becomes part of the sweep configuration rather than a second ad-hoc flag.
 
 ---
 
 ## Conventions
 
-- Vectorised NumPy over Python loops for anything touching the arena.
+- Vectorised NumPy over Python loops for anything touching the arena — **except inside `kernels.py`**,
+  see below.
 - Boolean masks and integer-array indexing **copy**; assignment targets do not. Prefer basic slicing
   in hot paths, and verify with `np.shares_memory` when it matters.
 - No stateful third-party objects inside a step. Dependencies may own data at the boundary
   (ingest, kernel load, coefficient extraction) and never inside `step()`.
 - Signatures use the aliases in `custom_types.py`; array internals stay `NDArray[np.float64]`.
 - Prefer `np.bincount` / `np.add.reduceat` over `np.add.at`, which is unbuffered and slow.
+- Avoid `if np.any(mask):` as a guard around masked work on arena-sized arrays. Below ~1000 elements
+  the guard costs more than the work it skips. Where a loop needs an active set, hold it as an
+  **integer index array** so the test is `active.size`, not a NumPy reduction.
+
+### The two-implementation rule
+
+Hot paths exist twice: a readable NumPy version and a compiled scalar version.
+
+| | Reference | Compiled |
+|---|---|---|
+| Propagation | `propagators.KeplerianPropagator` | `kernels.kepler_propagate` |
+| Global states | `Simulation.calc_global` (else branch) | `kernels.calc_global_states` |
+
+`Simulation.use_compiled_kernel` selects between them; it defaults to `NUMBA_AVAILABLE`, because
+without numba the kernels run as *interpreted* Python and are slower than the NumPy path.
+
+Rules when touching either side:
+
+1. **Change both, or neither.** They are held equivalent by
+   `tests/validation/test_kernel_equivalence.py` — elementwise to 1e-12 relative for propagation,
+   and *bit-identical* for `calc_global`.
+2. **The reference is the definition.** It is optimised for being obviously correct. Do not
+   micro-optimise it; that is what the compiled path is for.
+3. **Scalar loops belong only in `kernels.py`.** The inversion of the house style is deliberate and
+   confined there.
+4. **`fastmath` stays off.** It licenses reassociation and assumes no NaN — and the Kepler solver
+   detects divergence *by* testing for non-finite values.
+5. Kernels allocate nothing. Scratch (`_kick`, `_accum`) is arena-owned and zeroed per active slot,
+   never per capacity. That is what keeps step cost independent of `max_capacity`
+   (`tests/validation/test_scaling_invariants.py`).
+
+### Verification vs comparison — do not conflate them
+
+`reference.py` produces DOP853 truth trajectories. What a disagreement with it *means* depends
+entirely on the case:
+
+- **Verification** — the model is exact (two-body, with or without a massive secondary). The two must
+  agree to ~1e-8 relative. Disagreement is an engine bug.
+- **Comparison** — the model is an approximation (Sun-Earth-Moon neglects the solar term in the lunar
+  orbit). The two *must* diverge; the divergence is the result. Currently 3.3e4 km over 30 days,
+  bounded above by the coherent-forcing estimate 0.5·a·t² ≈ 1.0e5 km.
+
+Treating a comparison divergence as a bug leads to "fixing" a correct engine.
 
 ### Per-feature contract for any new physics model
 

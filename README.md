@@ -37,12 +37,43 @@ footnote. Model configurations are therefore designed to be enumerable data, not
 Column 0 of the element array is the **semi-latus rectum** `p`, not the semi-major axis, so parabolic
 trajectories stay representable throughout.
 
+- **Compiled kernels.** The Keplerian step and global-state accumulation are compiled to machine code
+  with Numba, held elementwise equivalent to a readable NumPy reference implementation that is
+  retained as the definition of the physics.
+
 ### Not yet wired
 
-Propagators are written as stateless kernels and a registry exists, but `Simulation.step()` currently
-calls the Keplerian propagator directly rather than dispatching through it. Perturbation models,
-numerical integrators and the sweep harness are in progress. See `CLAUDE.md` for the current state of
-play, including known-broken code.
+A propagator registry exists but is not read: `Simulation.step()` selects Keplerian propagation
+unconditionally, choosing only between the compiled and NumPy implementations of it. Perturbation
+models, numerical integrators and the sweep harness are in progress. See `CLAUDE.md` for the current
+state of play, including known-broken code.
+
+---
+
+## Performance
+
+Optimisation was driven by measurement rather than by plan, and the plan was wrong. Profiling showed
+step cost was **flat** from arena capacity 64 to 10 000, and that three bodies cost 542 µs against
+602 bodies at 3583 µs — roughly 490 µs of fixed per-step overhead against ~5 µs marginal per body.
+A cost that does not move with problem size is not a data-layout problem, so the memory-layout work
+that was scheduled first would have addressed about 4% of the step. Compilation addressed the rest.
+
+Sun–Earth–Moon, microseconds per step:
+
+| | µs/step | |
+|---|---|---|
+| Baseline | 556 | |
+| Kepler solver rewrite | 474 | removed per-iteration dispatch |
+| Compiled propagator | 28.8 | |
+| Compiled global states | 8.3 | previous bottleneck at 87% |
+| Columnar history | **3.0** | **185× total** |
+
+Marginal cost fell from 1.26 to 0.196 µs per body; 2400 bodies now step in 470 µs. Step cost is
+independent of arena capacity — five bodies cost the same in a 64-slot arena as in a 65 536-slot one,
+which the original allocated-per-step scratch arrays violated by two orders of magnitude.
+
+Numba is an optional extra. Without it the engine falls back to the NumPy propagator and remains
+correct, and a dedicated CI job gates that path.
 
 ---
 
@@ -50,10 +81,13 @@ play, including known-broken code.
 
 | | |
 |---|---|
-| Tests | 120 passing |
-| Type checking | `mypy --strict`, clean across 11 modules |
-| CI | GitHub Actions on Python 3.10 / 3.11 / 3.12, every branch |
-| Coverage | 72% overall |
+| Tests | 214 passing |
+| Type checking | `mypy --strict`, clean across 15 modules |
+| CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a NumPy-fallback job |
+| Coverage | 79% overall |
+
+> Coverage must be measured with Numba disabled. `coverage.py` traces bytecode, so a `@njit` function
+> reads as entirely unhit — the compiled run reports 15% for a module that is 88% covered.
 
 The suite is split along the **Verification and Validation** distinction used in computational
 science — *are we solving the equations right* versus *are we solving the right equations*:
@@ -61,8 +95,9 @@ science — *are we solving the equations right* versus *are we solving the righ
 ```text
 tests/
 ├── unit/         # Isolated transformations. Analytic geometries and round-trip properties.
-├── integration/  # ORM polymorphism and simulation construction from the database.
-└── validation/   # Physical correctness against closed-form and conserved-quantity references.
+├── integration/  # ORM polymorphism, simulation construction, history recording contract.
+└── validation/   # Physical correctness against closed-form, conserved-quantity and
+                  # numerically-integrated references, plus kernel equivalence.
 ```
 
 **Validation tests assert a stated expected error magnitude, not merely that nothing crashed.** This
@@ -86,6 +121,26 @@ percent. Some examples of what the suite pins down:
   satisfy it trivially.
 - **Reproducible randomness.** Property tests seed an explicit `np.random.default_rng`, so a failure
   can be replayed exactly and no global state leaks between tests.
+- **Independent reference trajectories.** `reference.py` integrates Newtonian N-body motion with
+  `scipy`'s DOP853 at `rtol=1e-13`, sharing no code with the engine — no elements, no Kepler solver,
+  no hierarchy — so an error in `frames.py` cannot appear on both sides of a comparison. Where the
+  engine's model is exact, the two agree to 7.5e-5 km over ten days.
+- **Negative controls.** Equivalence and reference tests each include a test that *deliberately
+  perturbs* the engine and asserts the comparison detects it. A tolerance looser than the effect it
+  is meant to catch passes regardless of correctness, which is how this project's one genuinely
+  vacuous test survived for months.
+
+### Verification is not comparison
+
+Where the engine's model is an approximation, it *must* disagree with the reference, and the
+disagreement is the measurement rather than a defect. Hierarchical two-body motion neglects the solar
+term in the lunar orbit entirely, so over 30 days the Moon diverges by 3.3e4 km. That figure is
+asserted against a derived band, not a recorded snapshot: solar tidal acceleration on the Moon is
+`2·μ_Sun·r_EM/d³ ≈ 3.05e-8 km/s²`, which acting coherently over 30 days would displace it by
+`½at² ≈ 1.0e5 km`, and partial coherence over a synodic month puts the true value comfortably below.
+
+Quantifying that error is the point of the engine, so a test asserting agreement there would be
+asserting that the engine is wrong.
 
 ---
 
@@ -94,20 +149,27 @@ percent. Some examples of what the suite pins down:
 ```text
 Orbit_Mechanics/
 ├── .claude/agents/      # Subagent definitions with model and effort pinned per task type
-├── .github/workflows/   # Multi-version CI
+├── .github/workflows/   # Multi-version CI, plus a NumPy-fallback job
+├── benchmarks/
+│   └── bench_step.py    # Step-cost instrument: propagator comparison, scaling, breakdown
 ├── docs/
+│   ├── engineering-log.md   # Problems hit and how they were resolved. Check before debugging
 │   ├── historical/      # Superseded design documents, retained for provenance only
 │   └── model-delegation.md
 ├── notebooks/           # Derivations and visualisation
 ├── src/orbital_engine/
+│   ├── benchmark.py     # Timing primitive (min-of-batches)
 │   ├── body.py          # BodyHandle dataclass (arena pointer, not state)
 │   ├── constants.py     # Physical and unit constants
 │   ├── custom_types.py  # Type aliases and column-index enums
 │   ├── database.py      # Polymorphic SQLAlchemy 2.0 ORM
 │   ├── exceptions.py    # Domain-specific error hierarchy
 │   ├── frames.py        # Coordinate and state-space transformations
-│   ├── propagators.py   # Stateless propagation kernels
+│   ├── kernels.py       # Compiled scalar kernels (numba); optional
+│   ├── propagators.py   # NumPy reference propagators
+│   ├── reference.py     # DOP853 N-body truth trajectories (scipy); optional
 │   ├── registry.py      # Model and propagator registration
+│   ├── scenarios.py     # Reusable scenario builders, shared by tests and benchmarks
 │   ├── simulator.py     # DOD memory arena and simulation control
 │   ├── utilities.py     # Anomalies, Kepler, Barker, rotations, perturbations
 │   └── data/planets.db
@@ -125,6 +187,9 @@ conda create -n orbital_env python=3.11 -y
 conda activate orbital_env
 pip install -e ".[dev,test]"
 ```
+
+Optional extras: `[perf]` pulls in Numba for the compiled kernels, `[reference]` pulls in SciPy for
+the DOP853 truth generator. Neither is required — the engine falls back to pure NumPy without them.
 
 Editable mode links the source into the environment so changes propagate to the notebooks
 immediately.
@@ -176,10 +241,10 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
 
 Ordered so that each stage makes the next one safe rather than merely possible.
 
-1. **Validation infrastructure** — reference-data ingestion, invariant and convergence-order
-   harnesses. In progress; this is what makes later physics safe to accept quickly.
-2. **Arena compaction and compiled kernels** — dense active-slot packing so hot-loop operations are
-   contiguous views rather than gathers, then Numba on the kernels.
+1. ~~**Validation infrastructure**~~ — invariant harnesses, kernel equivalence, and an independent
+   DOP853 reference generator. **Done.** This is what makes later physics safe to accept quickly.
+2. ~~**Compiled kernels**~~ — **Done**, 185× on the hierarchical step, with step cost now independent
+   of arena capacity. Reordered ahead of memory-layout work on the strength of profiling.
 3. **Force-model interface and event system** — bitmask composition so enabling a perturbation is a
    value rather than a code path, plus exact-time event handling for impulsive manoeuvres.
 4. **Benchmark harness** — scenario sweeps across model configurations, reporting error against
