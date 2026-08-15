@@ -84,9 +84,13 @@ Do not treat these as intentional, and do not silently work around them.
 - `cart_to_RSW` (`frames.py:292`) is missing `@staticmethod` and its shape math adds an `int` to a
   `tuple`. `RSW_to_cart` (`frames.py:322`) is a stub typed as returning an array.
 - The above are the 4 current `mypy --strict` errors.
-- `Anomalies.mean_to_eccentric` (`utilities.py:332`): the `"S.S"` solver branch indexes with a
-  global-length mask against active-length arrays. The `"N-R"` branch was fixed; this one was not.
 - `rv_to_coe` (`frames.py:84`): the no-valid-orbit early return has shape `(N,3)` where callers expect `(N,6)`.
+
+Fixed in phase 1 (`Anomalies.mean_to_eccentric`, rewritten): the `"S.S"` global-length mask indexing
+bug, and a silent-NaN path where a diverging iterate returned NaN *reporting success* — `abs(nan) > tol`
+is `False`, so the element was dropped from the active set as converged. Both are now covered by
+`tests/unit/test_anomalies.py`. `"S.S"` on hyperbolic orbits is formally divergent and raises by
+design; use `"N-R"` there.
 
 ### Unwired scaffolding — do not build on without discussing first
 

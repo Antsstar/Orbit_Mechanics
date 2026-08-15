@@ -275,83 +275,150 @@ class Anomalies:
         return M
 
     @staticmethod
+    def _iterate_kepler(
+        M: NDArray[np.float64],
+        e: NDArray[np.float64],
+        E: NDArray[np.float64],
+        *,
+        hyperbolic: bool,
+        tol: float,
+        solver: str,
+        max_ite: int,
+    ) -> NDArray[np.float64]:
+        """
+        Drive a seeded guess `E` to convergence against Kepler's equation. Mutates and returns `E`.
+
+        All three arrays are 1-D, contiguous and the same length, and every element is on the same
+        branch - the caller has already split elliptic from hyperbolic. That split is what keeps
+        this loop free of per-iteration masking.
+
+        `active` is an array of *integer indices* rather than a boolean mask, so the loop's
+        termination test is `active.size`, a plain Python attribute lookup. The previous formulation
+        called `np.any()` three times per iteration, two of which were loop-invariant.
+        """
+        active = np.arange(E.size, dtype=np.intp)
+
+        for _ in range(max_ite):
+            if active.size == 0:
+                return E
+
+            E_a = E[active]
+            e_a = e[active]
+            M_a = M[active]
+
+            if hyperbolic:
+                if solver == "N-R":
+                    # f = e sinh H - H - M ;  f' = e cosh H - 1. Sign folded into the denominator.
+                    delta = (e_a * np.sinh(E_a) - E_a - M_a) / (1.0 - e_a * np.cosh(E_a))
+                else:
+                    delta = e_a * np.sinh(E_a) - M_a - E_a
+            else:
+                if solver == "N-R":
+                    # f = E - e sin E - M ;  f' = 1 - e cos E. Sign folded into the denominator.
+                    delta = (E_a - e_a * np.sin(E_a) - M_a) / (e_a * np.cos(E_a) - 1.0)
+                else:
+                    delta = M_a + e_a * np.sin(E_a) - E_a
+
+            E[active] = E_a + delta
+
+            # Retain anything not *demonstrably* converged, rather than dropping anything that
+            # tests as diverged. The distinction is NaN: a diverging hyperbolic iterate overflows
+            # sinh to inf and then produces inf - inf = nan, and `abs(nan) > tol` is False. Written
+            # that way round, the element would be dropped from the active set and the solver would
+            # return NaN reporting success. `~(abs(delta) <= tol)` keeps NaN active instead, so it
+            # survives to the max_ite check below and raises. Same cost, opposite failure mode.
+            active = active[~(np.abs(delta) <= tol)]
+
+        if active.size > 0:
+            branch = "hyperbolic" if hyperbolic else "elliptic"
+            raise ConvergenceError(
+                f"Solver '{solver}' failed to converge for {active.size} {branch} entries after "
+                f"{max_ite} iterations. Worst offenders: M={M[active][:5]}, e={e[active][:5]}"
+            )
+        return E
+
+    @staticmethod
     def mean_to_eccentric(M: Radians, e: Numeric, *, tol: float = 1e-5, solver: str = "N-R", max_ite: int = 1000) -> Radians:
-        """Mean Anomaly (M) to Eccentric/Hyperbolic Anomaly (E or H)"""
+        """
+        Mean Anomaly (M) to Eccentric/Hyperbolic Anomaly (E or H).
+
+        Elliptic and hyperbolic elements are separated once, up front, and each branch is then
+        solved over a contiguous subarray. The previous implementation carried both branches
+        through a single loop and re-derived the split on every iteration by indexing a
+        global-length mask with the shrinking active set.
+
+        That double indexing was also a latent correctness bug in the `"S.S"` branch, which indexed
+        `delta` (active-length) with `mask_ell` (global-length). It went unnoticed because nothing
+        called that solver; it is fixed here and now covered by tests.
+
+        **Caveat on `"S.S"` for hyperbolic orbits.** Successive substitution on the rearrangement
+        H <- e sinh H - M has derivative e cosh H > 1 everywhere, so it is formally divergent and
+        will raise `ConvergenceError` for all but trivial inputs. The rearrangement is preserved
+        rather than silently replaced; use `"N-R"` for hyperbolic work.
+
+        Seed bands follow Vallado, *Fundamentals of Astrodynamics and Applications* (4th ed.),
+        Algorithm 2: E = M below e = 0.55, the Barker-like cube-root guess to e = 0.95, and pi
+        above it, where seeding at M would otherwise step Newton-Raphson out of the basin.
+        """
+        if solver not in ("N-R", "S.S"):
+            raise ValueError(
+                f"Solver '{solver}' not recognised. Valid options are 'N-R' for Newton-Raphson "
+                f"and 'S.S' for Successive Substitution."
+            )
 
         _M = np.asarray(M, dtype=np.float64)
         _e = np.asarray(e, dtype=np.float64)
 
-        # a) Strict Guarding
+        # Strict guarding. Parabolic orbits have no eccentric anomaly at all, so this is a domain
+        # error rather than something to fall back from.
         if np.any(_e < 0.0):
             raise ValueError(f"Eccentricity cannot be negative. Recieved e = {_e}")
         if np.any(np.abs(_e - 1.0) < 1e-8):
             raise ValueError(f"Parabolic orbits (e=1) do not have eccentric anomalies.")
-        
-        # 1. 
-        E = np.empty_like(_M)
 
-        mask1 = (_e <= 0.55)
-        mask2 = (0.55 < _e) & (_e <= 0.95)
-        mask3 = (0.95 < _e) & (_e <= 1.0)
-        mask4 = (1.0 < _e)
+        out_shape = _M.shape
+        M_flat = _M.reshape(-1)
+        e_flat = np.broadcast_to(_e, out_shape).reshape(-1)
 
-        if np.any(mask1): E[mask1] = _M[mask1]
-        if np.any(mask2): E[mask2] = np.cbrt(6.0*_M[mask2])
-        if np.any(mask3): E[mask3] = np.pi
-        # if np.any(mask4): E[mask4] = np.log(2.0*_M[mask4] / _e[mask4])
-        if np.any(mask4): E[mask4] = np.arcsinh(_M[mask4] / _e[mask4])
+        hyp = e_flat > 1.0
+        n_hyp = int(np.count_nonzero(hyp))
 
-
-        active = np.ones_like(_M, dtype=bool)
-        ite = 0
-
-        mask_ell = ~mask4
-        while np.any(active) and ite < max_ite:
-            E_act = E[active]
-            e_act = _e[active]
-            M_act = _M[active]
-            # print(E_act.shape) # Found the error, if they converge out of sync, then active array decreases in size, but the masks (i.e, mask_ell) still refers to the global size
-
-            delta = np.zeros_like(E_act)
-
-            if solver == "N-R":
-                if np.any(mask_ell):
-                    E_ell = E_act[mask_ell[active]] # Filters out entries that aren't active in the mask!
-                    e_e = e_act[mask_ell[active]]
-                    f = E_ell - e_e * np.sin(E_ell) - M_act[mask_ell[active]]
-                    f_prime = e_e * np.cos(E_ell) - 1.0
-                    delta[mask_ell[active]] = f / f_prime
-                
-                if np.any(mask4):
-                    H_hyp = E_act[mask4[active]]
-                    e_h = e_act[mask4[active]]
-                    f = e_h * np.sinh(H_hyp) - H_hyp - M_act[mask4[active]]
-                    f_prime = 1.0 - e_h * np.cosh(H_hyp)
-                    delta[mask4[active]] = f / f_prime
-
-            elif solver == "S.S":
-                if np.any(mask_ell):
-                    delta[mask_ell] = M_act[mask_ell] + e_act[mask_ell] * np.sin(E_act[mask_ell]) - E_act[mask_ell]
-                if np.any(mask4):
-                    delta[mask4] = e_act[mask4] * np.sinh(E_act[mask4]) - M_act[mask4] - E_act[mask4]
-
-            else:
-                raise ValueError(f"Solver '{solver}' not recognised. Valid options are 'N-R' for Newton-Raphson and S.S for Successive Substitution.")
-            
-            E[active] += delta
-
-            still_active = np.abs(delta) > tol
-            active[active] = still_active
-            ite += 1
-
-
-        if np.any(active):
-            raise ConvergenceError(f"Solver '{solver}' failed to converge after {max_ite} iterations for all entries"
-                                    f"Failed entries values: M={_M[active]}, e={_e[active]}, element mask={active}")
+        if n_hyp == 0:
+            E_flat = Anomalies._solve_elliptic(M_flat, e_flat, tol=tol, solver=solver, max_ite=max_ite)
+        elif n_hyp == M_flat.size:
+            E_flat = Anomalies._solve_hyperbolic(M_flat, e_flat, tol=tol, solver=solver, max_ite=max_ite)
+        else:
+            # Mixed populations are rare enough that the two gathers are not worth avoiding.
+            E_flat = np.empty_like(M_flat)
+            ell = ~hyp
+            E_flat[ell] = Anomalies._solve_elliptic(
+                M_flat[ell], e_flat[ell], tol=tol, solver=solver, max_ite=max_ite)
+            E_flat[hyp] = Anomalies._solve_hyperbolic(
+                M_flat[hyp], e_flat[hyp], tol=tol, solver=solver, max_ite=max_ite)
 
         if _M.ndim == 0:
-            return E.item()
-        return E
+            return float(E_flat[0])
+        return E_flat.reshape(out_shape)
+
+    @staticmethod
+    def _solve_elliptic(
+        M: NDArray[np.float64], e: NDArray[np.float64], *,
+        tol: float, solver: str, max_ite: int,
+    ) -> NDArray[np.float64]:
+        """Seed and solve the elliptic/circular branch. `np.where` beats masked assignment here."""
+        E = np.where(e <= 0.55, M, np.where(e <= 0.95, np.cbrt(6.0 * M), np.pi))
+        return Anomalies._iterate_kepler(
+            M, e, E, hyperbolic=False, tol=tol, solver=solver, max_ite=max_ite)
+
+    @staticmethod
+    def _solve_hyperbolic(
+        M: NDArray[np.float64], e: NDArray[np.float64], *,
+        tol: float, solver: str, max_ite: int,
+    ) -> NDArray[np.float64]:
+        """Seed and solve the hyperbolic branch. e > 1 throughout, so the division is safe."""
+        E = np.arcsinh(M / e)
+        return Anomalies._iterate_kepler(
+            M, e, E, hyperbolic=True, tol=tol, solver=solver, max_ite=max_ite)
 
 
     @staticmethod

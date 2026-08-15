@@ -92,6 +92,46 @@ none of the results — coverage was 70% before the fix and 70% after. Mutation 
 
 ---
 
+### A diverging solver returned NaN and reported success
+
+**Symptom.** None from the solver. `Anomalies.mean_to_eccentric` returned `nan` without raising, and
+`ConvergenceError` never fired no matter how badly the iteration diverged.
+
+**Cause.** The convergence test was written as *keep what has demonstrably diverged*:
+
+```python
+active = active[np.abs(delta) > tol]      # NaN > tol is False  ->  dropped as "converged"
+```
+
+A diverging hyperbolic iterate overflows `sinh` to `inf`, then evaluates `inf - inf = nan`. Every
+comparison against NaN is `False`, so the element was removed from the active set as though it had
+converged, and the loop exited cleanly with NaN in the output.
+
+**Fix.** Invert the test to *keep what has not demonstrably converged*:
+
+```python
+active = active[~(np.abs(delta) <= tol)]  # NaN <= tol is False -> ~False -> stays active
+```
+
+The element then survives to the `max_ite` check and raises. Same cost, opposite failure mode.
+
+**How to avoid.** With NaN in play, `keep = ~converged` and `keep = diverged` are **not** the same
+predicate, and the difference is exactly whether a numerical failure is loud or silent. Prefer the
+negated form in any iterative solver.
+
+This one is worth generalising. NaN defeats assertion-based testing entirely: `nan < tol`,
+`nan > tol` and `nan == nan` are all `False`, so a NaN sails through every conserved-quantity check
+in `tests/validation/invariants.py` — those assert that a drift is *small*, and NaN is never
+measured as large. An explicit `np.all(np.isfinite(...))` is the only thing that catches it, which
+is why `test_solver_never_returns_nan_while_reporting_success` exists as its own test rather than
+being folded into a tolerance assertion.
+
+**How it was found.** A test written to assert that divergence *raises*. The prediction was right
+and the stated mechanism was wrong, which is the useful kind of failing test: it disproved the
+mechanism, not just the outcome.
+
+---
+
 ### In-memory SQLite gives each connection its own database
 
 **Symptom.** Latent — not yet triggered. Would appear as "no such table" from a session that
