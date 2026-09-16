@@ -176,6 +176,77 @@ how its mass is stored.
 
 ---
 
+## Cowell propagation: frame, restriction, and what it does not do
+
+`integrators.py` (RK4) and `gravity.py` (`point_mass_gravity`) add the engine's second propagator:
+direct numerical integration of the Cartesian equations of motion, selectable per body through
+`Simulation.set_propagator` and dispatched by `step()` alongside the unchanged analytic Keplerian
+path. The design problem is that the arena is hierarchical and Cowell is not — a Cartesian integrator
+has no notion of a system bubble or a reflex kick — so the frame it integrates in has to be chosen
+deliberately rather than inherited from whichever array happens to be lying around.
+
+**Frame: the simulation-root inertial frame, i.e. `global_states` itself.** Every registered force
+kernel (`forces.ForceKernel`) indexes its `state` argument by absolute arena slot, exactly like
+`global_states` — a kernel computing a relative vector to a body's parent (`point_mass_gravity`, and
+any future third-body or J2 term) reads both rows from the *same* array, so that array has to be one
+common frame every active body's position is already expressed in. `global_states` is the only array
+with that property; `local_states` is bubble-relative and a different bubble for every body. Choosing
+the global frame is also what makes `Simulation.accelerations` — already a `(t, state) -> (C,3)`
+function over the whole arena — usable by Cowell with no change: RK4 calls it with candidate rows of
+`global_states` and nothing else needs to know a Cowell body is being integrated at all.
+
+**Convention: two-body mass sum via `parent_indices`, matching the Keplerian propagator exactly.**
+`point_mass_gravity` computes `mu = mu_array[body] + mu_array[parent_indices[body]]`, the same sum
+`Simulation._rehydrate_coes` and `KeplerianPropagator` already use. A Cowell body running only this
+model is integrating the *identical* equation of motion the Keplerian propagator solves analytically,
+so the two agree to RK4's own truncation error rather than to some looser "close enough" tolerance —
+that is what makes the fourth-order convergence test in `tests/validation/test_cowell_propagator.py`
+meaningful rather than a coincidence of similar-but-different physics.
+
+**Restriction: Cowell may only be assigned to an active body that is not a head, not a system
+barycenter, and not its own kinematic bubble** (`body_sys_map[i] != i`), enforced by
+`Simulation.set_propagator`. Two independent reasons, not one:
+
+- A head's or barycenter's motion is the reflex kick `kepler_propagate` / `_recalculate_all_barycenters`
+  compute from *every* sibling's mass and position, every step. Replacing it with an independently
+  integrated Cartesian state would not just be wrong for that one body — it would desynchronise the
+  reflex kick for *every other sibling in the bubble*, since the kick is derived from the head's row.
+- A kinematic root (`body_sys_map[i] == i`) is what `calc_global` treats as the coordinate origin: tier
+  0 is unconditionally zeroed every step (`global_states[tier_0] = 0.0`). A root Cowell body's
+  integrated motion would be silently discarded by that line rather than raise, producing a body that
+  looks like it never moves — the failure mode this project treats as worse than a crash.
+
+**How the result reaches `local_states` and `global_states`.** Cowell integration runs *before* the
+Keplerian propagation and `calc_global()` in `step()`, using the arena state as committed at the start
+of the step, and its result is saved. `calc_global()` then runs as normal — it still walks *every*
+active slot in topological order, including Cowell ones, briefly overwriting them with a stale,
+pre-step value derived from last step's `local_states` — after which the saved Cowell result is
+written back into `global_states` and `local_states[i]` is rebuilt as
+`global_states[i] - global_states[body_sys_map[i]]`, using the head's *freshly Keplerian-propagated*
+position. This keeps the documented invariant — `local_states[i]` relative to
+`global_states[body_sys_map[i]]` — true for a Cowell body exactly as it is for a Keplerian one, so
+nothing downstream (`_record_state`, `history`, a future spawn path) needs to know which propagator
+produced a given row.
+
+**What a Cowell body's orbital elements mean: nothing.** `coe_states` for a Cowell body is left
+untouched by `step()` — stale at whatever it held before the body was reassigned, the same convention
+already used for a head's deliberately zeroed COE. Recomputing osculating elements from the fresh
+`(r, v)` each step would be legitimate (it is exactly what `_rehydrate_coes` already does at build
+time) but is not needed by anything Cowell currently does and was left out rather than half-built; see
+the follow-up note in the module docstrings.
+
+**What this does not do.** Force evaluation during one Cowell step treats every *other* body's
+position as fixed at its start-of-step value across all four RK4 sub-stages — see `integrators.py`'s
+module docstring and the `docs/engineering-log.md` entry on it. Exact for a fixed or non-existent
+primary (every validation scenario here), an approximation if a Cowell body's own parent is itself
+moving substantially within one macro-step. Also out of scope by design: Cowell bodies feel gravity
+from their own parent only, never from every other active body (a two-body term, not N-body), and a
+Cowell body's nonzero mass does not feed back into its head's reflex kick — only bodies dispatched
+through the Keplerian kernel contribute to that sum. Both are documented restrictions of *this* phase,
+not accidents.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.

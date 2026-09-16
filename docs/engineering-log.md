@@ -374,6 +374,41 @@ and each was invisible until the one before it was fixed.
 
 ---
 
+### Cowell integrates against a frozen background field within one step
+
+**Not a bug - a design decision recorded so it is not mistaken for one.** `integrators.RK4Integrator`
+evaluates all four RK4 sub-stages of one macro-step against whatever `global_states` held when
+`step()` was called. It does not re-evaluate any row outside the Cowell body's own `indices` between
+sub-stages, so if that body's gravitating parent is itself moving (Keplerian-propagated in the same
+`step()` call), the parent's position used by every sub-stage is its *start-of-step* value, not its
+true position at that sub-stage's time.
+
+**Why this was chosen rather than something more accurate.** The alternative - resampling or
+interpolating the background field's motion across the four sub-stage times - needs either calling
+into the Keplerian propagator mid-RK4-step (coupling two propagators' internals together) or an
+explicit interpolation scheme, both out of scope for the first Cowell implementation and not needed by
+any validation case built so far: every scenario `tests/validation/test_cowell_propagator.py` checks
+has a Cowell body whose gravitating primary is either the simulation root (`scenarios.two_body`,
+`mu_secondary=0.0`, which never moves at all) or a `mu=0` sibling that cannot move it either
+(`scenarios.earth_constellation`'s isolation test). The approximation is therefore never exercised by
+anything that would expose it.
+
+**What it would cost if exercised.** A Cowell body integrated against a background frozen at time `t`
+sees an O(dt) error in its parent's assumed position at the later sub-stages (`t + dt/2`, `t + dt`).
+Propagated through the acceleration and then through one RK4 step, that generically degrades the
+observed *global* convergence order from the fourth order asserted in
+`test_cowell_matches_keplerian_at_fourth_order` down toward first order, for a scenario where the
+parent's own motion within one step is not negligible compared to the orbit being resolved (a
+satellite integrated with Cowell around a planet that is itself Keplerian-propagated around a star, in
+the same `step()` call, at a macro-step comparable to the planet's own orbital timescale).
+
+**How to avoid being surprised by it.** Before trusting a Cowell body's accuracy in a new scenario,
+check whether its gravitating parent (`parent_indices[i]`) is expected to move meaningfully within one
+`step()` call. If it is, either shrink `dt` until the parent's motion per step is negligible, or treat
+resampling the background field mid-step as a prerequisite rather than an optional refinement.
+
+---
+
 ## Mistakes made while working, and their corrections
 
 Recorded honestly, because the correction is the reusable part.
