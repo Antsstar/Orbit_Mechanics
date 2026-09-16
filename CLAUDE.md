@@ -120,7 +120,7 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 | `geopotential.py` | Force model `"j2"` (`J2_MODEL`): the J2 perturbation only, relative to each body's `parent_indices` parent — not the central `-mu r/r^3` term. Coefficients `(j2, r_eq)` live on the *perturbed* body's row. Earth values `EARTH_J2` and `EARTH_R_EQ` = 6378.137 km (equatorial) — do **not** pair J2 with `scenarios.EARTH_RADIUS` (6371 km, mean), which is 0.2% off. Assumes the parent's spin axis is the frame's +z. Registered on `import orbital_engine`. **Cannot detect a barycentre parent** (the kernel has no `is_system`) and returns a finite but meaningless value there; check with `barycentre_parented()` before enabling. No compiled twin yet |
 | `gravity.py` | Force model `"point_mass_gravity"`: the central term `-(mu_body + mu_parent) r / r^3` relative to `parent_indices`, the same summed mu the Keplerian path uses. Parent only, so a two-body term and **not** N-body or third-body. Registered on `import orbital_engine` |
 | `integrators.py` | `Integrator` protocol and `RK4Integrator(max_capacity)`: `step(provider, t, state, dt, indices, primaries)` advances `state[indices]` relative to `state[primaries]`, copying each stage's accelerations (the provider returns a shared buffer). Named stage buffers are allocated once in `__init__`, but fancy indexing still allocates temporaries every stage, so it is not allocation-free. The frozen-primary formulation is exact only for forces that depend on position relative to the parent, which covers every model registered today |
-| `propagators.py` | `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`): analytic Keplerian propagation plus first-order secular drift of RAAN, argument of periapsis and mean anomaly under J2 — Vallado 4e Eq. 9-41 is the likely reference, **unverified against the text**. `p`, `e`, `i` held constant, matching the theory; `secular_j2_rates(...)` derives the three rates once, cached rather than recomputed per step. Compiled twin `kernels.secular_j2_propagate`. Configured only through `Simulation.set_propagator(bodies, PropagatorType.SECULAR_J2, j2=..., r_eq=...)` — coefficients are mandatory, unlike `enable_force_model("j2", ...)`'s silent-no-op convention. See `docs/architecture.md`'s Cowell section for the shared restriction reasoning and its own section for what this propagator adds |
+| `propagators.py` | `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`): analytic Keplerian propagation plus first-order secular drift of RAAN, argument of periapsis and mean anomaly under J2 — Vallado 4e Eq. 9-41 is the likely reference, **unverified against the text**. `p`, `e`, `i` held constant, matching the theory; `secular_j2_rates(...)` derives the three rates once, cached rather than recomputed per step. Compiled twin `kernels.secular_j2_propagate`. Configured only through `Simulation.set_propagator(bodies, PropagatorType.SECULAR_J2, j2=..., r_eq=...)` — coefficients are mandatory, unlike `enable_force_model("j2", ...)`'s silent-no-op convention. Optional `mean_seed=True` (default `False`, bit-identical to the prior behaviour) replaces the seeded `p` with a first-order mean value via `propagators.mean_seeded_p` — Kozai 1959 / Brouwer 1959, **unverified against the text**; corrects only `p`, never `e` or `i`. See `docs/architecture.md`'s Cowell section for the shared restriction reasoning and its own section for what this propagator adds |
 | `Simulation` model API | `enable_force_model(name, bodies, **coefficients)` and `set_propagator(bodies, PropagatorType.COWELL \| PropagatorType.SECULAR_J2, **coefficients)` are the sweep-configuration surface; `resolve_force_models()`; `accelerations(t, state=None)`. `set_propagator` raises `ValueError` for Cowell on heads, barycentres, kinematic roots, inactive slots and **any body with `mu != 0`**, since a Cowell body bypasses the barycentric accumulation that carries its mass into the reflex kick; `SECULAR_J2` carries the same restrictions plus a non-barycentre Keplerian parent, `0 <= e < 1`, and mandatory `j2`/`r_eq` coefficients |
 
 ---
@@ -242,9 +242,14 @@ orbits that look entirely plausible. A stated expected magnitude catches them; c
 SGP4/SDP4 (use `sgp4` — it has an array API), atmospheric density (`pymsis`), planetary ephemerides
 (`jplephem`), IAU frames and time scales (`pyerfa`). Wrap them at the boundary.
 
-**Never convert mean elements ↔ osculating elements.** A TLE's mean elements are defined by SGP4's own
-force model; feeding them to `coe_to_rv` is wrong by kilometres. Cartesian `(r, v)` is the only safe
-interchange format between representations.
+**Never convert *externally defined* mean elements ↔ osculating elements.** A TLE's mean elements are
+defined by SGP4's own force model; feeding them to `coe_to_rv` is wrong by kilometres. Cartesian
+`(r, v)` is the only safe interchange format between representations from an external source such as
+SGP4/TLE. This does not extend to a propagator applying a first-order short-period correction that
+belongs to *its own* theory to its *own* seed — `propagators.mean_seeded_p` (`SecularJ2Propagator`'s
+`mean_seed` option) is the one case in the engine, and it is scoped narrowly: it corrects only the
+semi-latus rectum (and so the cached mean motion), never `e` or `i`, and never reads an externally
+supplied mean element.
 
 ---
 

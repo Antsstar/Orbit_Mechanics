@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from .custom_types import Seconds, ScalarSeconds, PropagatorType
 from .registry import register_propagator
 
@@ -362,6 +362,88 @@ def secular_j2_rates(
     m_dot = n * (1.0 + 0.75 * factor * np.sqrt(1.0 - e * e) * (3.0 * cos2_i - 1.0))
 
     return np.stack([raan_dot, argpe_dot, m_dot], axis=1)
+
+
+def mean_seeded_p(
+    coe_states: NDArray[np.float64],
+    j2_params: NDArray[np.float64],
+    indices: NDArray[np.int64],
+) -> NDArray[np.float64]:
+    """
+    First-order short-period correction converting the *osculating* semi-latus rectum at epoch into an
+    estimate of the constant *mean* `p` this propagator's own secular theory is derived for. An
+    optional seeding for `SecularJ2Propagator` (`Simulation.set_propagator(..., mean_seed=True)`); the
+    default (`mean_seed=False`) leaves `p` at its osculating, as-given value and is bit-identical to
+    the propagator's behaviour before this function existed.
+
+    **Why this is the correction that matters.** `SecularJ2Propagator`'s docstring identifies the
+    dominant error of osculating seeding as a *linearly growing* along-track drift, caused by caching
+    mean motion `n = sqrt(mu/a^3)` from the osculating `a`, which differs from the true mean `a` by an
+    `O(J2 (R/p)^2)` fraction that does not average out. This function removes exactly that bias at the
+    one point it is introduced - `set_propagator` time - rather than correcting it per step; `e` and
+    `i` are left untouched, since this task narrows `CLAUDE.md`'s osculating<->mean rule specifically
+    to "seed the semi-major axis (and so its mean motion)", not a full osculating-to-mean element set.
+
+    **Derivation (near-circular limit, first order in J2; self-contained, checkable without a text -
+    the same standard this project's other citations set for themselves).** The J2 potential energy
+    per unit mass is `Phi = (mu J2 Re^2 / (2 r^3)) (3 sin^2(i) sin^2(u) - 1)`, `u = arg_pe + theta` the
+    argument of latitude (`geopotential.py`'s and `reference.py`'s own convention, `a = -grad Phi`).
+    Lagrange's planetary equations are conventionally stated in terms of the *disturbing function*
+    `R = -Phi` (so that `d^2r/dt^2 = -mu r/r^3 + grad R`), giving
+    `R = (mu J2 Re^2 / (2 r^3)) (1 - 3 sin^2(i) sin^2(u))`. Taking `r ~ a` (the `e -> 0` limit) and
+    `du/dt ~ n` (the short-period integration treats the much slower secular RAAN/arg_pe rates as
+    constant over one orbit), `da/dt = (2 / (n a)) dR/dM` gives
+
+        da/dt = -3 n J2 Re^2 sin^2(i) sin(2u) / a.
+
+    Integrating with `d(2u) = 2n dt` gives the short-period oscillation of the *osculating* a about
+    the (locally constant) mean:
+
+        a_osc(u) - a_mean = (3/2) J2 (Re/a)^2 a sin^2(i) cos(2u),
+
+    so, inverting to leading order at the epoch argument of latitude `u0`,
+
+        a_mean = a_osc * (1 - (3/2) J2 (Re/p)^2 sin^2(i) cos(2*u0)),      p_mean = a_mean (1 - e^2).
+
+    This reproduces the `|cos 2u0|` phase signature `docs/architecture.md`'s secular-J2 section already
+    measured for the *osculating*-seeded propagator's error against Cowell + `point_mass_gravity` +
+    `j2` - the same mechanism, read the other way round.
+
+    **A sign slip was caught by measurement, not by re-reading the derivation.** The first version of
+    this docstring used `R = +Phi` (the potential itself, not the disturbing function), which inverts
+    every sign below it and produces `a_mean = a_osc * (1 + frac)` - applying that against the J2 truth
+    *doubled* the along-track error instead of removing it (measured: 573.5 km at 10 orbits / u0=0
+    became 1146.2 km, almost exactly 2x, rather than collapsing toward the ~0.16 km floor u0=45 deg
+    shows). A factor of ~-1 between a correction and what it should have cancelled is the signature of
+    an inverted sign, not a wrong magnitude - see `docs/engineering-log.md`'s "asserting an expectation
+    instead of deriving it" and "the secular-J2 error was assumed bounded, then measured unbounded"
+    entries for the same lesson elsewhere in this project. Corrected here to `R = -Phi`, the standard
+    disturbing-function convention; `tests/validation/test_secular_j2_propagator.py`'s mean-seeding
+    test is what would have caught the original sign error, had it existed when this was first written.
+
+    Citation: Kozai, Y. (1959), "The Motion of a Close Earth Satellite", *Astronomical Journal* 64,
+    p.367, and Brouwer, D. (1959), "Solution of the Problem of Artificial Satellite Theory Without
+    Drag", *Astronomical Journal* 64, p.378, are the likely sources for the general (all-order-in-e)
+    short-period `a` term this reduces to at `e -> 0` - **not checked against either text**, matching
+    this codebase's convention for citations recalled from memory (see `geopotential.py`,
+    `SecularJ2Propagator`). The derivation above is the checkable part; the *magnitude* was not fitted
+    to any measured figure, only the sign was corrected after measurement exposed it as backwards - see
+    `tests/validation/test_secular_j2_propagator.py` for the measured numbers this now predicts.
+    """
+    p = coe_states[indices, 0]
+    e = coe_states[indices, 1]
+    inc = coe_states[indices, 2]
+    arg_pe = coe_states[indices, 4]
+    theta = coe_states[indices, 5]
+
+    j2 = j2_params[indices, 0]
+    r_eq = j2_params[indices, 1]
+
+    a_osc = p / (1.0 - e * e)
+    u0 = arg_pe + theta
+    frac = 1.5 * j2 * (r_eq / p) ** 2 * np.sin(inc) ** 2 * np.cos(2.0 * u0)
+    a_mean = a_osc * (1.0 - frac)
+    return cast(NDArray[np.float64], a_mean * (1.0 - e * e))
 
 
 register_propagator(PropagatorType.KEPLERIAN, KeplerianPropagator)

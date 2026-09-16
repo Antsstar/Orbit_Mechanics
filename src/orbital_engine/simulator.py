@@ -9,7 +9,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
-from .propagators import Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates
+from .propagators import (
+    Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates, mean_seeded_p,
+)
 from .kernels import NUMBA_AVAILABLE, calc_global_states, kepler_propagate, secular_j2_propagate
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
@@ -706,6 +708,7 @@ class Simulation:
         self,
         bodies: Union[int, Sequence[int], NDArray[np.integer[Any]]],
         propagator_type: PropagatorType,
+        mean_seed: bool = False,
         **coefficients: float,
     ) -> None:
         """
@@ -762,8 +765,22 @@ class Simulation:
         see `propagators.SecularJ2Propagator`'s docstring for why that storage choice was made. The three
         secular rates are then derived once, by `propagators.secular_j2_rates`, and cached in
         `self._secular_j2_rates` rather than recomputed every step.
+
+        `mean_seed` (`SECULAR_J2` only; a sweep-configuration flag, not a coefficient) replaces the
+        seeded semi-latus rectum `p` with a first-order estimate of the *mean* value before the rates
+        above are derived from it - see `propagators.mean_seeded_p` for the derivation and citation.
+        Defaults to `False`, which leaves `p` at its osculating, as-given value: bit-identical to this
+        propagator's behaviour before this option existed. `e` and `i` are never converted; only `p`
+        (and so the cached mean motion) is - `CLAUDE.md`'s relaxed osculating<->mean rule permits only
+        this propagator's own first-order theory correcting its own seed, not a general conversion.
         """
         idx = np.atleast_1d(np.asarray(bodies, dtype=np.int64))
+
+        if mean_seed and propagator_type != PropagatorType.SECULAR_J2:
+            raise ValueError(
+                f"mean_seed is only meaningful for PropagatorType.SECULAR_J2, got "
+                f"{PropagatorType(propagator_type).name}."
+            )
 
         if propagator_type == PropagatorType.COWELL:
             if coefficients:
@@ -846,6 +863,9 @@ class Simulation:
                 self.force_model_params[geopotential.J2_MODEL] = params
             params[idx, 0] = coefficients["j2"]
             params[idx, 1] = coefficients["r_eq"]
+
+            if mean_seed:
+                self.coe_states[idx, COEIndex.P] = mean_seeded_p(self.coe_states, params, idx)
 
             self._secular_j2_rates[idx] = secular_j2_rates(
                 self.coe_states, self.mu_array, self.parent_indices, params, idx,

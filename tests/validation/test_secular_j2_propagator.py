@@ -29,9 +29,9 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
-from orbital_engine import geopotential, scenarios
+from orbital_engine import geopotential, reference, scenarios
 from orbital_engine.custom_types import COEIndex, PropagatorType
-from orbital_engine.propagators import secular_j2_rates
+from orbital_engine.propagators import mean_seeded_p, secular_j2_rates
 from orbital_engine.simulator import Simulation
 
 EPS = float(np.finfo(np.float64).eps)
@@ -447,4 +447,184 @@ def test_mean_vs_osculating_error_is_bounded_and_grows_with_orbit_count(
     assert 0.3 * expected_ratio < ratio < 3.0 * expected_ratio, (
         f"error growth ratio {ratio:.2f} over {ORBIT_COUNTS_FOR_GROWTH} orbits is not consistent with "
         f"roughly linear growth (expected near {expected_ratio:.1f}); errors={errors_km}"
+    )
+
+
+# ==================================================================================================
+# 6. `mean_seed` - a first-order mean semi-major axis, per `propagators.mean_seeded_p`
+# ==================================================================================================
+#
+# `mean_seeded_p` corrects only `p` (and so the cached mean motion), which section 5 above identifies
+# as the source of the *linearly growing* error. What should remain after that correction is the
+# *bounded* short-period oscillation section 5 also derives - amplitude ~ J2 (R/p)^2 * p (~6.37 km at
+# 550 km / 53 deg), which this propagator has no machinery to remove (it holds p, e, i constant and
+# never synthesises the periodic terms back in). That residual should not grow with elapsed orbits,
+# unlike the osculating-seeded error, and should scale with the same |cos(2u0)| phase dependence the
+# correction itself uses, vanishing at u0 = 45/135/225/315 deg exactly where section 5's osculating
+# measurement already showed near-zero error (frac = 0 there, so mean_seed is a no-op).
+
+MEAN_SEED_U0_DEG = [0.0, 30.0, 45.0, 60.0, 90.0]
+N_ORBITS_MEAN_SEED = 3
+
+
+def _bounded_residual_estimate_km() -> float:
+    """Order-of-magnitude bound on the *leftover* short-period oscillation after mean-seeding removes
+    the linear term - the same J2 (R/p)^2 * p estimate `_order_of_magnitude_km_per_orbit` uses for the
+    bounded (a) effect in section 5's module comment, not fitted to any figure measured here."""
+    p = _leo_p_km()
+    return geopotential.EARTH_J2 * (geopotential.EARTH_R_EQ / p) ** 2 * p
+
+
+def _build_two_body_secular(session: Session, u0_rad: float, *, mean_seed: bool) -> tuple[Simulation, int]:
+    """A single LEO satellite at argument of latitude `u0_rad` (`two_body` supports an arbitrary
+    `theta`, unlike `earth_constellation`, which is what a phase sweep needs)."""
+    sim = scenarios.two_body(
+        session, mu_primary=scenarios.MU_EARTH, mu_secondary=0.0,
+        p=_leo_p_km(), e=0.0, i=math.radians(LEO_INCLINATION_DEG), arg_pe=0.0, theta=u0_rad,
+    )
+    sat = sim.name_to_index["Secondary"]
+    sim.record_history = False
+    sim.set_propagator(
+        sat, PropagatorType.SECULAR_J2, mean_seed=mean_seed,
+        j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ,
+    )
+    return sim, sat
+
+
+def test_mean_seeded_p_closed_form() -> None:
+    """
+    By hand, at u0 = 0 (cos(2u0) = 1): mu=1e6, J2=1e-3, R=1000, p=2000, e=0, i=45deg (same inputs as
+    the closed-form rates check in section 1, plus the argument of latitude).
+      a_osc = p = 2000;  frac = 1.5 * J2 * (R/p)^2 * sin^2(i) * cos(0) = 1.5e-3 * 0.25 * 0.5 = 1.875e-4
+      a_mean = a_osc * (1 - frac) = 1999.625;  p_mean = a_mean (e=0, so p_mean == a_mean)
+    Independently reproduced (not via this module's own machinery) and matched to 15 significant
+    figures this session. At u0 = 45 deg (cos(2u0) = 0) the correction must vanish identically -
+    `frac == 0` exactly, not merely small - since `mean_seed` must be a documented no-op there.
+    """
+    coe = np.zeros((1, 6))
+    coe[0] = [2000.0, 0.0, math.radians(45.0), 0.0, 0.0, 0.0]
+    params = np.array([[1e-3, 1000.0]])
+    idx = np.array([0], dtype=np.int64)
+
+    p_mean = mean_seeded_p(coe, params, idx)[0]
+    assert abs(p_mean - 1999.625) / 1999.625 < CLOSED_FORM_REL_TOL, p_mean
+
+    coe[0, 4] = math.radians(45.0)  # arg_pe + theta = 45 deg -> u0 = 45 deg
+    p_mean_45 = mean_seeded_p(coe, params, idx)[0]
+    assert p_mean_45 == 2000.0, p_mean_45  # exact: cos(2*45deg) == 0 to float precision at this input
+
+
+def test_set_propagator_mean_seed_rejected_for_other_propagators(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """`mean_seed` is meaningless outside SECULAR_J2 - see `Simulation.set_propagator`'s docstring."""
+    sim = scenarios.two_body(db_session_factory())
+    secondary = sim.name_to_index["Secondary"]
+    with pytest.raises(ValueError):
+        sim.set_propagator(secondary, PropagatorType.COWELL, mean_seed=True)
+    with pytest.raises(ValueError):
+        sim.set_propagator(secondary, PropagatorType.KEPLERIAN, mean_seed=True)
+
+
+def test_mean_seed_default_is_bit_identical_to_osculating_seeding(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """The osculating-seeded behaviour is the default and must stay unchanged: `mean_seed=False` (the
+    default) must leave `p` exactly as `set_propagator` found it, matching this propagator's behaviour
+    before `mean_seed` existed."""
+    sim, sat = _build_two_body_secular(db_session_factory(), 0.0, mean_seed=False)
+    assert sim.coe_states[sat, COEIndex.P] == pytest.approx(_leo_p_km(), rel=1e-12)
+
+
+def test_mean_seed_true_overwrites_seeded_p_away_from_the_zero_crossing(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """At u0 = 0 (worst case), `mean_seed=True` must actually change the seeded `p` - a no-op here
+    would mean the option silently does nothing."""
+    sim, sat = _build_two_body_secular(db_session_factory(), 0.0, mean_seed=True)
+    assert sim.coe_states[sat, COEIndex.P] != _leo_p_km()
+
+
+def test_mean_seeding_collapses_the_phase_dependent_error_against_j2_truth(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The core claim: seeding the mean semi-major axis removes the *linearly growing* along-track drift
+    section 5 measures for osculating seeding, at every phase, not just the u0 = 45 deg case where that
+    drift already happened to vanish. What remains is bounded by the short-period estimate derived
+    above - this test shows that residual explicitly rather than only showing the error shrank.
+    """
+    period = _leo_period_s()
+    dt = period / 200.0
+    n_steps = int(round(N_ORBITS_MEAN_SEED * period / dt))
+    times = np.array([0.0, N_ORBITS_MEAN_SEED * period])
+    bound_km = _bounded_residual_estimate_km()
+
+    for u0_deg in MEAN_SEED_U0_DEG:
+        u0 = math.radians(u0_deg)
+
+        osc_sim, osc_sat = _build_two_body_secular(db_session_factory(), u0, mean_seed=False)
+        truth = reference.reference_for(
+            osc_sim, times, rtol=reference.TRUTH_RTOL, atol=reference.TRUTH_ATOL,
+            oblateness={"Primary": (geopotential.EARTH_J2, geopotential.EARTH_R_EQ)},
+        )
+        truth_pos = truth.position_of("Secondary")[-1]
+        for _ in range(n_steps):
+            osc_sim.step(dt)
+        err_osc = float(np.linalg.norm(osc_sim.global_states[osc_sat, :3] - truth_pos))
+
+        # Truth depends only on the shared initial condition, which `mean_seed` never changes (it
+        # only biases the propagator's internal seed for t > 0) - computed once, reused for both.
+        mean_sim, mean_sat = _build_two_body_secular(db_session_factory(), u0, mean_seed=True)
+        for _ in range(n_steps):
+            mean_sim.step(dt)
+        err_mean = float(np.linalg.norm(mean_sim.global_states[mean_sat, :3] - truth_pos))
+
+        # The residual bound is loose (2x headroom over the derived ~6.37 km estimate) because it is a
+        # single-term order-of-magnitude estimate, the same convention section 5 uses.
+        assert err_mean < 2.0 * bound_km, (
+            f"u0={u0_deg} deg: mean-seeded error {err_mean:.2f} km exceeds the {2.0*bound_km:.2f} km "
+            f"bound derived from the leftover short-period oscillation"
+        )
+        if abs(math.cos(2.0 * u0)) > 0.3:  # away from the u0=45 deg zero-crossing, where both agree
+            assert err_mean < 0.2 * err_osc, (
+                f"u0={u0_deg} deg: mean-seeded error {err_mean:.2f} km is not well below the "
+                f"osculating-seeded error {err_osc:.2f} km"
+            )
+
+
+def test_mean_seeding_residual_does_not_grow_with_orbit_count(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The whole point of correcting the *mean motion* bias is that what is left behind is bounded, not
+    merely smaller. At u0 = 0 (the worst case for the uncorrected error - 573.5 km at 10 orbits,
+    section 5), the mean-seeded residual must stay within the same order of magnitude from 1 to 10
+    orbits rather than continuing to grow linearly.
+    """
+    period = _leo_period_s()
+    dt = period / 200.0
+    bound_km = _bounded_residual_estimate_km()
+
+    errors_km = []
+    for n_orbits in (1, 10):
+        n_steps = int(round(n_orbits * period / dt))
+        times = np.array([0.0, n_orbits * period])
+
+        sim, sat = _build_two_body_secular(db_session_factory(), 0.0, mean_seed=True)
+        truth = reference.reference_for(
+            sim, times, rtol=reference.TRUTH_RTOL, atol=reference.TRUTH_ATOL,
+            oblateness={"Primary": (geopotential.EARTH_J2, geopotential.EARTH_R_EQ)},
+        )
+        truth_pos = truth.position_of("Secondary")[-1]
+        for _ in range(n_steps):
+            sim.step(dt)
+        errors_km.append(float(np.linalg.norm(sim.global_states[sat, :3] - truth_pos)))
+
+    for err in errors_km:
+        assert err < 2.0 * bound_km, (errors_km, bound_km)
+    ratio = errors_km[-1] / errors_km[0]
+    assert ratio < 3.0, (
+        f"mean-seeded residual grew {ratio:.2f}x from 1 to 10 orbits ({errors_km}); expected roughly "
+        f"bounded, not the ~10x a still-linear error would show"
     )

@@ -77,6 +77,32 @@ correct, and a dedicated CI job gates that path.
 
 ---
 
+## Model-fidelity frontier
+
+`orbital_engine.sweep` runs one scenario under several model configurations and diffs each against a
+common DOP853 + J2 truth, computed once and reused. `benchmarks/frontier_plot.py` demonstrates it on a
+12-satellite, 550 km / 53 deg constellation over a 24-hour horizon:
+
+![Model-fidelity frontier](docs/figures/frontier.png)
+
+Plain Kepler propagation lands at 608 km median position error against truth, and adding the analytic
+secular-J2 drift *without* correcting its seed only brings that down to 431 km, because most of what is
+left is a linear along-track drift from caching mean motion off the *osculating* semi-major axis;
+seeding a first-order *mean* semi-major axis instead (`propagators.mean_seeded_p`, Kozai 1959 / Brouwer
+1959) collapses the same tier to 4.0 km median at essentially the same cost. Cowell integration with
+`point_mass_gravity` and `j2` traces a genuine fidelity/cost curve as the step size shrinks, from 231 km
+at a 160 s step down to 0.0004 km at a 10 s step — roughly 450× more wall time for roughly four to five
+orders of magnitude less error. That Cowell curve should not be read against the other three tiers'
+wall time at face value: Kepler and secular-J2 run compiled (Numba), while Cowell and its force models
+have no compiled twin yet and run as interpreted NumPy, so part of the gap on the plot is an
+implementation penalty rather than a modelling one. The figures above are single points on one
+phase-spread constellation, not a fixed property of each model — `docs/architecture.md`'s secular-J2
+section shows a single satellite's error against the same truth varying by two orders of magnitude with
+its initial argument of latitude alone, which is why the sweep reports statistics over bodies (median,
+RMS, max) rather than one satellite's number.
+
+---
+
 ## Verification
 
 | | |
