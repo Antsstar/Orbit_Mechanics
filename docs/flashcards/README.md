@@ -24,6 +24,7 @@ than trusted. A decision that has no source to point at is a decision that was n
 | `03-orbital-theory.md` | 14 | The domain itself — answerable without reference to this codebase |
 | `04-validation.md` | 15 | Why the test suite is shaped this way; verification vs comparison |
 | `05-performance.md` | 12 | What was measured, what it meant, and the reasoning errors it exposed |
+| `06-forces-and-propagation.md` | 14 | Force-model composition, RSW, J2, Cowell, and what "fails without the fix" has to mean |
 
 ## Using them
 
