@@ -349,6 +349,30 @@ Cowell) — see `tests/validation/test_secular_j2_propagator.py` and
 accuracy figure, is what makes "Kepler + secular J2" a genuinely distinct point on a fidelity/cost
 frontier rather than a free upgrade to plain Keplerian propagation.
 
+**The drift depends on starting phase, and vanishes at u₀ = 45° (measured in review).** The figures above
+are for one satellite starting at argument of latitude u₀ = 0, which turns out to be the worst case.
+Against the independent J2 truth (`reference_for(..., oblateness=...)`), after 10 orbits at 550 km / 53°:
+
+| u₀ | 0°, 90°, 180°, 270° | 30°, 60°, 120°, … | 45°, 135°, 225°, 315° |
+|---|---:|---:|---:|
+| Kepler + secular J2 | 574 km | 287 km | **0.2 km** |
+| Kepler | 523–689 km | 276–424 km | 207–214 km |
+
+The secular error is proportional to |cos 2u₀|. That is the signature of the short-period term in the
+*osculating* semi-major axis at epoch (∝ sin²i cos 2u for a near-circular orbit). Where that term is
+zero, osculating a equals mean a, and the propagator is essentially exact. Every other part of it,
+including the secular rates, was already right. Secular J2 removes the cross-track error at every
+phase. Along-track it can do worse than Kepler for an individual satellite: at 700 km / 98°, u₀ = 0,
+it was 862 km against Kepler's 320 km, because Kepler's missing rates partly cancel the same bias.
+Over 12 evenly spaced phases it is better on median and RMS: 287/406 km against 421/457 km at 53°, and
+432/610 km against 652/825 km at 98°.
+
+Two consequences. A sweep must report error **statistics over initial phase**, not one satellite,
+or the tier ranking depends on which slot was picked. And seeding this propagator with a *mean*
+semi-major axis would remove nearly all of its error. That is a mean ↔ osculating conversion, which
+`CLAUDE.md` currently forbids. The rule was written about SGP4's mean elements, but its wording covers
+this case too, so relaxing it is a project decision, not an implementation detail.
+
 ---
 
 ## Validation layers

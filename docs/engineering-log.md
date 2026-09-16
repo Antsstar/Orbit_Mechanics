@@ -82,7 +82,8 @@ python -c "import orbital_engine; print(orbital_engine.__file__)"   # confirm be
 **How to avoid.** Every agent definition's verification section now carries this. Any tooling that runs
 tests outside the main checkout needs it — a CI job, a benchmark script, a second clone.
 
-**Update.** The sandbox's permission layer now refuses the documented form outright — any Bash command
+**Update.** In *subagent* sessions, the sandbox's permission layer has refused the documented form. On
+2026-09-16 the main session still ran `PYTHONPATH=... python` normally. The refusal applies to any Bash command
 of the shape `PYTHONPATH=... <python> ...` (inline env-var prefix, or `export PYTHONPATH=...` earlier in
 the same invocation) is rejected with "this command runs python after PYTHONPATH is set ... so what it
 runs cannot be shown not to be git", regardless of `dangerouslyDisableSandbox`. The workaround is to
@@ -499,6 +500,15 @@ Here nothing was *wrong* in the sense of a bug - the 6 km bounded-oscillation te
 derived - the mistake was stopping at the first term found rather than measuring before writing it into
 a docstring as *the* expected magnitude. CLAUDE.md's "Item 5 is the guard that matters" cuts both ways:
 it also guards against the person deriving the estimate.
+
+**Refined in review: the "linear" drift was one satellite's worst case.** Every measurement above used
+a single satellite starting at argument of latitude u₀ = 0. Repeating the comparison over 8 and 12
+evenly spaced phases against the independent J2 truth showed an error proportional to |cos 2u₀|: 574 km
+after 10 orbits at u₀ = 0° or 90°, 287 km at 30° or 60°, and **0.2 km at 45°**. The bias is the
+short-period term in the osculating semi-major axis at epoch. It is not a generic property of
+osculating elements, and where it is zero the propagator is essentially exact. The general lesson: a
+measurement from one initial condition is a sample, not a characterisation. Vary the free parameter,
+here initial phase, before calling a figure "the" error of a model.
 
 ---
 

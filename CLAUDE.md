@@ -157,8 +157,8 @@ design; use `"N-R"` there.
 ### Unwired scaffolding — do not build on without discussing first
 
 Both halves of `registry.py` are now wired. `step()` dispatches Cowell bodies through
-`_PROPAGATOR_REGISTRY` and reads `propagator_type`, which `set_propagator` writes. Only `KEPLERIAN`
-and `COWELL` drive dispatch; any other `PropagatorType` member is unimplemented. `BodyHandle`
+`_PROPAGATOR_REGISTRY` and reads `propagator_type`, which `set_propagator` writes. Only `KEPLERIAN`,
+`COWELL` and `SECULAR_J2` drive dispatch; any other `PropagatorType` member is unimplemented. `BodyHandle`
 (`body.py`) is still never instantiated and `sim.bodies` is always empty.
 
 Cowell has no compiled twin, so it runs as NumPy only whatever `use_compiled_kernel` says. Nor do

@@ -249,7 +249,10 @@ class SecularJ2Propagator(Propagator):
       to better than 1% (ratios 3.00 and 9.99 against the exactly-linear predictions), and the
       ~40 km/orbit order-of-magnitude estimate above matches the measured ~57 km/orbit rate to within a
       factor of ~1.4. This is the effect that actually dominates the comparison beyond a handful of
-      orbits, not the bounded oscillation.
+      orbits, not the bounded oscillation. **The rate is phase-dependent:** it scales as |cos 2u0| in
+      the initial argument of latitude, because the bias is the short-period term in the osculating
+      semi-major axis at epoch. The 57.4 km/orbit figure is the worst case (u0 = 0). At u0 = 45 deg the
+      error after 10 orbits was 0.2 km. See `docs/architecture.md`, secular-J2 section.
 
     `tests/validation/test_secular_j2_propagator.py` measures both against Cowell + `point_mass_gravity`
     + `j2`. This is the *comparison* case in `CLAUDE.md`'s verification/comparison split, not an engine
