@@ -21,18 +21,21 @@ error grows when it should not".
 
 Assume the bug is in the physics or the frame bookkeeping before you assume it is in the plumbing.
 
-## Where to look first, in order
+## The terrain — where wrong-but-plausible comes from here
 
-1. **Frame mismatches.** Is that acceleration in ECI, RSW, or body-fixed? `local_states[i]` is
+These are the traps this codebase actually has. Not a checklist to work through in order; a map of
+where the ground is soft.
+
+- **Frame mismatches.** Is that acceleration in ECI, RSW, or body-fixed? `local_states[i]` is
    relative to `global_states[body_sys_map[i]]` — *not* to `parent_indices[i]`. The two graphs
    diverge deliberately and conflating them is a standing trap.
-2. **Unit mismatches.** The engine is km-based. Most atmosphere and physical-constant models are SI.
-3. **Time-scale mismatches.** UTC vs TT vs TAI vs UT1 matters the moment Earth rotation is involved.
-4. **Mean vs osculating elements.** These are not interchangeable and mixing them is wrong by
+- **Unit mismatches.** The engine is km-based. Most atmosphere and physical-constant models are SI.
+- **Time-scale mismatches.** UTC vs TT vs TAI vs UT1 matters the moment Earth rotation is involved.
+- **Mean vs osculating elements.** These are not interchangeable and mixing them is wrong by
    kilometres, silently.
-5. **Representation assumptions.** COE column 0 is the semi-latus rectum `p`, not the semi-major
+- **Representation assumptions.** COE column 0 is the semi-latus rectum `p`, not the semi-major
    axis. Heads carry deliberately zeroed COEs. Root nodes self-reference.
-6. **NaN.** It is the one value that defeats every assertion in the suite — `nan < tol` and
+- **NaN.** It is the one value that defeats every assertion in the suite — `nan < tol` and
    `nan > tol` are both `False`, so a NaN passes every conserved-quantity check silently. If numbers
    look "fine" but a result is nonsense, test `np.isfinite` before anything else.
 
@@ -66,6 +69,21 @@ number of periods. An invariant that holds narrows the search more than one that
 
 Halving the step size and checking whether the error falls at the integrator's stated order
 separates "the integrator is wrong" from "the force model is wrong" in one experiment.
+
+## Working notes
+
+`docs/engineering-log.md` is your memory across sessions. Check it before debugging — the symptom you
+are chasing may already be recorded with its cause. Add an entry when something costs you more than a
+few minutes, written as symptom → cause → fix → how to avoid, so it is searchable by the symptom
+someone will actually have.
+
+## Evidence, not assertion
+
+Audit every claim against a tool result from this session before reporting it. A measured number with
+the command that produced it beats a confident sentence. If you ruled something out, say how.
+
+You are operating autonomously — the user is not watching in real time and cannot answer mid-task.
+For reversible investigation that follows from the original request, proceed without asking.
 
 ## Scope
 

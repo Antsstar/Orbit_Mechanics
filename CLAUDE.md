@@ -39,7 +39,7 @@ build an in-memory SQLite session the way `tests/conftest.py` does.
 
 ---
 
-## Arena layout — `simulator.py:40-61`
+## Arena layout — `Simulation.__init__`
 
 All state lives in flat pre-allocated arrays indexed by an integer slot. Nothing owns per-body state.
 
@@ -59,14 +59,14 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 ### Invariants that are not obvious from reading the code
 
 - `local_states[i]` is relative to `global_states[body_sys_map[i]]` — **not** to `parent_indices[i]`.
-  `calc_global` (`simulator.py:445-450`) depends on this. The two graphs diverge deliberately.
-- Heads carry **deliberately zeroed COEs** (`simulator.py:380`). A head's motion is the reflex kick
+  `Simulation.calc_global` depends on this. The two graphs diverge deliberately.
+- Heads carry **deliberately zeroed COEs** (`_rehydrate_coes`). A head's motion is the reflex kick
   about its barycenter, not an orbit. So when Earth heads the Earth-Moon system its eccentricity reads
   0.0 by design, and the heliocentric ellipse lives on the barycenter's row instead.
 - Root nodes self-reference: `parent_indices[i] == i`.
 - COE column 0 is the **semi-latus rectum `p`**, not semi-major axis — chosen so parabolic orbits stay
-  representable. Always index via `COEIndex` (`custom_types.py:17`), never bare integers.
-- Slots come off a free list (`simulator.py:47`) and are never returned. There is no despawn path.
+  representable. Always index via `COEIndex` (`custom_types.py`), never bare integers.
+- Slots come off a free list (`free_indices`) and are never returned. There is no despawn path.
 
 ---
 
@@ -74,11 +74,11 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 
 | Module | What it already does |
 |---|---|
-| `frames.ReferenceFrames` | `rv_to_coe` (`frames.py:44`) and `coe_to_rv` (`frames.py:170`) — vectorised over `(N,3)`/`(N,6)`, handle circular/equatorial/polar/parabolic fallbacks, return a success mask. Also body-fixed, RaDec and long/lat transforms |
-| `utilities.Transformations` | `Rx` `Ry` `Rz` `Rxyz` `Rzyx` `Rzxz` (batched `(N,3,3)` tensors), `cart_to_sphe` / `sphe_to_cart` (`utilities.py:15`) |
-| `utilities.Anomalies` | Full true ↔ eccentric ↔ mean stack including hyperbolic and parabolic, Newton-Raphson and successive-substitution solvers (`utilities.py:135`) |
-| `utilities.Kepler` / `utilities.Barker` | Time ↔ mean anomaly for elliptic/hyperbolic and parabolic cases (`utilities.py:441`, `:482`) |
-| `simulator._topological_sort` | Vectorised BFS tier stratification — generic over any parent-index array (`simulator.py:219`) |
+| `frames.ReferenceFrames` | `rv_to_coe` and `coe_to_rv` — vectorised over `(N,3)`/`(N,6)`, handle circular/equatorial/polar/parabolic fallbacks, return a success mask. Also body-fixed, RaDec and long/lat transforms |
+| `utilities.Transformations` | `Rx` `Ry` `Rz` `Rxyz` `Rzyx` `Rzxz` (batched `(N,3,3)` tensors), `cart_to_sphe` / `sphe_to_cart` |
+| `utilities.Anomalies` | Full true ↔ eccentric ↔ mean stack including hyperbolic and parabolic, Newton-Raphson and successive-substitution solvers |
+| `utilities.Kepler` / `utilities.Barker` | Time ↔ mean anomaly for elliptic/hyperbolic and parabolic cases |
+| `simulator._topological_sort` | Vectorised BFS tier stratification — generic over any parent-index array |
 | `database.py` | Polymorphic ORM: `BaseBodyORM` / `CelestialBodyORM` / `VesselORM` / `VirtualBodyORM` plus `SystemORM`. `VesselORM` already carries `dry_mass`, `fuel_mass`, `drag_area` |
 | `kernels.py` | Compiled scalar kernels: `kepler_propagate`, `calc_global_states`, plus reusable `coe_to_rv_scalar` / `solve_kepler_scalar` / `advance_true_anomaly` |
 | `scenarios.py` | `two_body`, `sun_earth_moon`, `earth_constellation(n_sats=…)` — shared by tests and benchmarks. **Build scenarios from here, never inline in a test** |
@@ -89,15 +89,28 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 
 ## Known-broken and in-flight
 
-Do not treat these as intentional, and do not silently work around them.
+### On `main` — live
 
-- `Perturbations.GVP_COE` (`utilities.py:520`) is WIP with four errors: line 544 has `1.0 + e + cos θ`
-  where it should be `e * cos θ`; line 552 is missing a `*` **and** uses the `ȧ` form (correct is
-  `ṗ = (2 p r / h) · a_S`); line 577's second `+` should be `*`.
-- `cart_to_RSW` (`frames.py:292`) is missing `@staticmethod` and its shape math adds an `int` to a
-  `tuple`. `RSW_to_cart` (`frames.py:322`) is a stub typed as returning an array.
-- The above are the 4 current `mypy --strict` errors.
-- `rv_to_coe` (`frames.py:84`): the no-valid-orbit early return has shape `(N,3)` where callers expect `(N,6)`.
+- `rv_to_coe`: the no-valid-orbit early return has shape `(N,3)` where callers expect `(N,6)`.
+  Only reachable when *every* input state is degenerate, which is why it has not bitten yet.
+
+`main` is `mypy --strict` clean and all four CI jobs are green. Do not go looking for the items below
+on this branch — they are not here.
+
+### On `feature/vop-propagator` only — not on `main`
+
+That branch carries the WIP Gauss variational work and is the source of the 4 `mypy --strict` errors.
+Rebase it onto `main` before resuming (its workflow file predates the all-branches CI trigger, so CI
+does not currently run on it):
+
+- `Perturbations.GVP_COE` has four equation errors: `1.0 + e + cos θ` where it should be `e * cos θ`;
+  a missing `*` combined with the `ȧ` form where the correct one is `ṗ = (2 p r / h) · a_S`; and a
+  `+` that should be `*`.
+- `cart_to_RSW` is missing `@staticmethod` and its shape math adds an `int` to a `tuple`.
+  `RSW_to_cart` is a stub typed as returning an array.
+
+**Phase 2 needs RSW.** Thrust direction laws and any GVE work depend on those transforms, so fixing
+them is phase 2 scope, not leftover cleanup — and the fix lands on `main`, not by merging that branch.
 
 Fixed in phase 1 (`Anomalies.mean_to_eccentric`, rewritten): the `"S.S"` global-length mask indexing
 bug, and a silent-NaN path where a diverging iterate returned NaN *reporting success* — `abs(nan) > tol`
