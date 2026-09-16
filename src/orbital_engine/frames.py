@@ -3,10 +3,22 @@
 from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
-from .custom_types import COEIndex, Radians, Kilometers, Seconds, ArrayFloat, Numeric
+from .custom_types import COEIndex, Radians, Kilometers, Seconds, ArrayFloat, ArrayKilometers, ArrayKmPerSec, Numeric
 from typing import Optional, cast
 from .utilities import Transformations, Anomalies, Kepler, Barker
 from .exceptions import SingularityError
+
+# Degeneracy threshold for the RSW frame, applied to sin(alpha) = |r x v| / (|r| |v|), alpha the angle between r and v.
+#
+# Rounding leaves each component of a computed r x v in error by up to ~eps |r||v|, so the direction of W carries an
+# angular error bounded by roughly eps / sin(alpha): 2e-6 rad at this threshold (measured 7e-8), degrading to pure
+# noise by sin(alpha) ~ 1e-15. No bound orbit comes near it - an ellipse has sin(alpha) = cos(flight-path angle)
+# >= sqrt(1 - e^2), still 1.4e-3 at e = 0.999999 - so in practice it flags only genuinely radial trajectories.
+#
+# The test is *relative*, so a state is classified identically in km or AU. rv_to_coe's absolute |h| > 1e-9 km^2/s is
+# not: at 1 AU and 30 km/s, rounding noise in |h| is bounded by eps |r||v| ~ 1e-6 km^2/s, so a heliocentric state that
+# is rectilinear up to rounding can pass it.
+RSW_RECTILINEAR_TOL: float = 1e-10
 
 # ==========================================================================================================================================================
 # Helper functions. Vector math
@@ -287,6 +299,187 @@ class ReferenceFrames:
         - *V_longlat: [r, long, lat], (Distance, rad, rad)*
         """
         return Transformations.sphe_to_cart(V_longlat)
+
+    # ==================================================================================================================================================
+    # Satellite-based RSW frame: Radial, along-track (S), cross-track (W)
+    # ==================================================================================================================================================
+
+    @staticmethod
+    def RSW_basis(r: ArrayKilometers, v: ArrayKmPerSec, *, tol: float = RSW_RECTILINEAR_TOL,
+                  out_basis: Optional[ArrayFloat] = None) -> tuple[ArrayFloat, NDArray[np.bool_]]:
+        """
+        Orthonormal RSW basis of a reference state, returned as the Cartesian -> RSW rotation matrix.
+
+        Definition - Vallado, *Fundamentals of Astrodynamics and Applications*, 4th ed., Sec. 3.3 (satellite-based
+        coordinate systems, "RSW"):
+
+            R = r / |r|                  radial, outward from the central body
+            W = (r x v) / |r x v|        cross-track, along the orbital angular momentum
+            S = W x R                    along-track, in the orbital plane, toward the direction of motion
+
+        Right-handed by construction: R x S = R x (W x R) = W (R.R) - R (R.W) = W, so det[R; S; W] = +1.
+
+        **S is not the velocity direction.** It is perpendicular to R, so it coincides with v only where the
+        flight-path angle is zero - circular orbits, periapsis, apoapsis. A "prograde" S-axis burn is a horizontal
+        burn. In this frame v = [v_R, v_S, 0] with v_R = (mu/h) e sin(theta) and v_S = (mu/h)(1 + e cos(theta)).
+
+        Aliases: RTN, Gaussian frame. **Not** interchangeable with LVLH, whose common convention is z = -R (nadir)
+        and y = -W.
+
+        Parameters
+        ----------
+        r, v : (3,) or (N, 3)
+            Reference state(s) in any Cartesian frame; the basis is expressed in that same frame. Broadcast
+            against each other.
+        tol : float
+            Rectilinearity threshold on |r x v| / (|r||v|). See `RSW_RECTILINEAR_TOL` for the derivation.
+        out_basis : (N, 3, 3) or (3, 3), optional
+            Written in place and returned when given.
+
+        Returns
+        -------
+        basis : (N, 3, 3), or (3, 3) for a single (3,) reference state
+            Rows are R, S, W in the input frame's components, so `x_rsw = basis @ x` and, the matrix being
+            orthogonal, `x = basis.T @ x_rsw`.
+        valid : (N,) bool
+            False where the frame is undefined: r parallel to v, zero r or v, or non-finite input. Those rows of
+            `basis` are exactly zero, never NaN, so a vector transformed through them comes back as zero instead
+            of poisoning an accumulator.
+
+        Numerical notes
+        ---------------
+        W is re-orthogonalised against R by one Gram-Schmidt step. The exact angular momentum is perpendicular to
+        r, but the *computed* r x v is not: rounding leaves R.W growing like eps / sin(alpha). That is ~1e-16 for
+        any real orbit, where the step changes nothing measurable, but was measured at 7e-12 for sin(alpha) = 1e-6
+        and 1.4e-8 just inside `tol` - enough that the matrix stops being a rotation to working precision. With the
+        step, orthonormality holds to ~3 eps across that whole range. Projecting out the R component moves W toward
+        the exact answer and leaves R exactly r / |r|.
+        """
+        _r = np.atleast_2d(np.asarray(r, dtype=np.float64))
+        _v = np.atleast_2d(np.asarray(v, dtype=np.float64))
+        if _r.ndim != 2 or _v.ndim != 2 or _r.shape[-1] != 3 or _v.shape[-1] != 3:
+            raise ValueError(f"RSW frame needs (3,) or (N, 3) reference states; got r {np.shape(r)}, v {np.shape(v)}")
+
+        n = np.broadcast_shapes(_r.shape, _v.shape)[0]
+        single = np.ndim(r) == 1 and np.ndim(v) == 1
+
+        if out_basis is None:
+            basis: ArrayFloat = np.empty((n, 3, 3), dtype=np.float64)
+        else:
+            basis = out_basis[np.newaxis] if out_basis.ndim == 2 else out_basis
+            if basis.shape != (n, 3, 3):
+                raise ValueError(f"out_basis must have shape ({n}, 3, 3); got {out_basis.shape}")
+
+        h = np.cross(_r, _v)
+        r_mag = np.linalg.norm(_r, axis=-1)
+        v_mag = np.linalg.norm(_v, axis=-1)
+        h_mag = np.linalg.norm(h, axis=-1)
+
+        # Phrased as "keep what is demonstrably defined": every comparison against NaN is False, so a non-finite
+        # state lands in the invalid set instead of slipping through. See docs/engineering-log.md, the NaN solver.
+        valid: NDArray[np.bool_] = h_mag > tol * r_mag * v_mag
+
+        # Basic slices: these are views, so every write below lands directly in `basis`.
+        R = basis[:, 0, :]
+        S = basis[:, 1, :]
+        W = basis[:, 2, :]
+
+        # Invalid rows divide by 1 rather than by a possibly-zero norm and are zeroed at the end, so no 0/0 is ever
+        # evaluated. On a valid row |h| > 0, which forces |r| > 0 as well.
+        np.divide(_r, np.where(valid, r_mag, 1.0)[:, np.newaxis], out=R)
+        np.divide(h, np.where(valid, h_mag, 1.0)[:, np.newaxis], out=W)
+
+        W -= np.sum(W * R, axis=-1, keepdims=True) * R
+        np.divide(W, np.where(valid, np.linalg.norm(W, axis=-1), 1.0)[:, np.newaxis], out=W)
+
+        S[...] = np.cross(W, R)
+
+        basis[~valid] = 0.0
+
+        if single:
+            return basis[0], valid
+        return basis, valid
+
+    @staticmethod
+    def cart_to_RSW(r: ArrayKilometers, v: ArrayKmPerSec, vec: ArrayFloat, *, tol: float = RSW_RECTILINEAR_TOL,
+                    out: Optional[ArrayFloat] = None) -> tuple[ArrayFloat, NDArray[np.bool_]]:
+        """
+        Cartesian vector(s) -> RSW components [x_R, x_S, x_W] in the frame of reference state (r, v).
+
+            x_R = x . R,    x_S = x . S,    x_W = x . W
+
+        Projection onto the unit vectors defined in `RSW_basis` (Vallado 4th ed., Sec. 3.3). The use case is
+        perturbation analysis: Gauss's variational equations take the perturbing acceleration as (a_R, a_S, a_W).
+
+        Parameters
+        ----------
+        r, v : (3,) or (N, 3)
+            Reference state(s) defining the frame.
+        vec : (3,) or (N, 3)
+            Vector(s) to express in RSW, in the same Cartesian frame as r and v. Any units - position, velocity,
+            acceleration - and returned in those units. A single (3,) applies to every reference state; an (M, 3)
+            against a single (3,) reference state expresses M vectors in one frame.
+        out : optional
+            Written in place and returned when given. Must already have the broadcast output shape. May be `vec`
+            itself, rotating in place.
+
+        Returns
+        -------
+        x_rsw : broadcast of the leading shapes, (..., 3)
+            Zero on rows whose reference state is invalid (for finite `vec`).
+        valid : (N,) bool
+            Frame-validity mask of the reference states; see `RSW_basis`.
+        """
+        basis, valid = ReferenceFrames.RSW_basis(r, v, tol=tol)
+        _vec = np.asarray(vec, dtype=np.float64)
+
+        # Row i of the basis is unit vector i, so component i is (row i) . x  ->  x_rsw = basis @ x.
+        if out is None:
+            x_rsw: ArrayFloat = np.einsum("...ij,...j->...i", basis, _vec)
+            return x_rsw, valid
+        np.einsum("...ij,...j->...i", basis, _vec, out=out)
+        return out, valid
+
+    @staticmethod
+    def RSW_to_cart(r: ArrayKilometers, v: ArrayKmPerSec, vec_rsw: ArrayFloat, *, tol: float = RSW_RECTILINEAR_TOL,
+                    out: Optional[ArrayFloat] = None) -> tuple[ArrayFloat, NDArray[np.bool_]]:
+        """
+        RSW components [x_R, x_S, x_W] -> Cartesian vector(s), in the frame of reference state (r, v).
+
+            x = x_R R + x_S S + x_W W
+
+        The inverse of `cart_to_RSW`, and since the basis is orthogonal, its transpose (Vallado 4th ed., Sec. 3.3).
+        The use case is thrust: a direction law stated in RSW ("burn prograde" is +S) must be rotated to Cartesian
+        before it can be accumulated with other accelerations.
+
+        Parameters
+        ----------
+        r, v : (3,) or (N, 3)
+            Reference state(s) defining the frame.
+        vec_rsw : (3,) or (N, 3)
+            RSW components. Any units, returned in those units. A single (3,) - e.g. [0, 1, 0] for prograde -
+            applies to every reference state.
+        out : optional
+            Written in place and returned when given. Must already have the broadcast output shape. May be
+            `vec_rsw` itself, rotating in place.
+
+        Returns
+        -------
+        x : broadcast of the leading shapes, (..., 3)
+            Zero on rows whose reference state is invalid (for finite `vec_rsw`) - no thrust is applied through an
+            undefined frame, and the mask says so.
+        valid : (N,) bool
+            Frame-validity mask of the reference states; see `RSW_basis`.
+        """
+        basis, valid = ReferenceFrames.RSW_basis(r, v, tol=tol)
+        _vec = np.asarray(vec_rsw, dtype=np.float64)
+
+        # Cartesian component i sums column i of the basis: x_i = sum_j basis[j, i] x_rsw[j]  ->  x = basis.T @ x_rsw.
+        if out is None:
+            x: ArrayFloat = np.einsum("...ji,...j->...i", basis, _vec)
+            return x, valid
+        np.einsum("...ji,...j->...i", basis, _vec, out=out)
+        return out, valid
 
 if __name__ == "__main__":
     MU_Sun = 1.32712440042 * 10**11
