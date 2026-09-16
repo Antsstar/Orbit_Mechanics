@@ -27,7 +27,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `body.py` | `BodyHandle`, a UI-facing pointer into the arena | unchanged, never instantiated |
 | `kernels.py` | Compiled scalar twins of the hot paths | **new** |
 | `scenarios.py` | Declarative universe builders, shared by tests and benchmarks | **new** |
-| `reference.py` | Independent DOP853 N-body truth trajectories | **new** |
+| `reference.py` | Independent DOP853 N-body truth trajectories, optionally with explicitly passed J2 | **new** |
 | `benchmark.py` | Timing primitive (minimum-of-batches) | **new** |
 | `forces.py` | Force-model composition: enabled physics as a per-body bitmask, additive stateless kernels, and the acceleration contract integrators consume | **new** |
 | `gravity.py` | `point_mass_gravity`: the central two-body term relative to the gravitational parent | **new** |
@@ -301,6 +301,28 @@ Four distinct kinds of check, each catching what the others cannot.
 The reference layer exists because the first three can all be satisfied by an engine that is
 self-consistently wrong. `reference.py` shares no code with the engine — no elements, no Kepler solver,
 no hierarchy — so an error in `frames.py` cannot appear on both sides of the comparison.
+
+### J2 in the truth, and what keeps it independent
+
+The frontier plot judges models that include J2, so the truth has to include it too. Three rules keep
+that from quietly coupling the truth to the engine:
+
+- **Configuration is passed, not read.** `reference_for(..., oblateness={"Earth": (j2, r_eq)})` takes the
+  coefficients as an argument. Reading `force_model_mask` / `force_model_params` would copy any bug in
+  how the engine stores its configuration into the truth that is supposed to catch it.
+- **The formula has a different derivation.** `geopotential.j2_kernel` is Curtis' Cartesian gradient;
+  `reference.j2_field` takes the gradient in spherical coordinates and projects it onto `r_hat` and the
+  spin axis. A transcription error in one form does not produce the same error in the other. The two
+  agree pointwise to 1.2e-15 relative.
+- **The physics is complete for what it models.** The oblate body feels the reaction, so momentum is
+  conserved, and the field acts on every other integrated body. The engine applies `j2` only where it
+  is enabled, relative to the parent. Where those differ, the case is a comparison.
+
+`tests/validation/test_reference_j2.py` holds the truth's own invariants, the secular nodal rate, and
+the verification that Cowell + `point_mass_gravity` + `j2` converges to it at fourth order down to a
+predicted ~1e-9 km floor. It also has a negative control, a doubled spin-axis term, which is caught at
+136 km. For truth runs use `TRUTH_RTOL` / `TRUTH_ATOL` (1e-13, 1e-12). With the default `atol=1e-9`
+the absolute tolerance, not `rtol`, limits LEO velocities.
 
 ### Verification is not comparison
 
