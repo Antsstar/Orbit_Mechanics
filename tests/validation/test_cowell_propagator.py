@@ -269,10 +269,12 @@ def test_cowell_matches_keplerian_when_the_parent_accelerates(
     used for the fixed-primary case should hold here too; "small" alone would not distinguish a
     correctly re-based integrator from one that merely happens to be accurate at one step size.
 
-    Confirmed this session that this exact test, unmodified, fails against the pre-fix integrator: at
-    the same four step counts the error was ~5.12e6 km at *every* one (ratios 1.0000-1.0002, not
-    shrinking with dt at all) - the signature of a systematic missing-physics error rather than a
-    discretization error, which is exactly why a convergence-ratio check catches this class of bug
+    This exact test, unmodified, fails against the pre-fix commit (9649a47, with only this file and the
+    `moon_mu` parameter of `scenarios.py` applied on top): at the four step counts the errors were
+    1.07e5, 9.82e4, 9.29e4 and 9.10e4 km (ratios 1.09, 1.06, 1.02, barely shrinking with dt), against
+    a coherent-forcing estimate over two days of 0.5 * 5.9e-6 * (1.728e5 s)^2 ~ 8.8e4 km. That is the
+    signature of a systematic missing-physics error rather than a discretization error, and is
+    exactly why a convergence-ratio check catches this class of bug
     where a single fixed-tolerance magnitude check would only catch it by accident of having picked a
     large enough number.
     """
