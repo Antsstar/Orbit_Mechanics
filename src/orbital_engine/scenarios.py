@@ -97,7 +97,7 @@ def two_body(
     )
 
 
-def sun_earth_moon(session: Session, *, capacity: int = 64) -> Simulation:
+def sun_earth_moon(session: Session, *, capacity: int = 64, moon_mu: float = MU_MOON) -> Simulation:
     """
     Sun heading the Solar System; Earth heading a nested Earth-Moon system whose barycenter is
     itself a member of the Solar System.
@@ -106,6 +106,12 @@ def sun_earth_moon(session: Session, *, capacity: int = 64) -> Simulation:
     exercises what is actually novel here: the Moon's COE is measured against Earth
     (`parent_indices`) while its Cartesian state is measured against the Earth-Moon barycenter
     (`body_sys_map`).
+
+    `moon_mu` defaults to the real lunar mass. Passing `0.0` gives a massless Moon: it stops
+    contributing to Earth's reflex kick (the same "massless secondary" degenerate limit
+    `two_body(mu_secondary=0.0)` exercises), while Earth itself keeps its genuine heliocentric
+    acceleration toward the Sun - this is what makes the scenario useful for validating a body whose
+    *parent* accelerates, which `two_body`'s always-fixed primary cannot exercise at all.
     """
     ssb = VirtualBodyORM(name="SSB")
     emb = VirtualBodyORM(name="EMB")
@@ -135,7 +141,7 @@ def sun_earth_moon(session: Session, *, capacity: int = 64) -> Simulation:
     earth_moon.head_body_id = earth.id
 
     moon = CelestialBodyORM(
-        name="Moon", mu=MU_MOON, system_id=earth_moon.id, parent_id=earth.id, radius=1737.4,
+        name="Moon", mu=moon_mu, system_id=earth_moon.id, parent_id=earth.id, radius=1737.4,
         p=MOON_P, e=MOON_E, i=math.radians(5.145),
         raan=math.radians(125.08), arg_pe=math.radians(318.15), theta=math.radians(115.0),
     )

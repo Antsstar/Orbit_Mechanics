@@ -1,12 +1,14 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
-from .custom_types import Seconds, PropagatorType
+from .custom_types import Seconds, ScalarSeconds, PropagatorType
 from .registry import register_propagator
 
 import numpy as np
 from numpy.typing import NDArray
 from .utilities import Anomalies, Kepler, Barker
 from . import frames as fr
+from .integrators import Integrator
+from .forces import AccelerationProvider
 
 
 if TYPE_CHECKING:
@@ -37,8 +39,11 @@ class KeplerianPropagator(Propagator):
         max_capacity: int                   = len(local_states)
 
 
-        # 1. Find all active bodies that are not heads
-        sib_mask = active_mask & ~is_head
+        # 1. Find all active bodies that are not heads. An explicit `sib_mask` override lets a caller
+        # exclude Cowell-designated bodies from analytic propagation without changing this method's
+        # default behaviour for any existing caller - see Simulation.step and CowellPropagator below.
+        sib_mask_override: NDArray[np.bool_] | None = kwargs.get('sib_mask')
+        sib_mask = sib_mask_override if sib_mask_override is not None else (active_mask & ~is_head)
         sibs = np.where(sib_mask)[0]
 
         # heads = parent_indices[sibs]
@@ -174,6 +179,28 @@ class KeplerianPropagator(Propagator):
         coe_states[mask, 5] = theta_col
 
 
+class CowellPropagator(Propagator):
+    """
+    Adapter that lets Cowell propagation register through the same `registry._PROPAGATOR_REGISTRY`
+    mechanism `KeplerianPropagator` uses, so `Simulation.step` selects between them by reading the
+    registry rather than branching on a hardcoded class. Unlike `KeplerianPropagator`, Cowell needs a
+    *stateful* integrator - `integrators.RK4Integrator` owns scratch sized to `max_capacity`, allocated
+    once by `Simulation.__init__` (see that module's docstring for why) - so this adapter takes that
+    integrator as a keyword argument rather than constructing one itself. `Propagator.propagate` stays
+    a stateless staticmethod for both propagators; only the object it delegates to differs.
+    """
+    @staticmethod
+    def propagate(dt: Seconds, **kwargs: Any) -> None:
+        integrator: Integrator = kwargs['integrator']
+        provider: AccelerationProvider = kwargs['provider']
+        t: ScalarSeconds = kwargs['t']
+        state: NDArray[np.float64] = kwargs['state']
+        indices: NDArray[np.int64] = kwargs['indices']
+        primaries: NDArray[np.int32] = kwargs['primaries']
+        integrator.step(provider, t, state, float(dt), indices, primaries)
+
+
 register_propagator(PropagatorType.KEPLERIAN, KeplerianPropagator)
+register_propagator(PropagatorType.COWELL, CowellPropagator)
 
         

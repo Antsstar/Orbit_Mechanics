@@ -374,6 +374,59 @@ and each was invisible until the one before it was fixed.
 
 ---
 
+### Cowell silently assumed the parent never moves
+
+**Symptom.** None from the test suite at the time - every Cowell test passed. Under review, reasoning
+about `scenarios.sun_earth_moon` with the Moon reassigned to Cowell (and `moon_mu=0.0` so it does not
+also perturb the reflex kick) showed the Earth-Moon distance growing from a correct ~4.0e5 km at day 1
+to ~2.4e6 km at day 10 to ~1.9e7 km at day 30 - unbound, not merely inaccurate, while the equivalent
+all-Keplerian run stayed at ~4.0e5 km throughout. A `two_body`-based control (stationary primary)
+matched the Keplerian propagator to 2.2e-3 km, so the integrator's arithmetic was not obviously broken
+- only scenarios with a moving parent were affected, and none had been tested.
+
+**Cause.** The first version of `integrators.RK4Integrator` integrated a Cowell body's *absolute*
+`global_states` row directly: `y0 = state[indices]`, advanced using only the acceleration
+`point_mass_gravity` returns (which depends solely on the body's position relative to its parent).
+That acceleration is the correct *relative* two-body acceleration, but treating it as the derivative of
+the body's *absolute* velocity implicitly assumes the parent's own acceleration is zero - there is
+nothing in `d(v_absolute)/dt = a_relative` that ever subtracts what the parent itself is doing. Earth
+(the Moon's `parent_indices` parent) accelerates toward the Sun at `mu_Sun/AU² ≈ 5.9e-6 km/s²`, about
+twice the Moon's own pull toward Earth (`mu_Earth/r² ≈ 2.7e-6 km/s²`) - a completely missing term of
+the dominant size, not a small correction. Every test built alongside the first version used
+`scenarios.two_body`, whose primary is fixed by construction, so the bug was invisible to all of them;
+`docs/architecture.md`'s Cowell section, at the time, even documented "fixed or non-existent primary"
+as an *assumed*, deliberately out-of-scope limitation rather than recognising it as the symptom of a
+bug already present.
+
+**Fix.** Integrate the state *relative to `parent_indices[body]`* - `(r_body - r_parent,
+v_body - v_parent)` - instead of the absolute state. Every current force kernel's acceleration depends
+only on that relative separation, never on the parent's absolute position, so the relative state obeys
+a self-contained ODE that does not reference the parent's motion at all: `d²r_rel/dt² = a(r_rel)`,
+exact regardless of how the parent accelerates. `RK4Integrator.step` gained a `primaries` parameter
+(`parent_indices[indices]`) and now reconstructs an absolute candidate row
+(`state[primaries] + candidate_relative_state`) at each sub-stage purely so force kernels see a
+consistent common frame to read, discarding the reconstruction once the acceleration is extracted.
+`Simulation.step` snapshots each Cowell body's parent's state *before* the Cowell integration runs,
+and once `calc_global()` has propagated the parent (a Keplerian body) to its true end-of-step position,
+re-bases the integrator's relative result onto that fresh position. Measured after the fix, at the same
+scenario and elapsed times: Earth-Moon distance 3.96e5 km (day 1), 3.96e5 km (day 10), 4.02e5 km (day
+30) - matching the Keplerian run to visible precision throughout, and a dedicated convergence-order scan
+(2 days elapsed, 8-64 steps) shows clean fourth order (ratios 16.3, 16.1, 16.1), confirming this is a
+genuine fix rather than a coincidental cancellation.
+
+**How to avoid.** For any body integrated relative to a moving reference, integrate the *relative*
+state, not the absolute one, even when the acceleration formula looks identical either way - the
+formula `-mu·r_rel/|r_rel|³` is correct as `d²r_rel/dt²` but silently wrong as `d²r_absolute/dt²`
+unless the reference never moves, and nothing in that formula's own derivation flags which case applies.
+A test suite built entirely on scenarios with a stationary reference (here, `two_body`'s fixed primary)
+cannot distinguish the two, no matter how many of them pass - the fix was found by reasoning about a
+scenario where the reference moves, not by any test failing on its own. Prefer that reasoning *before*
+writing the validation suite, not after: a per-feature contract's "expected error magnitude" step
+(`CLAUDE.md`) should be derived against the *least* favourable case the model is allowed to see, not
+against whichever scenario happens to already exist.
+
+---
+
 ## Mistakes made while working, and their corrections
 
 Recorded honestly, because the correction is the reusable part.

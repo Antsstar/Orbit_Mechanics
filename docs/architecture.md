@@ -176,6 +176,114 @@ how its mass is stored.
 
 ---
 
+## Cowell propagation: frame, restriction, and what it does not do
+
+`integrators.py` (RK4) and `gravity.py` (`point_mass_gravity`) add the engine's second propagator:
+direct numerical integration of the Cartesian equations of motion, selectable per body through
+`Simulation.set_propagator` and dispatched by `step()` alongside the unchanged analytic Keplerian
+path. The design problem is that the arena is hierarchical and Cowell is not — a Cartesian integrator
+has no notion of a system bubble or a reflex kick — so the frame it integrates in has to be chosen
+deliberately rather than inherited from whichever array happens to be lying around.
+
+**Frame: stored in the simulation-root inertial frame (`global_states`); *integrated* relative to
+`parent_indices`.** These are two different questions and an earlier version of this section — and of
+the code — conflated them, which was a real correctness bug (see below). Every registered force kernel
+(`forces.ForceKernel`) indexes its `state` argument by absolute arena slot, exactly like
+`global_states` — a kernel computing a relative vector to a body's parent (`point_mass_gravity`,
+`geopotential.j2_kernel`) reads both rows from the *same* array, so `provider` still needs a common,
+absolute-frame array to call into; `global_states` is the only array with that property, since
+`local_states` is bubble-relative and a different bubble for every body. But *what RK4 integrates* is
+not that absolute position — it is the state relative to `parent_indices[body]`,
+`(r_body - r_parent, v_body - v_parent)`. Every current force kernel's output depends only on that
+difference, never on the parent's absolute position, so the relative state obeys a self-contained ODE
+that does not care how the parent itself is moving. `integrators.RK4Integrator` reconstructs an
+absolute candidate row (`state[primaries] + candidate_relative_state`) at each sub-stage purely so
+`provider` has a common frame to read, discards it once the acceleration is read back, and
+`Simulation.step` re-bases the integrator's relative result onto the parent's freshly
+Keplerian-propagated position once `calc_global()` has produced it (see below). `global_states` is
+still where the result lives; it is simply not the variable the numerical method advances.
+
+**The bug this replaced.** The first version of this propagator integrated the body's *absolute*
+`global_states` row directly, using only the parent-relative point-mass acceleration. That silently
+assumed the parent never moves: nothing in the formulation ever subtracted the parent's own velocity or
+acceleration. It passed every test built at the time because they all used `scenarios.two_body`, whose
+primary is fixed by construction — review caught it by reasoning about `scenarios.sun_earth_moon`
+instead, where the Moon's parent (Earth) genuinely accelerates toward the Sun. With the Moon on Cowell
+and only `point_mass_gravity` enabled, the bug produced an Earth-Moon separation of ~1.9e7 km after 30
+days against a true ~4e5 km — unbound, not merely inaccurate — matching the analytic estimate
+`0.5 · (mu_Sun/AU²) · t²`. See `docs/engineering-log.md` for the full account and
+`tests/validation/test_cowell_propagator.py::test_cowell_matches_keplerian_when_the_parent_accelerates`
+for the regression guard.
+
+**Convention: two-body mass sum via `parent_indices`, matching the Keplerian propagator exactly.**
+`point_mass_gravity` computes `mu = mu_array[body] + mu_array[parent_indices[body]]`, the same sum
+`Simulation._rehydrate_coes` and `KeplerianPropagator` already use. A Cowell body running only this
+model is integrating the *identical* equation of motion the Keplerian propagator solves analytically,
+so the two agree to RK4's own truncation error rather than to some looser "close enough" tolerance —
+that is what makes the fourth-order convergence test in `tests/validation/test_cowell_propagator.py`
+meaningful rather than a coincidence of similar-but-different physics.
+
+**Restriction: Cowell may only be assigned to an active body that is not a head, not a system
+barycenter, and not its own kinematic bubble** (`body_sys_map[i] != i`), enforced by
+`Simulation.set_propagator`. Two independent reasons, not one:
+
+- A head's or barycenter's motion is the reflex kick `kepler_propagate` / `_recalculate_all_barycenters`
+  compute from *every* sibling's mass and position, every step. Replacing it with an independently
+  integrated Cartesian state would not just be wrong for that one body — it would desynchronise the
+  reflex kick for *every other sibling in the bubble*, since the kick is derived from the head's row.
+- A kinematic root (`body_sys_map[i] == i`) is what `calc_global` treats as the coordinate origin: tier
+  0 is unconditionally zeroed every step (`global_states[tier_0] = 0.0`). A root Cowell body's
+  integrated motion would be silently discarded by that line rather than raise, producing a body that
+  looks like it never moves — the failure mode this project treats as worse than a crash.
+
+**Cowell also requires `mu_array[body] == 0.0`, enforced by the same call.** A body's mass reaches the
+rest of the arena only through `kepler_propagate`'s barycentric accumulation (every active,
+non-Cowell sibling's mass-weighted position summed onto its head), which a Cowell body never passes
+through — `_kepler_sib_idx` excludes it. A massive Cowell body would therefore silently stop
+contributing to its own head's reflex kick, corrupting every other sibling in the bubble exactly like
+the head/barycenter case above, just through mass rather than position. This is enforced rather than
+left as a documented-but-permitted gap; a massless body (the common case for a satellite, or a test
+secondary with `mu_secondary=0.0`) is unaffected, since it never contributed to a reflex kick anyway.
+
+**How the result reaches `local_states` and `global_states`.** Cowell integration runs *before* the
+Keplerian propagation and `calc_global()` in `step()`. Before it runs, `Simulation.step` snapshots each
+Cowell body's parent's *start-of-step* global state (`parent_state_at_start`); the integrator's result
+is therefore expressed relative to that snapshot, not a true absolute position, and is saved.
+`calc_global()` then runs as normal — it still walks *every* active slot in topological order,
+including Cowell ones, briefly overwriting them with a stale, pre-step value derived from last step's
+`local_states`, which is immediately discarded — and once it has propagated the parent (a Keplerian
+body) to its true end-of-step position, `step()` recovers the pure relative state
+(`cowell_result - parent_state_at_start`) and adds the parent's *fresh* position to it, before writing
+the result into `global_states`. `local_states[i]` is then rebuilt as
+`global_states[i] - global_states[body_sys_map[i]]`, using `body_sys_map` — the kinematic bubble
+reference, generally a *different* slot from `parent_indices` (the Moon is the canonical case: its
+`body_sys_map` is the Earth-Moon barycentre, its `parent_indices` is Earth). This keeps the documented
+invariant — `local_states[i]` relative to `global_states[body_sys_map[i]]` — true for a Cowell body
+exactly as it is for a Keplerian one, so nothing downstream (`_record_state`, `history`, a future spawn
+path) needs to know which propagator produced a given row.
+
+**What a Cowell body's orbital elements mean: nothing.** `coe_states` for a Cowell body is left
+untouched by `step()` — stale at whatever it held before the body was reassigned, the same convention
+already used for a head's deliberately zeroed COE. Recomputing osculating elements from the fresh
+`(r, v)` each step would be legitimate (it is exactly what `_rehydrate_coes` already does at build
+time) but is not needed by anything Cowell currently does and was left out rather than half-built; see
+the follow-up note in the module docstrings.
+
+**What this does not do.** Cowell bodies feel gravity from their own parent only, never from every
+other active body (a two-body term, not N-body) — a different, separately registered model would be
+needed for a genuine third-body or N-body force. That is the one place a real approximation remains:
+because every *current* force kernel depends only on a body's position relative to its own parent, the
+relative-state formulation above carries no error at all from the parent's motion during a step, no
+matter how fast or non-uniformly it accelerates — but a hypothetical future force depending on some
+*other* body's absolute position (a solar tidal term on the Moon, say) would see that other body frozen
+at its start-of-step position across all four RK4 sub-stages, since this integrator only ever
+re-evaluates `indices` and reads (never advances) `primaries` between stages. No such model is
+registered today, so this is a documented constraint on what CAN be added next, not a live limitation.
+Both restrictions above (mass and kinematic role) are also documented restrictions of *this* phase, not
+accidents.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
