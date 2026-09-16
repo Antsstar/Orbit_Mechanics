@@ -150,6 +150,26 @@ then execute the file.
 
 ---
 
+### A paused agent's worktree can disappear, and `PYTHONPATH=... python` may be refused
+
+**Symptom.** An agent paused for a usage-limit reset. When it resumed, `cd` into its worktree failed.
+`git worktree list` no longer showed the worktree, and its branch was gone. Before the pause, the tool
+harness had also refused `PYTHONPATH="$(pwd)/src" python ...` as a command it could not prove stayed
+inside the worktree.
+
+**Fix.** No edits had been made, so the worktree was re-created on the same branch name from current
+`main` (`git worktree add -b <branch> <path> main`). The worktree's code was imported without
+`PYTHONPATH` through a runner script outside the repo. The script puts `<worktree>/src` first on
+`sys.path` and prints `orbital_engine.__file__` and `NUMBA_AVAILABLE`, then calls `pytest.main`. A
+`--no-numba` flag also puts a directory holding a `numba.py` that raises `ImportError` on the path. That
+is the same numba block the coverage entry below uses.
+
+**How to avoid.** After any interruption, run `git worktree list` before `git status`. Commit work in
+progress early, because a removed worktree takes uncommitted files with it. Always read the printed
+import path. A green run is only evidence if the path shows the worktree.
+
+---
+
 ## Traps found in the codebase
 
 ### Disabling a force model left its acceleration behind
@@ -427,6 +447,28 @@ against whichever scenario happens to already exist.
 
 ---
 
+### `reference.py`'s default `atol` limits LEO velocities, contrary to its comment
+
+**Symptom.** None. The comment beside `DEFAULT_ATOL = 1e-9` said atol was "well below the smallest
+physically meaningful quantity ... so rtol governs throughout".
+
+**Cause.** scipy scales each component's error by `atol + rtol*|y|`. For a position of ~7000 km,
+`rtol*|y|` is 7e-10 km, so rtol and atol are comparable. For a velocity of ~7.6 km/s, `rtol*|v|` is
+7.6e-13 km/s, so `atol=1e-9` is 1300 times larger and is the tolerance that actually applies.
+
+**Measured.** On a 550 km constellation with J2, compared against a run at `rtol=2.5e-14, atol=1e-16`,
+the position error after one orbit is 3.5e-9 km at the defaults and 8.6e-10 km at `atol=1e-12`.
+`atol=1e-11` and `1e-14` give the same result as `1e-12`. Once atol no longer limits, the error
+scales with rtol: 1.5e-8 km at `rtol=1e-12`, 1.6e-7 km at `1e-11`.
+
+**Fix.** The defaults are unchanged, so existing callers stay bit-identical, and the comment is
+corrected. `TRUTH_RTOL` / `TRUTH_ATOL` = (1e-13, 1e-12) are the values for frontier-plot truth.
+
+**How to avoid.** Check a scalar `atol` against every component's `rtol*|y|`, velocities included,
+and not only against the largest component.
+
+---
+
 ## Mistakes made while working, and their corrections
 
 Recorded honestly, because the correction is the reusable part.
@@ -638,6 +680,37 @@ interrupted.
 
 **Lesson.** A background agent's completion is not guaranteed. Never report results that have not
 actually arrived, and check status before relying on delegated work.
+
+---
+
+### A negative control's predicted magnitude left out a term
+
+**What happened.** Before running the J2 truth mutant (spin-axis term doubled, which is Curtis'
+`5 s^2 - 3` changed to `5 s^2 - 5`), I estimated its effect on the Cowell-vs-truth check from the
+doubled nodal regression alone: ~29 km cross-track after one orbit. The real-file mutant gave 136.2 km.
+
+**Diagnosis.** The mutant term also has a radial projection, `-3 (mu J2 R^2/r^4) s^2`. Averaged over the
+orbit it is a constant -7.3e-6 km/s^2. The agent's second estimate put the along-track drift from that
+at `6 pi f / n^2` = 114 km per orbit, giving sqrt(114^2 + 29^2) = 118 km, "15% below the measurement".
+
+**That second estimate was also wrong, and was caught in review.** For two trajectories that start from
+the same state, Clohessy-Wiltshire with a constant radial `f` gives `y(t) = -(2 f / n^2)(n t - sin n t)`,
+so the drift is `4 pi f / n^2` = 76 km per orbit, not 114. A DOP853 run at the satellite's real initial
+state confirmed it: 76.15 km for the constant radial average alone. Decomposing the full mutant gave
+133.1 km along-track, 29.0 km cross-track and -1.3 km radial (136.2 km total, matching the test). The
+corrected estimate, sqrt(76^2 + 29^2) = 82 km, is right for the two parts it covers. The remaining
+~57 km along-track is the secular response to the orbit-varying components of the extra force, which
+depends on the initial argument of latitude. The 118 km looked close only because the factor was wrong.
+
+**Correction.** The test now carries the corrected derivation and the numerical decomposition. It
+asserts the mutant error is above 1 km and within [0.5, 2] of 82 km. That band is an
+order-of-magnitude check that the in-suite mutant is the intended mutation, not a prediction.
+
+**Lesson.** A factor of ~5 between an estimate and a measurement means a physical effect is missing,
+not that the estimate is roughly right. Close agreement is not evidence either. An estimate adjusted
+*after* seeing the measurement can land near it by accident, as 118 km did. Check a revised
+derivation by an independent route, such as a numerical decomposition, before believing that it
+closes the gap.
 
 ---
 
