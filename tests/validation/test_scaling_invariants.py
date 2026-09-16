@@ -105,6 +105,39 @@ def test_step_cost_grows_no_worse_than_linearly_with_body_count(
     )
 
 
+def test_force_composition_cost_grows_no_worse_than_linearly_with_body_count(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    `Simulation.accelerations` dispatches once per *resolved model*, never once per body - see
+    `forces.compose_accelerations`. The vectorised arithmetic inside each of those calls still costs
+    more as more bodies carry the model (that is real work, not overhead, and this test does not
+    object to it); what would indicate an accidental per-body Python loop - the same failure this
+    file's constellation test above guards against for propagation - is *super*-linear growth.
+    `tests/validation/test_force_model_composition.py::test_dispatch_calls_the_kernel_exactly_once_
+    regardless_of_body_count` checks the complementary, exact property (call *count*, not wall time)
+    that this timing test cannot: it is immune to system noise but proves nothing about cost, which is
+    what a ratio measurement is for.
+    """
+    small = scenarios.earth_constellation(db_session_factory(), n_sats=300, n_planes=6)
+    double = scenarios.earth_constellation(db_session_factory(), n_sats=600, n_planes=6)
+
+    for sim in (small, double):
+        sim.record_history = False
+        sim.enable_force_model("test_constant_accel", bodies=sim.active_mask, ax=1.0, ay=0.0, az=0.0)
+        sim.enable_force_model("test_radial_bias", bodies=sim.active_mask, k=1.0)
+
+    t_small = measure(lambda: small.accelerations(DT), inner=50).best
+    t_double = measure(lambda: double.accelerations(DT), inner=50).best
+
+    ratio = t_double / t_small
+    assert ratio < BODY_COUNT_TIME_ALLOWANCE, (
+        f"force composition cost grows super-linearly with body count: 2x bodies cost {ratio:.2f}x "
+        f"time ({t_small:.1f} us at 300 sats, {t_double:.1f} us at 600). "
+        f"Suggests a per-body Python loop where per-model dispatch was intended."
+    )
+
+
 def test_history_recording_cost_does_not_dominate_the_step(
     db_session_factory: Callable[[], Session],
 ) -> None:

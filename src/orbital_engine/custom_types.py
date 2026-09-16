@@ -28,6 +28,16 @@ class COEIndex(enum.IntEnum):
 
 
 # ==========================================================================================================================================================
+# Force-model composition
+# ==========================================================================================================================================================
+
+# Per-body bitmask of which registered force models are enabled for that body. One bit per model,
+# assigned by `registry.register_force_model` in registration order. 64 bits against "tens" of
+# models registered today is deliberate headroom, not a guess at a final count - see registry.py.
+ForceModelMask: TypeAlias = NDArray[np.uint64]
+
+
+# ==========================================================================================================================================================
 # Core Data-oriented types
 # ==========================================================================================================================================================
 

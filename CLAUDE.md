@@ -57,6 +57,9 @@ All state lives in flat pre-allocated arrays indexed by an integer slot. Nothing
 | `body_sys_map` | `(C,)` int32 | Kinematic graph: what `local_states` is measured against |
 | `sys_head_map` | `(C,)` int32 | O(1) lookup to the head of each local system bubble |
 | `active_mask` / `is_system` / `is_head` | `(C,)` bool | Slot filters |
+| `force_model_mask` | `(C,)` uint64 | One bit per registered force model, OR'd per body. Enabled physics is data |
+| `accel_accum` | `(C,3)` | Shared acceleration accumulator, km/s², arena-owned scratch |
+| `force_model_params` | `dict[name → (C,k)]` | Per-model, per-body coefficients, allocated on first resolve |
 
 Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 
@@ -71,6 +74,13 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 - COE column 0 is the **semi-latus rectum `p`**, not semi-major axis — chosen so parabolic orbits stay
   representable. Always index via `COEIndex` (`custom_types.py`), never bare integers.
 - Slots come off a free list (`free_indices`) and are never returned. There is no despawn path.
+- **`Simulation.accelerations(t, state)` returns `accel_accum` itself, not a copy.** An integrator that
+  holds more than one stage result (every RK method) must copy each before requesting the next, or all
+  stages alias one buffer and the integration is silently wrong.
+- **Call `resolve_force_models()` after any change to `force_model_mask` or `active_mask`.**
+  `enable_force_model` does it for you. It also clears `accel_accum`: `compose_accelerations` only
+  writes rows in the current dispatch set, so without that clear a disabled model's last acceleration
+  would persist in its body's row.
 
 ---
 
@@ -88,6 +98,9 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 | `scenarios.py` | `two_body`, `sun_earth_moon`, `earth_constellation(n_sats=…)` — shared by tests and benchmarks. **Build scenarios from here, never inline in a test** |
 | `reference.py` | `reference_for(sim, times)` → DOP853 N-body truth trajectory. Independent of all engine code |
 | `benchmark.py` | `measure(fn)` → min-of-batches timing with noise ratio |
+| `forces.py` | Force-model composition. `ForceKernel` is the contract a force model implements — additive (`+=`, never `=`), stateless, allocation-free, called once per model per evaluation. `AccelerationProvider` is what an integrator consumes: `(t, state) -> (C,3)`, with `state` explicit so RK sub-stages never touch the arena. Read the module docstring before writing a force model |
+| `registry.py` | `@register_force_model(name, param_names=…, citation=…)` assigns the next uint64 mask bit. `get_force_model` / `all_force_models` / `mask_for`. Bits follow registration order within a process, so **sweep configs persist model names, never raw mask integers** |
+| `Simulation` force API | `enable_force_model(name, bodies, **coefficients)` is the sweep-configuration surface; `resolve_force_models()`; `accelerations(t, state=None)` |
 
 ---
 
@@ -124,14 +137,18 @@ design; use `"N-R"` there.
 
 ### Unwired scaffolding — do not build on without discussing first
 
-`_PROPAGATOR_REGISTRY` (`registry.py`) is written and never read; `propagator_type` and `g_env` are
-allocated and never read; `BodyHandle` (`body.py`) is never instantiated and `sim.bodies` is always
-empty.
+The **force-model** half of `registry.py` is now wired (see `forces.py`). The **propagator** half —
+`_PROPAGATOR_REGISTRY` — is still written and never read; `propagator_type` and `g_env` are allocated
+and never read; `BodyHandle` (`body.py`) is never instantiated and `sim.bodies` is always empty.
 
-`step()` still selects Keplerian propagation unconditionally — it now dispatches between the compiled
-kernel and the NumPy reference on `use_compiled_kernel`, but that is an *implementation* choice, not
-a model choice. Per-body propagator selection through the registry is deliberately deferred to the
-force-model phase, where it becomes part of the sweep configuration rather than a second ad-hoc flag.
+`step()` still selects Keplerian propagation unconditionally, and nothing in `step()` calls
+`accelerations()` yet — the force layer is built but not yet driven by a propagator. Per-body
+propagator selection (Keplerian vs Cowell) arrives with the Cowell propagator, as part of the sweep
+configuration rather than a second ad-hoc flag.
+
+Two test-fixture kernels, `test_constant_accel` and `test_radial_bias`, are registered from
+`forces.py` itself, so they occupy two of the 64 mask bits and appear in `all_force_models()` for
+every user. They are fixtures, not physics — do not sweep over them.
 
 ---
 

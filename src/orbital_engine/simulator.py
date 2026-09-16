@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
-from typing import List, Optional, Any, cast
-from .custom_types import ScalarSeconds, PropagatorType
+from typing import List, Optional, Any, Dict, Sequence, Union, cast
+from .custom_types import ScalarSeconds, PropagatorType, ForceModelMask
 from numpy.typing import NDArray
 
 import numpy as np
@@ -13,7 +13,9 @@ from .propagators import Propagator, KeplerianPropagator
 from .kernels import NUMBA_AVAILABLE, calc_global_states, kepler_propagate
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
+from .registry import get_force_model
 from . import frames as fr
+from . import forces
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
@@ -104,6 +106,30 @@ class Simulation:
         # caught it.
         self._sib_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
         self._head_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+
+        # --- Force-model composition arena hooks ---
+        # A body's enabled physics is data: one bit per registered force model (registry.py), OR'd
+        # together per slot. Composing two models on one body is `mask |= bit_a; mask |= bit_b` - no
+        # branch, no subclass, no lookup keyed on a string at call time. See forces.py for the
+        # composition layer this feeds and the contract a force model implements.
+        self.force_model_mask: ForceModelMask = np.zeros(max_capacity, dtype=np.uint64)
+
+        # Shared acceleration accumulator, km/s^2, arena-indexed like global_states' position
+        # columns. Caller-owned scratch, exactly like `_kick`/`_accum` above: `compose_accelerations`
+        # zeros only the rows some model will touch and allocates nothing itself.
+        self.accel_accum: NDArray[np.float64] = np.zeros((max_capacity, 3), dtype=np.float64)
+
+        # Per-model per-body coefficient arrays, keyed by model name and allocated lazily (shape
+        # (max_capacity, n_params)) the first time that model is resolved with at least one active
+        # body. Populated through `enable_force_model`; read by that model's kernel as `params`.
+        self.force_model_params: Dict[str, NDArray[np.float64]] = {}
+
+        # Resolved dispatch list and the union of slots it touches, rebuilt by
+        # `resolve_force_models()` whenever `force_model_mask` or `active_mask` changes. Holding
+        # these as a cache rather than recomputing per call is what keeps `accelerations()` bounded
+        # by registered-model count rather than by `max_capacity` - see forces.py.
+        self._resolved_force_models: List[forces.ResolvedForceModel] = []
+        self._force_dispatch_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
 
@@ -209,6 +235,7 @@ class Simulation:
 
         
         self._refresh_active_indices()
+        self.resolve_force_models()  # Empty mask -> empty dispatch list; see resolve_force_models.
 
         loaded_count = int(np.count_nonzero(self.active_mask))
         logger.info("Universe built: %d slots loaded.", loaded_count)
@@ -242,7 +269,96 @@ class Simulation:
         self._recorded_names = list(self.name_to_index.keys())
         self._recorded_slots = np.asarray(
             [self.name_to_index[n] for n in self._recorded_names], dtype=np.int64)
-    
+
+    def resolve_force_models(self) -> None:
+        """
+        Rebuild the resolved force-model dispatch list from current mask state.
+
+        Must be called after anything that changes `force_model_mask` or `active_mask` - exactly the
+        same obligation `_refresh_active_indices` documents for the sibling/head caches, and for the
+        same reason: `accelerations()` reads the cache built here instead of the masks, so a change
+        that forgets this call would silently keep dispatching last configuration's models rather than
+        failing loudly. `enable_force_model` calls this automatically; `_build_universe` calls it once
+        at the end of build.
+        """
+        self._resolved_force_models, self._force_dispatch_idx = forces.resolve_force_models(
+            self.active_mask, self.force_model_mask, self.max_capacity, self.force_model_params,
+        )
+
+        # Clear the whole accumulator on every re-resolve. `compose_accelerations` zeroes only the
+        # rows it is about to write, so a body whose last model was just disabled would otherwise
+        # keep reporting that model's final acceleration forever - its row is outside the new
+        # dispatch set and nothing writes it again. In a sweep that runs "Keplerian + J2" then
+        # "Keplerian", the second configuration would silently still carry J2. This is O(capacity),
+        # but it runs once per configuration change, never per step, so step cost is unaffected.
+        self.accel_accum.fill(0.0)
+
+    def enable_force_model(
+        self,
+        name: str,
+        bodies: Union[int, Sequence[int], NDArray[np.bool_]],
+        **coefficients: float,
+    ) -> None:
+        """
+        Turn on a registered force model for the given bodies, and set any of its per-body
+        coefficients.
+
+        This is the sweep surface: two simulations that differ only in which models are enabled, or
+        in what coefficients they carry, differ only in what this was called with. There is no other
+        API a comparison needs - `force_model_mask` and `force_model_params` are both plain arrays,
+        so a sweep harness can equally well assign them directly and call `resolve_force_models()`.
+
+        `bodies` is an arena slot index, a sequence of slot indices, or a boolean mask shaped
+        `(max_capacity,)`. Coefficients are matched against the model's declared `param_names` by
+        keyword; an unknown keyword raises rather than silently being dropped.
+        """
+        model = get_force_model(name)
+        idx: Any = bodies if isinstance(bodies, (int, np.integer)) else np.asarray(bodies)
+
+        bit_value = np.uint64(1) << np.uint64(model.bit)
+        self.force_model_mask[idx] |= bit_value
+
+        if coefficients:
+            if not model.param_names:
+                raise ValueError(f"force model '{name}' takes no parameters, got {list(coefficients)}")
+            params = self.force_model_params.get(name)
+            if params is None:
+                params = np.zeros((self.max_capacity, model.n_params), dtype=np.float64)
+                self.force_model_params[name] = params
+            for key, value in coefficients.items():
+                try:
+                    col = model.param_names.index(key)
+                except ValueError:
+                    raise ValueError(
+                        f"force model '{name}' has no parameter '{key}'; "
+                        f"available: {model.param_names}"
+                    ) from None
+                params[idx, col] = value
+
+        self.resolve_force_models()
+
+    def accelerations(
+        self, t: ScalarSeconds, state: Optional[NDArray[np.float64]] = None,
+    ) -> NDArray[np.float64]:
+        """
+        Total accumulated acceleration from every enabled force model, km/s^2, arena-indexed like
+        `global_states`. Implements the `forces.AccelerationProvider` contract: an integrator holds a
+        reference to this bound method and calls `sim.accelerations(t, state)` without knowing which
+        models produced the result, how many there were, or how they were combined.
+
+        `state` defaults to `self.global_states` (the arena's committed state) for direct inspection
+        and testing; an integrator evaluating an intermediate sub-stage passes its own candidate state
+        instead. See `forces.AccelerationProvider` for why that argument exists at all.
+
+        The returned array is `self.accel_accum` itself, reused every call - copy it if a value must
+        survive past the next call.
+        """
+        if state is None:
+            state = self.global_states
+        return forces.compose_accelerations(
+            self._resolved_force_models, self._force_dispatch_idx, t, state,
+            self.mu_array, self.parent_indices, self.accel_accum,
+        )
 
     def _resolve_circular(self) -> None:
         """Identify and resolve DB circular dependencies (Binary Systems) by electing a head body based on mass and/or index."""
