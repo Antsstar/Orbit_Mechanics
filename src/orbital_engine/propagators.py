@@ -196,7 +196,8 @@ class CowellPropagator(Propagator):
         t: ScalarSeconds = kwargs['t']
         state: NDArray[np.float64] = kwargs['state']
         indices: NDArray[np.int64] = kwargs['indices']
-        integrator.step(provider, t, state, float(dt), indices)
+        primaries: NDArray[np.int32] = kwargs['primaries']
+        integrator.step(provider, t, state, float(dt), indices, primaries)
 
 
 register_propagator(PropagatorType.KEPLERIAN, KeplerianPropagator)

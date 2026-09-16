@@ -707,6 +707,16 @@ class Simulation:
         tier-0 slots every step, which would silently discard a root Cowell body's motion rather than
         raise. Both are enforced here, explicitly, rather than left to produce a trajectory that looks
         plausible and is not - see `docs/architecture.md`'s Cowell section for the full reasoning.
+
+        **Cowell also requires `mu_array[body] == 0.0`.** A body's mass only reaches the rest of the
+        arena through `kepler_propagate`'s barycentric accumulation (pass 1: every active, non-Cowell
+        sibling's mass-weighted position is summed onto its head), which a Cowell body never passes
+        through - `_kepler_sib_idx` excludes it. A massive Cowell body would therefore silently stop
+        contributing to its own head's reflex kick the moment it was reassigned, corrupting every other
+        sibling in the bubble exactly like the head/barycenter case above, just via mass instead of
+        position. Rather than leave that as a documented-but-permitted gap, it is rejected here; a
+        massless body (`mu=0`, the common case for a satellite or a test secondary) is unaffected by
+        this restriction since it never contributed to a reflex kick in the first place.
         """
         idx = np.atleast_1d(np.asarray(bodies, dtype=np.int64))
 
@@ -720,6 +730,13 @@ class Simulation:
                     f"Cowell propagation is restricted to active, non-head, non-barycenter bodies "
                     f"that are not their own kinematic bubble; slot(s) {idx[disallowed].tolist()} do "
                     f"not qualify. See Simulation.set_propagator's docstring."
+                )
+            massive = idx[self.mu_array[idx] != 0.0]
+            if massive.size > 0:
+                raise ValueError(
+                    f"Cowell propagation requires mu == 0; slot(s) {massive.tolist()} carry nonzero "
+                    f"mass and would silently stop contributing to their head's reflex kick. See "
+                    f"Simulation.set_propagator's docstring."
                 )
 
         self.propagator_type[idx] = np.uint8(propagator_type)
@@ -736,24 +753,38 @@ class Simulation:
         regardless of whether a Cowell body is present elsewhere in the arena
         (`tests/validation/test_cowell_propagator.py`'s isolation test).
 
-        Cowell siblings (`propagator_type == COWELL`, set via `set_propagator`) integrate their
-        **global** Cartesian state directly, through `registry.get_propagators()`'s entry for
-        `PropagatorType.COWELL` (`propagators.CowellPropagator`), which delegates to
-        `self._cowell_integrator`. This runs *before* the Keplerian propagation and `calc_global()`
-        below, evaluating every force against the arena state as committed at the *start* of this
-        step - see `integrators.py`'s module docstring for what that assumes and when it stops being
-        exact. Its result is saved and re-applied after `calc_global()`, which would otherwise
-        overwrite a Cowell body's fresh global state with its stale, pre-step local offset;
-        `local_states` is then rebuilt from the difference so the arena's stated invariant -
-        `local_states[i]` relative to `global_states[body_sys_map[i]]` - holds for Cowell bodies
-        exactly as it does for Keplerian ones once `step()` returns.
+        Cowell siblings (`propagator_type == COWELL`, set via `set_propagator`) integrate their state
+        **relative to their own gravitating parent** (`parent_indices`), through
+        `registry.get_propagators()`'s entry for `PropagatorType.COWELL`
+        (`propagators.CowellPropagator`), which delegates to `self._cowell_integrator`. This runs
+        *before* the Keplerian propagation and `calc_global()` below, using the arena state as
+        committed at the *start* of this step as the frame `provider` evaluates forces against - see
+        `integrators.py`'s module docstring for why that is exact for every force model registered so
+        far (each depends only on position relative to `parent_indices`, so the parent's own motion
+        never enters the relative equation of motion at all) and what would remain an approximation for
+        a hypothetical future model that is not. The integrator's result is therefore expressed
+        relative to the parent's *start-of-step* position; it is saved, and once `calc_global()` below
+        has propagated every Keplerian body (including the parent) to its true end-of-step position,
+        the saved relative state is re-based onto that fresh position - this is what makes a Cowell
+        body correctly follow a parent that is itself accelerating, rather than silently assuming a
+        stationary one. `local_states` is then rebuilt from the difference against `body_sys_map` (the
+        kinematic bubble reference, generally *not* the same slot as `parent_indices` - the Moon is the
+        canonical case, see `docs/architecture.md`) so the arena's stated invariant - `local_states[i]`
+        relative to `global_states[body_sys_map[i]]` - holds for Cowell bodies exactly as it does for
+        Keplerian ones once `step()` returns.
         """
         cowell_result: Optional[NDArray[np.float64]] = None
+        cowell_primaries: Optional[NDArray[np.int32]] = None
+        parent_state_at_start: Optional[NDArray[np.float64]] = None
         if self._cowell_idx.size > 0:
+            cowell_primaries = self.parent_indices[self._cowell_idx]
+            parent_state_at_start = self.global_states[cowell_primaries].copy()
+
             cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
             cowell_propagator.propagate(
                 dt=dt, integrator=self._cowell_integrator, provider=self.accelerations,
                 t=self.t, state=self.global_states, indices=self._cowell_idx,
+                primaries=cowell_primaries,
             )
             cowell_result = self.global_states[self._cowell_idx].copy()
 
@@ -769,8 +800,17 @@ class Simulation:
                                           body_sys_map=self.body_sys_map, sys_head_map=self.sys_head_map, sib_mask=self._kepler_sib_mask)
         self.calc_global()
 
-        if cowell_result is not None:
-            self.global_states[self._cowell_idx] = cowell_result
+        if (
+            cowell_result is not None
+            and cowell_primaries is not None
+            and parent_state_at_start is not None
+        ):
+            # The integrator's result is (parent_state_at_start + relative_state); subtracting the
+            # start-of-step parent reference recovers the pure relative state, and adding the parent's
+            # now-fresh (post calc_global) position places the Cowell body correctly regardless of how
+            # far its parent moved during this step.
+            relative_state = cowell_result - parent_state_at_start
+            self.global_states[self._cowell_idx] = self.global_states[cowell_primaries] + relative_state
             self.local_states[self._cowell_idx] = (
                 self.global_states[self._cowell_idx] - self.global_states[self.body_sys_map[self._cowell_idx]]
             )

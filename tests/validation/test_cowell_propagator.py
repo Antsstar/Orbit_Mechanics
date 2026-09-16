@@ -17,6 +17,13 @@ a higher apparent ratio because sub-leading terms have not yet become negligible
 session - see the two step-size scans below), and much finer steps run into float64 rounding noise
 before that shows up as a *failure*, since the error stops shrinking and can even grow slightly. Both
 effects were characterised empirically before choosing the windows and bands used here, not assumed.
+
+`test_cowell_matches_keplerian_when_the_parent_accelerates` is the regression guard for a correctness
+bug found in review: an earlier version of `integrators.RK4Integrator` advanced a Cowell body's
+*absolute* global state using only its parent-relative point-mass acceleration, which silently assumed
+the parent never moves. `scenarios.two_body`'s primary is always fixed, so every test above it was
+blind to that bug; `scenarios.sun_earth_moon(moon_mu=0.0)` gives a Cowell body (the now-massless Moon)
+whose parent (Earth) genuinely accelerates toward the Sun, which is what exposes it.
 """
 from __future__ import annotations
 
@@ -190,17 +197,113 @@ def test_cowell_point_mass_matches_dop853_reference(
 
 
 # ==================================================================================================
+# Regression: a Cowell body whose parent accelerates
+# ==================================================================================================
+
+def _moon_error_vs_keplerian(
+    db_session_factory: Callable[[], Session], n_steps: int, total_time: float,
+) -> float:
+    """
+    Cowell Moon position error against the analytic Keplerian Moon, in `scenarios.sun_earth_moon` with
+    the Moon made massless (`moon_mu=0.0`). Earth - the Moon's `parent_indices` parent - genuinely
+    accelerates toward the Sun throughout, unlike `two_body`'s always-fixed primary.
+    """
+    dt = total_time / n_steps
+
+    kepler_sim = scenarios.sun_earth_moon(db_session_factory(), moon_mu=0.0)
+    kepler_sim.record_history = False
+    for _ in range(n_steps):
+        kepler_sim.step(dt)
+    r_true = kepler_sim.global_states[kepler_sim.name_to_index["Moon"], :3].copy()
+
+    cowell_sim = scenarios.sun_earth_moon(db_session_factory(), moon_mu=0.0)
+    cowell_sim.record_history = False
+    moon = cowell_sim.name_to_index["Moon"]
+    cowell_sim.set_propagator(moon, PropagatorType.COWELL)
+    cowell_sim.enable_force_model("point_mass_gravity", bodies=moon)
+    for _ in range(n_steps):
+        cowell_sim.step(dt)
+    r_cowell = cowell_sim.global_states[moon, :3].copy()
+
+    return vector_drift(r_true, r_cowell)
+
+
+# Two days elapsed, four step counts each halving the previous - chosen coarse (dt from 21600 s down
+# to 2700 s) because the Earth-Moon relative dynamics are exact to floating-point noise under the
+# fixed integrator (the parent's motion cancels out of the relative equation of motion entirely - see
+# integrators.py), so the error reaches float64's rounding floor (~1e-7 km, set by subtracting and
+# re-adding Earth's ~1.5e8 km heliocentric position) by only a few hundred steps; finer steps than
+# these were measured to already be contaminated by that floor.
+ACCEL_PARENT_TOTAL_TIME = 2.0 * 86400.0
+ACCEL_PARENT_STEP_COUNTS = [8, 16, 32, 64]
+
+# Tighter than the two-body band (10, 22) instead of (12, 24): measured ratios here were 16.3, 16.1,
+# 16.1 - textbook fourth order with very little pre-asymptotic excursion, because two days is a small
+# fraction of the Moon's ~27.4-day period and the relative dynamics are exact, so there is very little
+# of the "orbit under-resolved at large dt" effect the two-body test's wider band accommodates.
+ACCEL_PARENT_RATIO_LOW = 10.0
+ACCEL_PARENT_RATIO_HIGH = 22.0
+
+
+def test_cowell_matches_keplerian_when_the_parent_accelerates(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    Regression guard for a correctness bug found in review: a Cowell body's gravitating parent is not,
+    in general, stationary. Earth (the Moon's `parent_indices` parent) accelerates toward the Sun at
+    mu_Sun/AU^2 ~ 5.9e-6 km/s^2 - about twice the Moon's own pull toward Earth, mu_Earth/r^2 ~ 2.7e-6
+    km/s^2 - and an earlier version of `integrators.RK4Integrator` advanced the Moon's *absolute*
+    global state using only the Earth-relative point-mass acceleration, which silently assumed Earth
+    stood still. Treated as a coherent, roughly constant spurious acceleration over 30 days that
+    predicts a spurious displacement of order 0.5 * 5.9e-6 * (2.59e6 s)^2 ~ 2e7 km - measured on that
+    version, with the exact scenario and force model used here: 1.92e7 km at day 30, growing from
+    4.18e5 km at day 1 (the true Earth-Moon distance is ~4.0e5 km throughout, so this is not "a bit
+    off", it is unbound).
+
+    `scenarios.sun_earth_moon(moon_mu=0.0)` keeps the Moon massless - `set_propagator` requires this
+    for any Cowell body, see its docstring - which leaves Earth's own heliocentric acceleration
+    untouched while giving exactly the missing case none of the `two_body`-based tests above can
+    exercise (its primary never moves by construction). `integrators.py`'s fix - integrating the state
+    relative to `parent_indices` rather than the absolute global state - makes the point-mass term
+    translation-invariant to the parent's own motion, so the same fourth-order convergence methodology
+    used for the fixed-primary case should hold here too; "small" alone would not distinguish a
+    correctly re-based integrator from one that merely happens to be accurate at one step size.
+
+    Confirmed this session that this exact test, unmodified, fails against the pre-fix integrator: at
+    the same four step counts the error was ~5.12e6 km at *every* one (ratios 1.0000-1.0002, not
+    shrinking with dt at all) - the signature of a systematic missing-physics error rather than a
+    discretization error, which is exactly why a convergence-ratio check catches this class of bug
+    where a single fixed-tolerance magnitude check would only catch it by accident of having picked a
+    large enough number.
+    """
+    errors = [
+        _moon_error_vs_keplerian(db_session_factory, n_steps, ACCEL_PARENT_TOTAL_TIME)
+        for n_steps in ACCEL_PARENT_STEP_COUNTS
+    ]
+    ratios = _ratios(errors)
+
+    assert all(ACCEL_PARENT_RATIO_LOW < r < ACCEL_PARENT_RATIO_HIGH for r in ratios), (
+        f"convergence ratios {ratios} (errors {errors}) are not consistent with fourth-order RK4 for "
+        f"a Cowell body whose parent accelerates (expected each in "
+        f"({ACCEL_PARENT_RATIO_LOW}, {ACCEL_PARENT_RATIO_HIGH}))"
+    )
+
+
+# ==================================================================================================
 # Negative control: the convergence-order test above must be able to fail
 # ==================================================================================================
 
 class _AliasedRK4Integrator:
     """
-    Deliberately broken: reuses the *shared* return value from `provider` across all four RK4 stages
-    instead of copying each one out before the next call. `provider` (`Simulation.accelerations`)
-    returns `Simulation.accel_accum` itself, mutated in place on every call - so by the time the final
-    weighted combination reads `a1`/`a2`/`a3` below, all four names refer to the *same* array and all
-    hold stage 4's value. This is exactly the bug `integrators.RK4Integrator` is built to avoid (see
-    its module docstring); it exists only to prove the convergence-order test above can fail.
+    Deliberately broken: otherwise identical to `integrators.RK4Integrator` (same relative-state
+    formulation, so this isolates the aliasing bug rather than reintroducing the separate
+    missing-parent-acceleration bug `test_cowell_matches_keplerian_when_the_parent_accelerates`
+    guards), but reuses the *shared* return value from `provider` across all four RK4 stages instead of
+    copying each one out before the next call. `provider` (`Simulation.accelerations`) returns
+    `Simulation.accel_accum` itself, mutated in place on every call - so by the time the final weighted
+    combination reads `a1`/`a2`/`a3` below, all four names refer to the *same* array and all hold stage
+    4's value. This is exactly the bug `integrators.RK4Integrator` is built to avoid (see its module
+    docstring); it exists only to prove the convergence-order test above can fail.
     """
 
     def step(
@@ -210,34 +313,35 @@ class _AliasedRK4Integrator:
         state: NDArray[np.float64],
         dt: ScalarSeconds,
         indices: NDArray[np.int64],
+        primaries: NDArray[np.int32],
     ) -> None:
         if indices.size == 0:
             return
         dt = float(dt)
-        r0 = state[indices, :3].copy()
-        v0 = state[indices, 3:].copy()
+        r0 = (state[indices, :3] - state[primaries, :3]).copy()
+        v0 = (state[indices, 3:] - state[primaries, 3:]).copy()
 
         a1 = provider(t, state)  # NOT copied - aliases accel_accum
-        state[indices, :3] = r0 + 0.5 * dt * v0
-        state[indices, 3:] = v0 + 0.5 * dt * a1[indices]
+        state[indices, :3] = state[primaries, :3] + (r0 + 0.5 * dt * v0)
+        state[indices, 3:] = state[primaries, 3:] + (v0 + 0.5 * dt * a1[indices])
 
         a2 = provider(t + 0.5 * dt, state)  # overwrites the same buffer a1 points to
         v1 = v0 + 0.5 * dt * a1[indices]
-        state[indices, :3] = r0 + 0.5 * dt * v1
-        state[indices, 3:] = v0 + 0.5 * dt * a2[indices]
+        state[indices, :3] = state[primaries, :3] + (r0 + 0.5 * dt * v1)
+        state[indices, 3:] = state[primaries, 3:] + (v0 + 0.5 * dt * a2[indices])
 
         a3 = provider(t + 0.5 * dt, state)
         v2 = v0 + 0.5 * dt * a2[indices]
-        state[indices, :3] = r0 + dt * v2
-        state[indices, 3:] = v0 + dt * a3[indices]
+        state[indices, :3] = state[primaries, :3] + (r0 + dt * v2)
+        state[indices, 3:] = state[primaries, 3:] + (v0 + dt * a3[indices])
 
         a4 = provider(t + dt, state)
         v3 = v0 + dt * a3[indices]
 
-        state[indices, :3] = r0 + (dt / 6.0) * (v0 + 2.0 * v1 + 2.0 * v2 + v3)
-        state[indices, 3:] = v0 + (dt / 6.0) * (
+        state[indices, :3] = state[primaries, :3] + (r0 + (dt / 6.0) * (v0 + 2.0 * v1 + 2.0 * v2 + v3))
+        state[indices, 3:] = state[primaries, 3:] + (v0 + (dt / 6.0) * (
             a1[indices] + 2.0 * a2[indices] + 2.0 * a3[indices] + a4[indices]
-        )
+        ))
 
 
 def test_broken_integrator_fails_the_convergence_order_test(
@@ -411,3 +515,21 @@ def test_set_propagator_rejects_heads_and_barycenters(
     from orbital_engine.custom_types import PropagatorType as PT
     assert sim.propagator_type[primary] == PT.KEPLERIAN
     assert sim.propagator_type[barycenter] == PT.KEPLERIAN
+
+
+def test_set_propagator_rejects_a_massive_body(db_session_factory: Callable[[], Session]) -> None:
+    """
+    A massive Cowell body would silently stop contributing to its head's reflex kick - only bodies
+    dispatched through the Keplerian kernel accumulate onto their head's `kick`/`accum` - corrupting
+    every other sibling in the bubble exactly like a reassigned head or barycenter would, just through
+    mass instead of position. `set_propagator` rejects this explicitly rather than permitting a
+    configuration whose limitation is merely documented; see its docstring.
+    """
+    sim = scenarios.two_body(db_session_factory(), mu_secondary=100.0)
+    secondary = sim.name_to_index["Secondary"]
+
+    with pytest.raises(ValueError):
+        sim.set_propagator(secondary, PropagatorType.COWELL)
+
+    from orbital_engine.custom_types import PropagatorType as PT
+    assert sim.propagator_type[secondary] == PT.KEPLERIAN
