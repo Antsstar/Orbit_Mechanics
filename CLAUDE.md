@@ -37,6 +37,10 @@ Optional extras: `[perf]` = numba, `[reference]` = scipy. Neither is needed to r
 which drops and rewrites the git-tracked `src/orbital_engine/data/planets.db`. To exercise the engine,
 build an in-memory SQLite session the way `tests/conftest.py` does.
 
+**Working in a git worktree?** The package is an editable install of the *main* checkout, so a bare
+`pytest` in a worktree imports the main repo's code and passes on changes it never exercised. Run
+`PYTHONPATH="$(pwd)/src" <env>/python.exe -m pytest -q` from the worktree root.
+
 ---
 
 ## Arena layout — `Simulation.__init__`

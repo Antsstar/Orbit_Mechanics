@@ -2,7 +2,7 @@
 name: validation-harness
 description: Builds and extends the validation infrastructure - invariant tests (energy, momentum, reversibility, closure), convergence-order harnesses, reference comparisons, and benchmark metrics. Use for test and harness work where the pattern is established and the physics is already known-good.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: sonnet
+model: claude-sonnet-5
 effort: high
 ---
 
@@ -96,3 +96,8 @@ chase that phantom gap.
 
 Report measured residuals and observed convergence orders. The numbers are the deliverable, not the
 passing status.
+
+**If you are working in a git worktree**, the package is an editable install pointing at the *main*
+repository, so a bare `pytest` silently imports the main repo's code rather than yours. Run tests as
+`PYTHONPATH="$(pwd)/src" <env>/python.exe -m pytest -q` from the worktree root, and confirm with
+`python -c "import orbital_engine; print(orbital_engine.__file__)"` before trusting a green run.

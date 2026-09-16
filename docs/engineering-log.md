@@ -62,6 +62,48 @@ tool shell has no TTY, so a push will hang or fail rather than prompting. Pre-lo
 
 ---
 
+### A worktree's tests silently import the main repository's code
+
+**Symptom.** None, which is the problem. A parallel agent working in a git worktree runs `pytest`,
+gets a green run, and reports its change verified — when its change was never imported.
+
+**Cause.** The package is an **editable install** of the main repository. From anywhere on the
+machine, `import orbital_engine` resolves to `Orbit_Mechanics/src/orbital_engine`, including from
+inside `.claude/worktrees/<name>/`. The worktree's own `src/` is never on the path.
+
+**Fix.** `PYTHONPATH` takes precedence over the editable install — verified by importing a marked
+shadow copy:
+
+```
+PYTHONPATH="$(pwd)/src" <env>/python.exe -m pytest -q      # from the worktree root
+python -c "import orbital_engine; print(orbital_engine.__file__)"   # confirm before trusting it
+```
+
+**How to avoid.** Every agent definition's verification section now carries this. Any tooling that runs
+tests outside the main checkout needs it — a CI job, a benchmark script, a second clone.
+
+---
+
+### Agent model pins can be silently overridden
+
+**Symptom.** An agent pinned to one model runs on another, with no error.
+
+**Cause.** Two mechanisms, both verified against the Claude Code subagent docs:
+
+- **The per-invocation `model` parameter wins over frontmatter.** Resolution order is per-invocation
+  `model` → frontmatter `model` → `CLAUDE_CODE_SUBAGENT_MODEL` → main conversation model. The
+  per-invocation parameter only accepts aliases, so passing `model: "fable"` replaces a precise
+  `claude-fable-5-1` pin with whatever the alias currently resolves to.
+- **New agent files do not register until the session restarts.** Spawning the new type fails with
+  "agent type not found", and the tempting fallback — `general-purpose` with the prompt inlined —
+  discards the frontmatter's model *and* effort pins.
+
+**Fix.** Pin full model IDs in frontmatter, spawn pinned agents *without* a per-invocation `model`,
+restart the session after adding an agent file, and ask each agent to state its model ID at the top
+of its report.
+
+---
+
 ## Traps found in the codebase
 
 ### A test that asserted nothing for months
@@ -295,6 +337,35 @@ Both were **v7**. The guessed versions may not even have cleared the Node 20 dep
 
 **Lesson.** Version numbers are exactly the sort of fact that feels known and isn't. One API call
 beats a plausible recollection.
+
+---
+
+### Trusting a cached model table over the model IDs in my own system prompt
+
+**What happened.** Planning how to spend Fable credits, I told the user there was no "Fable 5.1" and
+that the model was Claude Fable 5. It was said as a correction, confidently.
+
+It was wrong, and the right answer was already in context: the orchestrating session's system prompt
+lists current model IDs, and it names `claude-fable-5-1`. I overrode it with a model table from a
+bundled API skill marked *cached 2026-06-24* — nearly three months old on 2026-09-16, and older than
+the model's 2026-09-01 release. The user found the truth independently by updating Claude Code.
+
+**Correction.** Re-read the primary docs — models overview, the Fable 5.1 overview, what's new, and the
+prompting guide — and rewrote the agent definitions and `docs/model-delegation.md` from them. That also
+surfaced behaviour changes that matter here (whole-file rewrites, one tool call per turn, fewer
+progress updates) and a cache-read price that changes the cost comparison with Opus 5.
+
+**Lesson.** This is the second entry of the same shape — see *Guessing dependency versions instead of
+querying* above — and the second one is worse, because the correct fact was not merely queryable, it
+was already present. Ranking sources:
+
+1. The live session's own system prompt, for model IDs.
+2. The primary documentation, fetched now.
+3. Anything cached, bundled, or remembered — with its date read before its content.
+
+A fact about a fast-moving product that arrives with a date on it should be dated before it is used.
+When correcting someone, the bar for checking is higher, not lower: a wrong correction discards the
+right answer they already had.
 
 ---
 

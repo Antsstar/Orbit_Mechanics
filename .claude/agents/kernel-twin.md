@@ -2,7 +2,7 @@
 name: kernel-twin
 description: Adds a compiled scalar twin in kernels.py for an existing NumPy reference implementation, together with its equivalence test, negative control, and benchmark entry. Use when a readable reference already exists and is known-correct, and the only goal is to make it fast without changing what it computes. Not for writing new physics.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: claude-opus-5
 effort: high
 ---
 
@@ -81,3 +81,8 @@ database.
 
 Report the measured agreement and the measured speedup, per scenario. A twin that is fast and
 disagrees is worthless, and a twin that agrees and is not faster is not worth its maintenance cost.
+
+**If you are working in a git worktree**, the package is an editable install pointing at the *main*
+repository, so a bare `pytest` silently imports the main repo's code rather than yours. Run tests as
+`PYTHONPATH="$(pwd)/src" <env>/python.exe -m pytest -q` from the worktree root, and confirm with
+`python -c "import orbital_engine; print(orbital_engine.__file__)"` before trusting a green run.
