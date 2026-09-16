@@ -200,7 +200,169 @@ class CowellPropagator(Propagator):
         integrator.step(provider, t, state, float(dt), indices, primaries)
 
 
+class SecularJ2Propagator(Propagator):
+    """
+    Analytic Keplerian propagation plus first-order secular drift of RAAN, argument of periapsis and
+    mean anomaly under the J2 zonal harmonic - the "Kepler + secular J2" tier between the plain
+    analytic propagator and Cowell + `point_mass_gravity` + `j2` (`geopotential.py`). Like
+    `KeplerianPropagator`, this is closed-form: no accumulated numerical state, only three additional
+    per-body rates advanced linearly in time alongside the ordinary two-body anomaly advance.
+
+    **What is held constant.** Under first-order secular J2 theory `p`, `e` and `i` do not drift - only
+    RAAN, argument of periapsis and mean anomaly do - so `secular_j2_rates` below computes the three
+    rates once, at `Simulation.set_propagator` time, from whatever `p`/`e`/`i` the body held then; they
+    are cached (`Simulation._secular_j2_rates`) and reused every step rather than recomputed, mirroring
+    the "scratch is arena-owned, recompute only what changes" discipline `kernels.py` already documents
+    for `_kick`/`_accum`.
+
+    **Citation.** Vallado, *Fundamentals of Astrodynamics and Applications*, 4th ed., Eq. 9-41 is the
+    likely reference for these three rates - **not checked against the text, as `geopotential.py`
+    discloses for its own citations**. Curtis, *Orbital Mechanics for Engineering Students*, 3rd ed.,
+    covers the RAAN and argument-of-periapsis rates independently and is not checked either.
+
+    **Coefficient storage.** `(j2, r_eq)` are written into the same `Simulation.force_model_params["j2"]`
+    array `geopotential.j2_kernel` reads (`geopotential.J2_PARAM_NAMES = ("j2", "r_eq")`), populated by
+    `Simulation.set_propagator`'s `SECULAR_J2` branch rather than `enable_force_model`. This is a
+    storage choice only: it never sets the `"j2"` force-model mask bit, so it does not add this body to
+    `Simulation.accelerations`' dispatch set (irrelevant here - a body on this propagator never calls
+    `accelerations`) and does not collide with a body that separately has the `"j2"` force model enabled
+    for Cowell. The payoff is that a sweep comparing this tier against the Cowell + `point_mass_gravity`
+    + `j2` tier can share one coefficient-population call for both, so a coefficient sensitivity sweep
+    cannot accidentally compare the two tiers at different J2 values.
+
+    **Mean-vs-osculating approximation.** The arena stores osculating elements; this propagator advances
+    them as if they were mean elements, the quantity the secular theory is actually derived for -
+    `CLAUDE.md` forbids converting between the two, so there is no correction applied. Two distinct
+    effects follow, and the second dominates:
+
+    - A bounded, orbit-period *oscillation* about the true trajectory - the short-period J2 terms the
+      averaging discards - amplitude `O(J2 (R/p)^2)` in the angles (dimensionless) and
+      `O(J2 (R/p)^2 * p)` in position; for a 550 km-altitude LEO orbit (`p ~ 6928` km,
+      `J2 (R/p)^2 ~ 9.2e-4`) that is on the order of 6 km, neither shrinking nor growing with time.
+    - A *linearly growing* along-track drift: the mean motion `n = sqrt(mu/a^3)` this propagator caches
+      is computed once from the seeded *osculating* `p`, not the true mean `p` (which differs from the
+      osculating value by the same `O(J2 (R/p)^2)` fraction), so the propagated mean anomaly carries a
+      small, fixed fractional rate error that accumulates rather than averaging out - `O(J2 (R/p)^2)`
+      radians of phase, i.e. roughly `J2 (R/p)^2 * 2*pi*p` km of position, **per orbit elapsed**, not a
+      one-time offset. Measured this session at 550 km / 53 deg against Cowell +
+      `point_mass_gravity` + `j2`: 57.4 km after 1 orbit, 172.1 km after 3, 573.6 km after 10 - linear
+      to better than 1% (ratios 3.00 and 9.99 against the exactly-linear predictions), and the
+      ~40 km/orbit order-of-magnitude estimate above matches the measured ~57 km/orbit rate to within a
+      factor of ~1.4. This is the effect that actually dominates the comparison beyond a handful of
+      orbits, not the bounded oscillation.
+
+    `tests/validation/test_secular_j2_propagator.py` measures both against Cowell + `point_mass_gravity`
+    + `j2`. This is the *comparison* case in `CLAUDE.md`'s verification/comparison split, not an engine
+    bug: the divergence is what this tier of the frontier plot exists to show, and the second effect in
+    particular is why "Kepler + secular J2" is the *interesting middle point* rather than simply
+    "correct until it isn't" - its error grows with elapsed time, unlike Cowell's, which is controlled
+    by step size instead.
+
+    **Configuration-time restrictions**, enforced by `Simulation.set_propagator` rather than left to
+    produce a plausible-looking wrong trajectory - see that method's docstring for the full reasoning:
+    active, non-head, non-barycenter, not its own kinematic bubble (same restrictions Cowell carries,
+    same reasons); Keplerian parent not a barycentre (`geopotential.barycentre_parented`, since a
+    barycentre's J2 is meaningless and the kernel cannot detect it - see `geopotential.py`); `mu == 0`
+    (same reflex-kick-corruption reason Cowell requires it - this propagator, like Cowell, is excluded
+    from `Simulation._kepler_sib_idx` and so never contributes its mass to any head's reflex kick);
+    `0 <= e < 1` (a closed orbit - the rates derive from mean motion `n = sqrt(mu/a^3)`, undefined for
+    an open orbit).
+
+    **How position is recovered.** `propagate` only advances `coe_states` and writes the resulting
+    parent-relative state vector into caller-owned `rel_out` - it does not touch `local_states` or
+    `global_states`, because the result is relative to `parent_indices`, which generally differs from
+    the `body_sys_map` bubble `local_states` is measured against (the Moon is the canonical case; see
+    `CLAUDE.md`). `Simulation.step` re-bases `rel_out` onto the parent's end-of-step global position
+    once `calc_global()` has produced it - exactly the pattern `docs/architecture.md`'s Cowell section
+    documents, just without an integrator: this propagator is analytic, so there is no `parent_state_
+    at_start` snapshot to subtract, only a fresh add.
+    """
+    @staticmethod
+    def propagate(dt: Seconds, **kwargs: Any) -> None:
+        coe_states: NDArray[np.float64] = kwargs['coe_states']
+        mu_array: NDArray[np.float64] = kwargs['mu_array']
+        parent_indices: NDArray[np.int32] = kwargs['parent_indices']
+        rates: NDArray[np.float64] = kwargs['rates']
+        indices: NDArray[np.int64] = kwargs['indices']
+        rel_out: NDArray[np.float64] = kwargs['rel_out']
+
+        if len(indices) == 0:
+            return
+
+        e = coe_states[indices, 1]
+        theta = coe_states[indices, 5]
+
+        old_M = Anomalies.true_to_mean(theta, e)
+        new_M = (old_M + rates[indices, 2] * dt) % (2.0 * np.pi)
+        new_theta = Anomalies.mean_to_true(new_M, e)
+
+        # Elements are updated unconditionally, mirroring kernels.kepler_propagate's own convention -
+        # only the derived state vector below is ever withheld on an invalid orbit.
+        coe_states[indices, 3] += rates[indices, 0] * dt
+        coe_states[indices, 4] += rates[indices, 1] * dt
+        coe_states[indices, 5] = new_theta
+
+        parents = parent_indices[indices]
+        mu_calc = mu_array[indices] + mu_array[parents]
+        r_rel, v_rel, success = fr.ReferenceFrames.coe_to_rv(coe_states[indices], mu_calc)
+
+        # Written only at the valid subset, leaving an invalid orbit's rel_out row untouched - the
+        # same convention KeplerianPropagator.propagate uses for local_states via valid_sibs.
+        valid = indices[success]
+        rel_out[valid, :3] = r_rel[success]
+        rel_out[valid, 3:] = v_rel[success]
+
+
+def secular_j2_rates(
+    coe_states: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
+    parent_indices: NDArray[np.int32],
+    j2_params: NDArray[np.float64],
+    indices: NDArray[np.int64],
+) -> NDArray[np.float64]:
+    """
+    First-order secular J2 rates for `indices`, shape `(len(indices), 3)`:
+    `[dRAAN/dt, dARG_PE/dt, dM/dt]`, radians/second.
+
+        a  = p / (1 - e^2)
+        n  = sqrt(mu / a^3)
+        dRAAN/dt  = -(3/2) n J2 (R/p)^2 cos(i)
+        dARGPE/dt =  (3/4) n J2 (R/p)^2 (5 cos^2(i) - 1)
+        dM/dt     =  n [1 + (3/4) J2 (R/p)^2 sqrt(1 - e^2) (3 cos^2(i) - 1)]
+
+    `mu` is the two-body mass sum `KeplerianPropagator` and `Simulation._rehydrate_coes` already use:
+    `mu_array[body] + mu_array[parent_indices[body]]`. `p`, `e`, `i` are read once, at the moment this
+    is called (`Simulation.set_propagator`), and the returned rates are cached rather than recomputed
+    every step - see `SecularJ2Propagator`'s docstring for why that is valid under this theory.
+
+    Citation: Vallado, *Fundamentals of Astrodynamics and Applications*, 4th ed., Eq. 9-41 - the likely
+    reference, **not checked against the text**; see `SecularJ2Propagator`'s docstring.
+    """
+    parents = parent_indices[indices]
+    mu = mu_array[indices] + mu_array[parents]
+
+    p = coe_states[indices, 0]
+    e = coe_states[indices, 1]
+    inc = coe_states[indices, 2]
+
+    j2 = j2_params[indices, 0]
+    r_eq = j2_params[indices, 1]
+
+    a = p / (1.0 - e * e)
+    n = np.sqrt(mu / a**3)
+    factor = j2 * (r_eq / p) ** 2
+    cos_i = np.cos(inc)
+    cos2_i = cos_i * cos_i
+
+    raan_dot = -1.5 * n * factor * cos_i
+    argpe_dot = 0.75 * n * factor * (5.0 * cos2_i - 1.0)
+    m_dot = n * (1.0 + 0.75 * factor * np.sqrt(1.0 - e * e) * (3.0 * cos2_i - 1.0))
+
+    return np.stack([raan_dot, argpe_dot, m_dot], axis=1)
+
+
 register_propagator(PropagatorType.KEPLERIAN, KeplerianPropagator)
 register_propagator(PropagatorType.COWELL, CowellPropagator)
+register_propagator(PropagatorType.SECULAR_J2, SecularJ2Propagator)
 
         

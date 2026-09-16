@@ -30,8 +30,9 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
-from orbital_engine import kernels, scenarios
-from orbital_engine.propagators import KeplerianPropagator
+from orbital_engine import geopotential, kernels, scenarios
+from orbital_engine.custom_types import PropagatorType
+from orbital_engine.propagators import KeplerianPropagator, SecularJ2Propagator
 from orbital_engine.simulator import Simulation
 
 # See the module docstring: derived from double-precision rounding, not fitted to observation.
@@ -272,3 +273,147 @@ def test_scalar_coe_to_rv_places_an_inclined_orbit_correctly() -> None:
 
     assert rz == pytest.approx(0.0, abs=1e-9), "body is not on the node line"
     assert float(np.arctan2(ry, rx)) == pytest.approx(raan, abs=1e-12)
+
+
+# ==================================================================================================
+# propagators.SecularJ2Propagator vs kernels.secular_j2_propagate
+# ==================================================================================================
+#
+# Same relationship as KeplerianPropagator / kepler_propagate above: the NumPy implementation is the
+# readable definition, the scalar kernel is an optimisation of it, and both share the same underlying
+# anomaly stack (Anomalies.true_to_mean/mean_to_true vs. true_to_mean_scalar/mean_to_true_scalar)
+# already held equivalent by the tests above - so the same 1e-12 relative bound applies here for the
+# same reason: both land on the same Kepler-equation root to within double-precision rounding, and the
+# only new arithmetic (the linear rate advance and coe_to_rv/coe_to_rv_scalar) is a handful of
+# multiplications, well inside that budget.
+
+SECULAR_DT = 60.0
+
+
+def _build_secular_j2_sim(
+    session: Session, *, n_sats: int = 8, n_planes: int = 2,
+) -> tuple[Simulation, list[int]]:
+    """A flat LEO constellation with every satellite assigned SECULAR_J2 and Earth's real coefficients -
+    exercises several inclinations/RAANs/phases at once, the same reason `earth_constellation` is used
+    throughout the suite rather than a single body."""
+    sim = scenarios.earth_constellation(session, n_sats=n_sats, n_planes=n_planes, altitude_km=550.0)
+    sats = [idx for name, idx in sim.name_to_index.items() if name.startswith("SAT-")]
+    sim.set_propagator(sats, PropagatorType.SECULAR_J2, j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ)
+    return sim, sats
+
+
+def _run_secular_j2_reference(sim: Simulation, sats: list[int], dt: float, steps: int) -> np.ndarray:
+    idx = np.asarray(sats, dtype=np.int64)
+    rel_out = np.zeros((sim.max_capacity, 6), dtype=np.float64)
+    for _ in range(steps):
+        SecularJ2Propagator.propagate(
+            dt=dt, coe_states=sim.coe_states, mu_array=sim.mu_array,
+            parent_indices=sim.parent_indices, rates=sim._secular_j2_rates, indices=idx, rel_out=rel_out,
+        )
+    return rel_out[idx].copy()
+
+
+def _run_secular_j2_kernel(sim: Simulation, sats: list[int], dt: float, steps: int) -> np.ndarray:
+    idx = np.asarray(sats, dtype=np.int64)
+    rel_out = np.zeros((sim.max_capacity, 6), dtype=np.float64)
+    for _ in range(steps):
+        kernels.secular_j2_propagate(
+            dt, sim.coe_states, sim.mu_array, sim.parent_indices, sim._secular_j2_rates, idx, rel_out,
+        )
+    return rel_out[idx].copy()
+
+
+@pytest.mark.parametrize("steps", [1, 50])
+def test_secular_j2_kernel_matches_reference_state(
+    steps: int, db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    Both implementations advanced from an identical arena (same cached rates, same seed elements) must
+    produce identical `coe_states` and identical parent-relative state vectors - run over several steps,
+    not just one, for the same reason `test_kernel_matches_reference_state` above does: a discrepancy
+    compounds with repeated advances and a single step can hide it inside the tolerance.
+    """
+    reference_sim, ref_sats = _build_secular_j2_sim(db_session_factory())
+    kernel_sim, ker_sats = _build_secular_j2_sim(db_session_factory())
+
+    assert np.array_equal(reference_sim.coe_states, kernel_sim.coe_states)
+    assert np.array_equal(reference_sim._secular_j2_rates, kernel_sim._secular_j2_rates)
+
+    ref_rel = _run_secular_j2_reference(reference_sim, ref_sats, SECULAR_DT, steps)
+    ker_rel = _run_secular_j2_kernel(kernel_sim, ker_sats, SECULAR_DT, steps)
+
+    assert np.all(np.isfinite(ref_rel)), "reference produced non-finite state"
+    assert np.all(np.isfinite(ker_rel)), "kernel produced non-finite state"
+
+    rel_diff = _relative_difference(ref_rel, ker_rel, np.ones(len(ref_sats), dtype=bool))
+    coe_diff = _relative_difference(
+        reference_sim.coe_states, kernel_sim.coe_states,
+        np.isin(np.arange(reference_sim.max_capacity), ref_sats),
+    )
+
+    assert rel_diff < KERNEL_AGREEMENT_REL_TOL, (
+        f"secular-J2 relative state disagrees by {rel_diff:.3e} after {steps} steps")
+    assert coe_diff < KERNEL_AGREEMENT_REL_TOL, (
+        f"secular-J2 elements disagree by {coe_diff:.3e} after {steps} steps")
+
+
+def test_secular_j2_comparison_would_detect_a_perturbed_kernel(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """Same negative control as `test_comparison_would_detect_a_perturbed_kernel` above, applied to the
+    secular-J2 pair: a relative-1e-9 nudge to one body's cached RAAN rate - a thousand times below any
+    effect worth caring about and a thousand times above the 1e-12 bound - must be detected."""
+    ref_sim, ref_sats = _build_secular_j2_sim(db_session_factory())
+    ref_rel = _run_secular_j2_reference(ref_sim, ref_sats, SECULAR_DT, 10)
+
+    ker_sim, ker_sats = _build_secular_j2_sim(db_session_factory())
+    ker_sim._secular_j2_rates[ker_sats[0], 0] *= (1.0 + 1e-9)
+    ker_rel = _run_secular_j2_kernel(ker_sim, ker_sats, SECULAR_DT, 10)
+
+    diff = _relative_difference(ref_rel, ker_rel, np.ones(len(ref_sats), dtype=bool))
+    assert diff > KERNEL_AGREEMENT_REL_TOL, (
+        f"a deliberately perturbed rate was not detected (diff {diff:.3e}); "
+        f"the tolerance is too loose to be meaningful")
+
+
+def test_secular_j2_bodies_do_not_change_plain_keplerian_bit_identity(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    `CLAUDE.md`: plain Keplerian bodies must be bit-identical to `main` whether or not a secular-J2 body
+    exists in the arena, on both paths - the arithmetic risk called out there is that
+    `M + (n + dM)*dt` rounds differently from `M + n*dt`, so a shared code path computing both would be
+    exactly wrong in the way this test would catch. Here the two propagators are structurally
+    independent (`_kepler_sib_idx` excludes SECULAR_J2 slots, exactly as it excludes Cowell ones), so
+    this is confirming that isolation holds bit-for-bit, on both the compiled and reference paths.
+    """
+    for use_compiled in (True, False):
+        reference_sim = scenarios.earth_constellation(db_session_factory(), n_sats=6, n_planes=2)
+        reference_sim.record_history = False
+        reference_sim.use_compiled_kernel = use_compiled
+
+        mixed_sim = scenarios.earth_constellation(db_session_factory(), n_sats=6, n_planes=2)
+        mixed_sim.record_history = False
+        mixed_sim.use_compiled_kernel = use_compiled
+        secular_name = "SAT-00-000"
+        secular_idx = mixed_sim.name_to_index[secular_name]
+        mixed_sim.set_propagator(
+            secular_idx, PropagatorType.SECULAR_J2, j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ,
+        )
+
+        for _ in range(30):
+            reference_sim.step(DT)
+            mixed_sim.step(DT)
+
+        keplerian_names = [n for n in reference_sim.name_to_index if n != secular_name]
+        assert len(keplerian_names) > 1, "guard: the scenario must have Keplerian bodies to compare"
+
+        for name in keplerian_names:
+            ref_idx = reference_sim.name_to_index[name]
+            mix_idx = mixed_sim.name_to_index[name]
+            assert np.array_equal(
+                reference_sim.global_states[ref_idx], mixed_sim.global_states[mix_idx]
+            ), f"{name}'s global state diverged merely because {secular_name!r} carries SECULAR_J2 (use_compiled_kernel={use_compiled})"
+            assert np.array_equal(
+                reference_sim.local_states[ref_idx], mixed_sim.local_states[mix_idx]
+            ), f"{name}'s local state diverged (use_compiled_kernel={use_compiled})"

@@ -23,7 +23,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `constants.py` | Physical and unit constants | unchanged |
 | `exceptions.py` | Domain error hierarchy — readability, plus flagging and controlling unique situations | unchanged |
 | `registry.py` | Catalogue of physics models and propagators, so the simulation can query what is available | **wired**: force models by mask bit, propagators by `PropagatorType` |
-| `propagators.py` | State advancement — **now specifically the readable *reference* implementation** | role narrowed |
+| `propagators.py` | State advancement — **now specifically the readable *reference* implementation**. Also holds `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`): analytic Kepler plus first-order secular J2 drift of RAAN, argument of periapsis and mean anomaly, `p`/`e`/`i` held constant, coefficients reusing `geopotential`'s `(j2, r_eq)` row | role narrowed, **grown**: a third propagator alongside Keplerian and Cowell |
 | `body.py` | `BodyHandle`, a UI-facing pointer into the arena | unchanged, never instantiated |
 | `kernels.py` | Compiled scalar twins of the hot paths | **new** |
 | `scenarios.py` | Declarative universe builders, shared by tests and benchmarks | **new** |
@@ -287,6 +287,70 @@ accidents.
 
 ---
 
+## Secular-J2 propagation: the third tier, and why it is a propagator, not a force model
+
+`propagators.SecularJ2Propagator` (`PropagatorType.SECULAR_J2`) advances RAAN, argument of periapsis
+and mean anomaly by their first-order secular J2 rates, on top of the ordinary analytic anomaly advance
+`KeplerianPropagator` already performs. It sits between the two existing tiers on cost and accuracy:
+essentially free like Keplerian propagation (no integrator, no force evaluation), but with most of
+Keplerian's dominant nodal-regression error removed — the reason a model-fidelity sweep wants it as a
+distinct, named configuration rather than treating "Kepler" and "Kepler + J2" as the same thing with a
+coefficient toggled.
+
+**Why a propagator and not a force model.** Every other physics addition so far (`point_mass_gravity`,
+`j2`) is a `forces.ForceKernel`: an acceleration, composed additively, consumed by an integrator that
+does not know what produced it. Secular-J2 drift is not an acceleration a Cowell body could integrate —
+it is a *closed-form correction to the analytic solution itself*, expressed as three additional element
+rates. Forcing it through the force-model contract would mean either inventing a fictitious acceleration
+that reproduces these rates under RK4 (needless numerical error for a case that has an exact solution)
+or teaching `KeplerianPropagator` to consult the force-model mask (coupling two axes `registry.py`
+deliberately keeps separate — see its module docstring). Registering it as a third `PropagatorType`
+instead keeps propagator *selection* and force *composition* on the same two independent axes they
+already were.
+
+**Why it reuses `geopotential`'s `(j2, r_eq)` coefficient row rather than owning a separate one.** The
+frontier plot this propagator exists for compares three tiers on the *same* scenario, and the third tier
+(Cowell + `point_mass_gravity` + `j2`) already carries Earth's J2 coefficients in
+`force_model_params["j2"]`. Storing this propagator's coefficients in the same array, under the same
+`("j2", "r_eq")` column layout, means one coefficient can be shared by both the analytic and numerical
+J2 tiers in a sweep, so a coefficient-sensitivity sweep cannot silently compare them at different values
+by only updating one of the two call sites. The cost is that this never goes through
+`enable_force_model`, since that call also sets the mask bit that adds a body to `accelerations()`'s
+dispatch set — irrelevant and wrong here, since a `SECULAR_J2` body never calls `accelerations()` at
+all. `Simulation.set_propagator`'s `SECULAR_J2` branch writes the same array directly instead.
+
+**Restrictions mirror Cowell's, for the analogous reasons**, not coincidentally: both propagators
+replace a body's entry in `_kepler_sib_idx`, the set `kepler_propagate`'s reflex-kick accumulation
+reads, so both need active/non-head/non-barycentre/non-bubble-root and `mu == 0` for the identical
+reason (see the Cowell section above). Two further restrictions are specific to this propagator: the
+Keplerian parent must not itself be a barycentre (`geopotential.barycentre_parented` — a barycentre's
+J2 is meaningless, the same guard `"j2"` documents for Cowell), and the orbit must be closed
+(`0 <= e < 1` — the rates derive from mean motion `n = sqrt(mu/a^3)`, undefined for an open orbit).
+
+**How position is recovered.** Unlike Cowell, there is no integrator and so no `parent_state_at_start`
+snapshot — `propagate` only updates `coe_states` and writes the resulting state, relative to
+`parent_indices`, into scratch (`Simulation._secular_j2_rel`). `step()` adds that onto the parent's
+*end-of-step* global position once `calc_global()` has produced it, and rebuilds `local_states` against
+`body_sys_map` — the same re-basing pattern Cowell uses, for the same reason the two parent graphs
+diverge (see above), just without anything to subtract first.
+
+**What "mean elements" actually costs here.** `p`, `e`, `i` are held at whatever the body's *osculating*
+elements were when `set_propagator` was called, because `CLAUDE.md` forbids converting osculating
+elements to mean ones. Measuring this against Cowell + `point_mass_gravity` + `j2` (a numerically exact
+comparison, to RK4's own truncation error) at 550 km / 53 deg showed two distinct effects: a bounded,
+orbit-period oscillation of a few km (the short-period terms proper averaging would remove), and a
+*linearly growing* along-track drift — 57.4 km after 1 orbit, 172.1 km after 3, 573.6 km after 10,
+linear to better than 1% — because the mean motion cached from the seeded osculating `p` carries a
+small, fixed fractional bias relative to the true mean `p`, and that bias accumulates rather than
+averaging out. The second effect dominates within a handful of orbits and was not the first guess (a
+bounded ~6 km oscillation looked like the obvious answer until it was actually measured against
+Cowell) — see `tests/validation/test_secular_j2_propagator.py` and
+`propagators.SecularJ2Propagator`'s docstring for the full account. This growing error, not a fixed
+accuracy figure, is what makes "Kepler + secular J2" a genuinely distinct point on a fidelity/cost
+frontier rather than a free upgrade to plain Keplerian propagation.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
@@ -339,9 +403,10 @@ engineering log.
 
 Step 10 is the hook a future spawn/despawn path must call. After build, only `set_propagator` calls it.
 
-Per `step()`: Cowell integrate (relative to each parent's start-of-step state) → Keplerian propagate
-→ `calc_global` → re-base Cowell bodies onto their parents' end-of-step states → advance `t` →
-optionally record.
+Per `step()`: Cowell integrate (relative to each parent's start-of-step state) → secular-J2 advance
+(RAAN/argument of periapsis/mean anomaly, writing a parent-relative state to scratch) → Keplerian
+propagate → `calc_global` → re-base Cowell bodies onto their parents' end-of-step states → re-base
+secular-J2 bodies the same way → advance `t` → optionally record.
 
 ---
 
