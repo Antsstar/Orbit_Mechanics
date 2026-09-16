@@ -440,18 +440,26 @@ def test_cowell_j2_converges_to_the_truth_at_fourth_order_down_to_the_floor(
 #  - cross-track: its W component equals the true one, so the node regresses twice as fast. Omega is off
 #    by |NODAL_RATE| T = 5.2e-3 rad, displacing the satellite by up to r sin i * 5.2e-3 = 29 km.
 #  - along-track: its radial projection -3 (mu J2 R^2/r^4) s^2 averages, with <s^2> = sin^2 i / 2 =
-#    0.319, to f = -0.957 * 7.65e-6 = -7.3e-6 km/s^2. A constant radial acceleration f on a circular
-#    orbit drifts along-track at 3 f / n per unit time (Clohessy-Wiltshire), i.e. 6 pi f / n^2 = 114 km
-#    per orbit.
-# Combined sqrt(114^2 + 29^2) = 118 km. This estimate was completed only after measuring: the first
-# version counted the node shift alone (29 km) and the real-file mutant gave 136 km, which is what
-# exposed the omitted radial term. 136 km sits 15% above the completed estimate, which ignores the
-# short-period terms. The error is model error, so it does not shrink with dt: ratios ~1.
-# Asserted: > 1 km (4e4 x the correct error at 512 steps, 2.4e-5 km), inside [0.5, 2] x 118 km so the
-# in-suite mutant is shown to be the intended mutation, and ratio outside the fourth-order band.
+#    0.319, to f = -0.957 * 7.65e-6 = -7.3e-6 km/s^2. For two trajectories that start from the same
+#    state, Clohessy-Wiltshire with a constant radial f gives y(t) = -(2 f / n^2)(n t - sin n t), so
+#    |4 pi f / n^2| = 76 km along-track after one orbit.
+# Combined sqrt(76^2 + 29^2) = 82 km. The measured 136 km is 1.66x that. Decomposed numerically in
+# review (DOP853 at this orbit's initial state), the full mutant difference is 133.1 km along-track,
+# 29.0 km cross-track and -1.3 km radial, and the constant radial average alone gives 76.15 km. So
+# the estimate is right for the two parts it covers. The remaining ~57 km along-track is the secular
+# response to the orbit-varying (2n) components of the extra force. Its size depends on the initial
+# argument of latitude and is not derived here.
+# History: the first estimate counted the node shift alone (29 km). The second used 6 pi f / n^2
+# (114 km), whose sqrt(114^2 + 29^2) = 118 km sat within 15% of the measurement only because the
+# factor was wrong. It was completed after measuring, and landing near the measurement was taken as
+# confirmation. That is the lesson: see docs/engineering-log.md.
+# The error is model error, so it does not shrink with dt: ratios ~1.
+# Asserted: > 1 km (4e4 x the correct error at 512 steps, 2.4e-5 km); inside [0.5, 2] x 82 km, an
+# order-of-magnitude check that the in-suite mutant is the intended mutation, not a precise
+# prediction; and ratio outside the fourth-order band.
 MUTANT_MIN_ERROR_KM = 1.0
 MUTANT_PREDICTED_KM = math.hypot(
-    6.0 * math.pi * 3.0 * (MU * J2 * R_EQ ** 2 / ORBIT_RADIUS ** 4) * 0.5 * math.sin(INCLINATION) ** 2
+    4.0 * math.pi * 3.0 * (MU * J2 * R_EQ ** 2 / ORBIT_RADIUS ** 4) * 0.5 * math.sin(INCLINATION) ** 2
     / MEAN_MOTION ** 2,
     ORBIT_RADIUS * math.sin(INCLINATION) * abs(NODAL_RATE) * PERIOD,
 )

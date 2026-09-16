@@ -690,16 +690,27 @@ actually arrived, and check status before relying on delegated work.
 doubled nodal regression alone: ~29 km cross-track after one orbit. The real-file mutant gave 136.2 km.
 
 **Diagnosis.** The mutant term also has a radial projection, `-3 (mu J2 R^2/r^4) s^2`. Averaged over the
-orbit it is a constant -7.3e-6 km/s^2, and under Clohessy-Wiltshire that drifts along-track by
-`6 pi f / n^2` = 114 km per orbit. Combined with the cross-track part, sqrt(114^2 + 29^2) = 118 km.
-That is 15% below the measurement, and the remaining gap is short-period terms. The test would have
-caught the mutant either way. What was wrong was the stated expectation.
+orbit it is a constant -7.3e-6 km/s^2. The agent's second estimate put the along-track drift from that
+at `6 pi f / n^2` = 114 km per orbit, giving sqrt(114^2 + 29^2) = 118 km, "15% below the measurement".
 
-**Correction.** The test now carries the completed derivation and says it was completed after
-measuring. It asserts the mutant error lies within [0.5, 2] of 118 km as well as above 1 km.
+**That second estimate was also wrong, and was caught in review.** For two trajectories that start from
+the same state, Clohessy-Wiltshire with a constant radial `f` gives `y(t) = -(2 f / n^2)(n t - sin n t)`,
+so the drift is `4 pi f / n^2` = 76 km per orbit, not 114. A DOP853 run at the satellite's real initial
+state confirmed it: 76.15 km for the constant radial average alone. Decomposing the full mutant gave
+133.1 km along-track, 29.0 km cross-track and -1.3 km radial (136.2 km total, matching the test). The
+corrected estimate, sqrt(76^2 + 29^2) = 82 km, is right for the two parts it covers. The remaining
+~57 km along-track is the secular response to the orbit-varying components of the extra force, which
+depends on the initial argument of latitude. The 118 km looked close only because the factor was wrong.
+
+**Correction.** The test now carries the corrected derivation and the numerical decomposition. It
+asserts the mutant error is above 1 km and within [0.5, 2] of 82 km. That band is an
+order-of-magnitude check that the in-suite mutant is the intended mutation, not a prediction.
 
 **Lesson.** A factor of ~5 between an estimate and a measurement means a physical effect is missing,
-not that the estimate is roughly right. Find the missing term before writing either number down.
+not that the estimate is roughly right. Close agreement is not evidence either. An estimate adjusted
+*after* seeing the measurement can land near it by accident, as 118 km did. Check a revised
+derivation by an independent route, such as a numerical decomposition, before believing that it
+closes the gap.
 
 ---
 
