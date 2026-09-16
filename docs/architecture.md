@@ -17,20 +17,22 @@ Roles marked **unchanged** have kept their original purpose since the project be
 |---|---|---|
 | `simulator.py` | Overall orchestrator. Owns the memory arena, builds the universe from the database, drives `step()` | unchanged |
 | `database.py` | Catalogue of every body a scenario could ever want. A simulation loads a named subset | unchanged |
-| `frames.py` | Coordinate and state-space transformations. Core toolbox | unchanged |
+| `frames.py` | Coordinate and state-space transformations, now including the RSW frame. Core toolbox | unchanged |
 | `utilities.py` | Anomalies, Kepler, Barker, rotations, perturbations. Core toolbox | unchanged |
 | `custom_types.py` | Type aliases and column-index enums. Readability and debuggability | unchanged |
 | `constants.py` | Physical and unit constants | unchanged |
 | `exceptions.py` | Domain error hierarchy — readability, plus flagging and controlling unique situations | unchanged |
-| `registry.py` | Catalogue of physics models and propagators, so the simulation can query what is available | unchanged, **still unwired** |
+| `registry.py` | Catalogue of physics models and propagators, so the simulation can query what is available | force-model half **wired**; propagator half still unwired |
 | `propagators.py` | State advancement — **now specifically the readable *reference* implementation** | role narrowed |
 | `body.py` | `BodyHandle`, a UI-facing pointer into the arena | unchanged, never instantiated |
 | `kernels.py` | Compiled scalar twins of the hot paths | **new** |
 | `scenarios.py` | Declarative universe builders, shared by tests and benchmarks | **new** |
 | `reference.py` | Independent DOP853 N-body truth trajectories | **new** |
 | `benchmark.py` | Timing primitive (minimum-of-batches) | **new** |
+| `forces.py` | Force-model composition: enabled physics as a per-body bitmask, additive stateless kernels, and the acceleration contract integrators consume | **new** |
 
-Nothing was removed. No module lost a responsibility.
+Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
+`get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
 
 ---
 
