@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 from typing import List, Optional, Any, Dict, Sequence, Union, cast
-from .custom_types import ScalarSeconds, PropagatorType, ForceModelMask
+from .custom_types import ScalarSeconds, PropagatorType, ForceModelMask, COEIndex
 from numpy.typing import NDArray
 
 import numpy as np
@@ -9,8 +9,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
-from .propagators import Propagator, KeplerianPropagator
-from .kernels import NUMBA_AVAILABLE, calc_global_states, kepler_propagate
+from .propagators import Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates
+from .kernels import NUMBA_AVAILABLE, calc_global_states, kepler_propagate, secular_j2_propagate
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
 from .registry import get_force_model, get_propagators
@@ -18,6 +18,7 @@ from .integrators import Integrator, RK4Integrator
 from . import frames as fr
 from . import forces
 from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a force model (gravity.py)
+from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
@@ -122,6 +123,18 @@ class Simulation:
         # max_capacity) is allocated exactly once - see integrators.py's module docstring for why an
         # integrator must be a stateful object rather than a bare function.
         self._cowell_integrator: Integrator = RK4Integrator(max_capacity)
+
+        # Secular-J2 propagator scratch (see propagators.SecularJ2Propagator). `_secular_j2_idx` is
+        # the cached active-slot list, same convention as `_cowell_idx` above. `_secular_j2_rates`
+        # holds the three cached per-body rates (`[dRAAN/dt, dARGPE/dt, dM/dt]`, radians/second),
+        # computed once by `set_propagator` rather than every step - p, e, i (and so mean motion) are
+        # constant under this theory, so nothing per-step depends on recomputing them.
+        # `_secular_j2_rel` is the per-step parent-relative state vector `propagate` writes into;
+        # `step()` re-bases it onto the parent's end-of-step global position once `calc_global()` has
+        # produced it, exactly as it does for a Cowell body - see that propagator's docstring.
+        self._secular_j2_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._secular_j2_rates = np.zeros((max_capacity, 3), dtype=np.float64)
+        self._secular_j2_rel = np.zeros((max_capacity, 6), dtype=np.float64)
 
         # --- Force-model composition arena hooks ---
         # A body's enabled physics is data: one bit per registered force model (registry.py), OR'd
@@ -276,8 +289,12 @@ class Simulation:
         # .propagate`'s `sib_mask` override and `tests/validation/test_cowell_propagator.py`'s
         # isolation test).
         is_cowell = self.propagator_type == np.uint8(PropagatorType.COWELL)
+        is_secular_j2 = self.propagator_type == np.uint8(PropagatorType.SECULAR_J2)
         self._cowell_idx = np.flatnonzero(self.active_mask & ~self.is_head & is_cowell).astype(np.int64)
-        self._kepler_sib_mask = self.active_mask & ~self.is_head & ~is_cowell
+        self._secular_j2_idx = np.flatnonzero(
+            self.active_mask & ~self.is_head & is_secular_j2
+        ).astype(np.int64)
+        self._kepler_sib_mask = self.active_mask & ~self.is_head & ~is_cowell & ~is_secular_j2
         self._kepler_sib_idx = np.flatnonzero(self._kepler_sib_mask).astype(np.int64)
 
         # Flatten the tier list into a single topologically ordered slot array. `calc_global_states`
@@ -689,14 +706,20 @@ class Simulation:
         self,
         bodies: Union[int, Sequence[int], NDArray[np.integer[Any]]],
         propagator_type: PropagatorType,
+        **coefficients: float,
     ) -> None:
         """
         Assign a propagator to the given bodies, per body, as data.
 
         `step()` reads `propagator_type` (via the cached index arrays this rebuilds) rather than
         selecting Keplerian unconditionally - `registry._PROPAGATOR_REGISTRY` is what it dispatches
-        Cowell through (`propagators.CowellPropagator`). Only `PropagatorType.KEPLERIAN` (the default
-        for every slot) and `PropagatorType.COWELL` currently drive that dispatch.
+        Cowell through (`propagators.CowellPropagator`). `PropagatorType.KEPLERIAN` (the default for
+        every slot), `PropagatorType.COWELL` and `PropagatorType.SECULAR_J2` currently drive that
+        dispatch.
+
+        `**coefficients` is only meaningful for `SECULAR_J2` (below); passing any for another
+        propagator type raises, the same strictness `enable_force_model` applies to an unknown
+        keyword.
 
         **Cowell is restricted to active bodies that are not a system head, not a system barycenter,
         and not their own kinematic bubble** (`body_sys_map[i] != i`). A head or barycenter's motion
@@ -717,10 +740,36 @@ class Simulation:
         position. Rather than leave that as a documented-but-permitted gap, it is rejected here; a
         massless body (`mu=0`, the common case for a satellite or a test secondary) is unaffected by
         this restriction since it never contributed to a reflex kick in the first place.
+
+        **`SECULAR_J2` carries the same head/barycenter/kinematic-bubble and `mu == 0` restrictions as
+        Cowell, for the same reasons** - see `propagators.SecularJ2Propagator`'s docstring, which is
+        this propagator's counterpart of `docs/architecture.md`'s Cowell section. Two further, specific
+        restrictions:
+
+        - **The Keplerian parent must not be a barycentre** (`geopotential.barycentre_parented`): a
+          barycentre's J2 is physically meaningless, and `geopotential.j2_kernel` cannot detect the case
+          itself (no `is_system` in its signature) - the same guard `enable_force_model("j2", ...)`
+          documents as the caller's responsibility, enforced here instead since this propagator's
+          coefficients are never optional.
+        - **`0 <= e < 1` (a closed, elliptical orbit)**: the secular rates derive from mean motion
+          `n = sqrt(mu/a^3)`, undefined for a parabolic or hyperbolic orbit.
+
+        `**coefficients` must supply exactly `j2` and `r_eq` - unlike `enable_force_model("j2", ...)`,
+        where omitting them is a documented silent no-op, `SECULAR_J2` has no meaning without them, so
+        they are mandatory here. They are written into `force_model_params["j2"]` - the same array and
+        column layout `geopotential.j2_kernel` reads (`param_names = ("j2", "r_eq")`) - without setting
+        the `"j2"` force-model mask bit, so this never adds the body to `accelerations()`'s dispatch set;
+        see `propagators.SecularJ2Propagator`'s docstring for why that storage choice was made. The three
+        secular rates are then derived once, by `propagators.secular_j2_rates`, and cached in
+        `self._secular_j2_rates` rather than recomputed every step.
         """
         idx = np.atleast_1d(np.asarray(bodies, dtype=np.int64))
 
         if propagator_type == PropagatorType.COWELL:
+            if coefficients:
+                raise ValueError(
+                    f"Cowell propagation takes no coefficients, got {sorted(coefficients)}."
+                )
             disallowed = (
                 ~self.active_mask[idx] | self.is_head[idx] | self.is_system[idx] |
                 (self.body_sys_map[idx] == idx)
@@ -738,6 +787,75 @@ class Simulation:
                     f"mass and would silently stop contributing to their head's reflex kick. See "
                     f"Simulation.set_propagator's docstring."
                 )
+
+        elif propagator_type == PropagatorType.SECULAR_J2:
+            disallowed = (
+                ~self.active_mask[idx] | self.is_head[idx] | self.is_system[idx] |
+                (self.body_sys_map[idx] == idx)
+            )
+            if np.any(disallowed):
+                raise ValueError(
+                    f"secular-J2 propagation is restricted to active, non-head, non-barycenter bodies "
+                    f"that are not their own kinematic bubble; slot(s) {idx[disallowed].tolist()} do "
+                    f"not qualify. See Simulation.set_propagator's docstring."
+                )
+
+            bary_parented = geopotential.barycentre_parented(self.is_system, self.parent_indices, idx)
+            if bary_parented.size > 0:
+                raise ValueError(
+                    f"secular-J2 propagation requires a non-barycentre Keplerian parent - a "
+                    f"barycentre's J2 is meaningless, and the kernel cannot detect it (see "
+                    f"geopotential.py); slot(s) {bary_parented.tolist()} are parented to a barycentre."
+                )
+
+            missing = {"j2", "r_eq"} - set(coefficients)
+            if missing:
+                raise ValueError(
+                    f"secular-J2 propagation requires coefficients {sorted(missing)}, matching the "
+                    f"'j2' force model's (j2, r_eq); got {sorted(coefficients)}."
+                )
+            extra = set(coefficients) - {"j2", "r_eq"}
+            if extra:
+                raise ValueError(
+                    f"secular-J2 propagation takes only 'j2' and 'r_eq'; got unexpected "
+                    f"{sorted(extra)}."
+                )
+
+            e = self.coe_states[idx, COEIndex.E]
+            bad_e = idx[(e < 0.0) | (e >= 1.0) | ~np.isfinite(e)]
+            if bad_e.size > 0:
+                raise ValueError(
+                    f"secular-J2 propagation requires a closed elliptical orbit (0 <= e < 1) - the "
+                    f"secular rates derive from mean motion n = sqrt(mu/a^3), undefined for an open "
+                    f"orbit; slot(s) {bad_e.tolist()} do not qualify."
+                )
+
+            massive = idx[self.mu_array[idx] != 0.0]
+            if massive.size > 0:
+                raise ValueError(
+                    f"secular-J2 propagation requires mu == 0; slot(s) {massive.tolist()} carry "
+                    f"nonzero mass and would silently stop contributing to their head's reflex kick, "
+                    f"for the same reason Cowell requires it. See Simulation.set_propagator's "
+                    f"docstring."
+                )
+
+            j2_model = get_force_model(geopotential.J2_MODEL)
+            params = self.force_model_params.get(geopotential.J2_MODEL)
+            if params is None:
+                params = np.zeros((self.max_capacity, j2_model.n_params), dtype=np.float64)
+                self.force_model_params[geopotential.J2_MODEL] = params
+            params[idx, 0] = coefficients["j2"]
+            params[idx, 1] = coefficients["r_eq"]
+
+            self._secular_j2_rates[idx] = secular_j2_rates(
+                self.coe_states, self.mu_array, self.parent_indices, params, idx,
+            )
+
+        elif coefficients:
+            raise ValueError(
+                f"propagator {PropagatorType(propagator_type).name} takes no coefficients, got "
+                f"{sorted(coefficients)}."
+            )
 
         self.propagator_type[idx] = np.uint8(propagator_type)
         self._refresh_active_indices()
@@ -772,6 +890,16 @@ class Simulation:
         canonical case, see `docs/architecture.md`) so the arena's stated invariant - `local_states[i]`
         relative to `global_states[body_sys_map[i]]` - holds for Cowell bodies exactly as it does for
         Keplerian ones once `step()` returns.
+
+        Secular-J2 siblings (`propagator_type == SECULAR_J2`) are analytic, like the Keplerian path,
+        so there is no integrator and no state to snapshot: `propagators.SecularJ2Propagator.propagate`
+        (or its compiled twin `kernels.secular_j2_propagate`) advances RAAN, argument of periapsis and
+        mean anomaly by their cached rates and writes the resulting state, relative to `parent_indices`,
+        into `self._secular_j2_rel`. Once `calc_global()` has produced every Keplerian parent's true
+        end-of-step position, that relative state is added onto it and `local_states` rebuilt against
+        `body_sys_map` - the same re-basing pattern Cowell uses above, for the same reason (the two
+        parent graphs diverge; see `docs/architecture.md`), just without a `parent_state_at_start` to
+        subtract first, since nothing here was integrated relative to a snapshot.
         """
         cowell_result: Optional[NDArray[np.float64]] = None
         cowell_primaries: Optional[NDArray[np.int32]] = None
@@ -787,6 +915,19 @@ class Simulation:
                 primaries=cowell_primaries,
             )
             cowell_result = self.global_states[self._cowell_idx].copy()
+
+        if self._secular_j2_idx.size > 0:
+            if self.use_compiled_kernel:
+                secular_j2_propagate(
+                    float(dt), self.coe_states, self.mu_array, self.parent_indices,
+                    self._secular_j2_rates, self._secular_j2_idx, self._secular_j2_rel,
+                )
+            else:
+                SecularJ2Propagator.propagate(
+                    dt=dt, coe_states=self.coe_states, mu_array=self.mu_array,
+                    parent_indices=self.parent_indices, rates=self._secular_j2_rates,
+                    indices=self._secular_j2_idx, rel_out=self._secular_j2_rel,
+                )
 
         if self.use_compiled_kernel:
             kepler_propagate(
@@ -813,6 +954,16 @@ class Simulation:
             self.global_states[self._cowell_idx] = self.global_states[cowell_primaries] + relative_state
             self.local_states[self._cowell_idx] = (
                 self.global_states[self._cowell_idx] - self.global_states[self.body_sys_map[self._cowell_idx]]
+            )
+
+        if self._secular_j2_idx.size > 0:
+            secular_idx = self._secular_j2_idx
+            secular_parents = self.parent_indices[secular_idx]
+            self.global_states[secular_idx] = (
+                self.global_states[secular_parents] + self._secular_j2_rel[secular_idx]
+            )
+            self.local_states[secular_idx] = (
+                self.global_states[secular_idx] - self.global_states[self.body_sys_map[secular_idx]]
             )
 
         self.t += dt

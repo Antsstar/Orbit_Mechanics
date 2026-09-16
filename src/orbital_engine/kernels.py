@@ -39,7 +39,7 @@ from numpy.typing import NDArray
 
 __all__ = [
     "NUMBA_AVAILABLE", "kepler_propagate", "calc_global_states",
-    "coe_to_rv_scalar", "solve_kepler_scalar",
+    "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -370,6 +370,66 @@ def kepler_propagate(
         h = head_idx[k]
         for c in range(6):
             local_states[h, c] = kick[h, c]
+
+
+@njit
+def secular_j2_propagate(
+    dt: float,
+    coe_states: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
+    parent_indices: NDArray[np.int32],
+    rates: NDArray[np.float64],
+    indices: NDArray[np.int64],
+    rel_out: NDArray[np.float64],
+) -> None:
+    """
+    One first-order secular-J2 step over `indices`, in place on `coe_states`, writing the resulting
+    parent-relative state vector into caller-owned `rel_out` (shape `(n_slots, 6)`) - compiled twin of
+    `propagators.SecularJ2Propagator.propagate`, held equivalent by
+    `tests/validation/test_kernel_equivalence.py` at 1e-12 relative.
+
+    `rates[s]` (`[dRAAN/dt, dARGPE/dt, dM/dt]`, cached once at `Simulation.set_propagator` time by
+    `propagators.secular_j2_rates`) advances mean anomaly and the two secular angles linearly in `dt`;
+    `p`, `e`, `i` are untouched, since first-order secular J2 theory holds them constant. `rel_out` is
+    NOT `local_states` - see `SecularJ2Propagator`'s docstring for why the caller must re-base it onto
+    the parent's end-of-step global position rather than writing it directly.
+
+    An invalid orbit (`p` degenerate, or a non-finite anomaly) leaves `coe_states[s, 3:5]` updated
+    (matching `kepler_propagate`'s own "elements always advance" convention) but `rel_out[s]` untouched,
+    mirroring `kepler_propagate`'s identical convention for a failed `coe_to_rv`.
+    """
+    n = indices.shape[0]
+    for k in range(n):
+        s = indices[k]
+        par = parent_indices[s]
+        mu = mu_array[s] + mu_array[par]
+
+        p = coe_states[s, 0]
+        e = coe_states[s, 1]
+        inc = coe_states[s, 2]
+        theta = coe_states[s, 5]
+
+        M_old = true_to_mean_scalar(theta, e)
+        M_new = (M_old + rates[s, 2] * dt) % (2.0 * math.pi)
+        theta_new = mean_to_true_scalar(M_new, e, _SOLVER_TOL, _SOLVER_MAX_ITE)
+
+        raan_new = coe_states[s, 3] + rates[s, 0] * dt
+        argpe_new = coe_states[s, 4] + rates[s, 1] * dt
+
+        coe_states[s, 3] = raan_new
+        coe_states[s, 4] = argpe_new
+        coe_states[s, 5] = theta_new
+
+        if p <= MIN_SEMI_LATUS_RECTUM or math.isnan(theta_new):
+            continue
+
+        rx, ry, rz, vx, vy, vz = coe_to_rv_scalar(p, e, inc, raan_new, argpe_new, theta_new, mu)
+        rel_out[s, 0] = rx
+        rel_out[s, 1] = ry
+        rel_out[s, 2] = rz
+        rel_out[s, 3] = vx
+        rel_out[s, 4] = vy
+        rel_out[s, 5] = vz
 
 
 @njit

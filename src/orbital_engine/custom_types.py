@@ -13,6 +13,7 @@ class PropagatorType(enum.IntEnum):
     ENCKE       = 4 # Oscilating Reference Derivation Integration
     SGP4        = 5 # LEO Analytical Drag & J2-J4 Harmonics
     LUNAR_MASCON= 6 # Lunar-centric high-fidelity gravity field
+    SECULAR_J2  = 7 # Analytic Keplerian propagation plus first-order secular J2 drift of RAAN, argument of periapsis and mean anomaly
 
 class COEIndex(enum.IntEnum):
     """
