@@ -250,6 +250,6 @@ Per `step()`: propagate → `calc_global` → advance `t` → optionally record.
 ## Known-broken
 
 Tracked in `CLAUDE.md` so it is visible at session start. Summarised here for completeness:
-`Perturbations.GVP_COE` (four equation errors), `cart_to_RSW` / `RSW_to_cart` (missing decorator,
-shape arithmetic, stub), and `rv_to_coe`'s no-valid-orbit early return shape. These are the current
-`mypy --strict` failures on `feature/vop-propagator`, not on `main`.
+on `main`, `rv_to_coe`'s no-valid-orbit early return shape. On `feature/vop-propagator` only,
+`Perturbations.GVP_COE` (four equation errors) and that branch's superseded `cart_to_RSW` /
+`RSW_to_cart`; those are the branch's `mypy --strict` failures. Correct RSW transforms are on `main`.

@@ -89,6 +89,7 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 | Module | What it already does |
 |---|---|
 | `frames.ReferenceFrames` | `rv_to_coe` and `coe_to_rv` — vectorised over `(N,3)`/`(N,6)`, handle circular/equatorial/polar/parabolic fallbacks, return a success mask. Also body-fixed, RaDec and long/lat transforms |
+| `frames.ReferenceFrames` RSW | `RSW_basis(r, v)` → `(N,3,3)` with rows R, S, W; `cart_to_RSW(r, v, vec)` and `RSW_to_cart(r, v, vec_rsw)`. A `(3,)` direction such as prograde `[0,1,0]` broadcasts over N states. Success mask for rectilinear, zero or non-finite reference states — those rows come back exactly zero. The rectilinear test is *relative* (`|r×v| > tol·|r||v|`), unlike `rv_to_coe`'s absolute `|h|`, so the two masks can disagree near the boundary |
 | `utilities.Transformations` | `Rx` `Ry` `Rz` `Rxyz` `Rzyx` `Rzxz` (batched `(N,3,3)` tensors), `cart_to_sphe` / `sphe_to_cart` |
 | `utilities.Anomalies` | Full true ↔ eccentric ↔ mean stack including hyperbolic and parabolic, Newton-Raphson and successive-substitution solvers |
 | `utilities.Kepler` / `utilities.Barker` | Time ↔ mean anomaly for elliptic/hyperbolic and parabolic cases |
@@ -123,11 +124,9 @@ does not currently run on it):
 - `Perturbations.GVP_COE` has four equation errors: `1.0 + e + cos θ` where it should be `e * cos θ`;
   a missing `*` combined with the `ȧ` form where the correct one is `ṗ = (2 p r / h) · a_S`; and a
   `+` that should be `*`.
-- `cart_to_RSW` is missing `@staticmethod` and its shape math adds an `int` to a `tuple`.
-  `RSW_to_cart` is a stub typed as returning an array.
-
-**Phase 2 needs RSW.** Thrust direction laws and any GVE work depend on those transforms, so fixing
-them is phase 2 scope, not leftover cleanup — and the fix lands on `main`, not by merging that branch.
+- Its `cart_to_RSW` / `RSW_to_cart` are broken **and superseded**: correct, tested versions now live on
+  `main` with a different signature (see the tools table). When rebasing, drop the branch's versions
+  rather than resolving conflicts in their favour.
 
 Fixed in phase 1 (`Anomalies.mean_to_eccentric`, rewritten): the `"S.S"` global-length mask indexing
 bug, and a silent-NaN path where a diverging iterate returned NaN *reporting success* — `abs(nan) > tol`

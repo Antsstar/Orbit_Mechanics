@@ -104,7 +104,81 @@ of its report.
 
 ---
 
+### After a Claude Code update or restart, the SSH key is gone and `!` cannot restore it
+
+**Symptom.** `git push` → `Permission denied (publickey)`. Running `! ssh-add ~/.ssh/git_personal_ed2`
+inside Claude Code → `Could not open a connection to your authentication agent`. Supplying the socket
+path explicitly gets as far as `Enter passphrase for …` and then silently adds nothing.
+
+**Cause.** Three separate things, found by checking rather than guessing:
+
+- An `ssh-agent` process *was* running, and `~/.ssh/agent-environment` pointed at its live socket —
+  but that agent held **no keys**. The key added in the previous session belonged to an agent that no
+  longer existed.
+- The updated Claude Code no longer runs `~/.bashrc` in its shells. Every command output in the earlier
+  session began with the bashrc snippet's `Already Running` line; after the update none did, so
+  `SSH_AUTH_SOCK` was never set.
+- `!` commands have no terminal to read a passphrase from. The prompt is printed, reads end-of-file,
+  and exits.
+
+**Fix.** Add the key from a **separate Git Bash window**, which does run `~/.bashrc` and so finds the
+same agent: `ssh-add ~/.ssh/git_personal_ed2`. Tool shells then reach it by sourcing the environment
+file in the same command as the push:
+
+```
+. ~/.ssh/agent-environment && git push origin main
+```
+
+**How to avoid.** Expect this after every Claude Code restart. Verify with `ssh-add -l` (fingerprints
+only) before assuming a push will work. An untested alternative that avoids the second window:
+`SSH_ASKPASS=/mingw64/bin/git-askpass.exe SSH_ASKPASS_REQUIRE=force ssh-add …`, which should raise a
+graphical passphrase dialog.
+
+---
+
+### Shell commands are re-parsed before bash sees them
+
+**Symptom.** A long shell command containing a heredoc fails immediately with
+`unexpected EOF while looking for matching` a quote or backtick, and nothing executes. The same
+content is valid bash.
+
+**Cause.** The tool layer evaluates the command string before bash runs it, so triple-backtick code
+fences, and some quote combinations, are parsed as shell syntax even inside a quoted heredoc.
+
+**Fix.** Write multi-line scripts that contain Markdown, backticks or mixed quoting to a file first,
+then execute the file.
+
+---
+
 ## Traps found in the codebase
+
+### Disabling a force model left its acceleration behind
+
+**Symptom.** None, unless you look. Enable a test acceleration of 7 km/s² on a body, clear its mask
+bit, call `resolve_force_models()`, and `accelerations()` still reports `[7, 0, 0]` for that body.
+
+**Cause.** `compose_accelerations` zeroes only the rows it is about to write — the current dispatch
+set — which is correct for a function that allocates nothing and scales with model count. But when a
+body's last model is disabled, its row *leaves* that set and is never written again, so the arena
+buffer keeps the old value indefinitely.
+
+The subagent that wrote the layer had a test for the neighbouring property,
+`test_zero_mask_bodies_are_never_touched`, which asserts a sentinel survives. That is right for the
+pure compose function, and it passed — while encoding exactly the arena-level behaviour that was wrong.
+
+**Why it matters here specifically.** A sweep switches models off as routinely as on. "Keplerian" run
+after "Keplerian + J2" on the same simulation would have silently still included J2, producing a
+plausible trajectory for the wrong configuration — the one failure a comparison engine cannot absorb.
+
+**Fix.** `Simulation.resolve_force_models` clears `accel_accum`. That is O(capacity), but it runs once
+per configuration change, never per step, so step cost and the scaling invariants are untouched.
+Guarded by `test_disabling_a_model_leaves_no_stale_acceleration`.
+
+**How to avoid.** For any cache or scratch buffer written only for a *subset* of rows, ask what
+happens to a row that leaves the subset. Found by asking what a sweep does *between* configurations,
+which no test of a single configuration exercises.
+
+---
 
 ### A test that asserted nothing for months
 
@@ -419,6 +493,36 @@ inferring from it is close to guaranteed to be too narrow.
 More generally: a green local `mypy` on one interpreter does not predict the matrix. This is the
 second time the CI matrix has caught something invisible locally, and it is the argument for gating
 every branch rather than only main.
+
+---
+
+### A regression test "failed without the fix" for the wrong reason
+
+**What happened.** To prove the stale-acceleration regression test catches the bug, I ran
+`git stash push src/orbital_engine/simulator.py`, ran the test, saw it fail, and nearly reported that
+as proof.
+
+`git stash push <path>` stashes **every** uncommitted change in that file. `simulator.py` also held the
+entire uncommitted force-model layer, so the test ran against a simulation with no
+`enable_force_model` at all. It failed with an attribute error, which proves nothing about stale rows.
+
+**Correction.** Removed *only* the one fix line, re-ran, and confirmed the failure message was the
+intended assertion (`a disabled model's acceleration survived re-resolve`); restored the line and
+confirmed the pass. The restore itself then failed, because the backup went to a different temporary
+path than the one read back — recovered by exactly reversing the one-line `sed`, then re-verifying.
+
+**Lesson.** "The test fails without the fix" is only evidence if you check *how* it fails. Remove the
+smallest possible change, and read the failure message, not just the exit status.
+
+---
+
+### `git merge -F -` does not read the message from stdin
+
+**Symptom.** `git merge --no-ff <branch> -F -` fed by a heredoc → `error: could not read file '-'`. No
+merge happened, but chained commands kept running and printed a plausible-looking test count.
+
+**Fix.** Write the message to a file and pass `-F <file>`, as for multi-line commit messages (see the
+PowerShell here-string entry below). Check `git log --graph` before trusting that a merge happened.
 
 ---
 
