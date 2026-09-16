@@ -22,7 +22,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `custom_types.py` | Type aliases and column-index enums. Readability and debuggability | unchanged |
 | `constants.py` | Physical and unit constants | unchanged |
 | `exceptions.py` | Domain error hierarchy — readability, plus flagging and controlling unique situations | unchanged |
-| `registry.py` | Catalogue of physics models and propagators, so the simulation can query what is available | force-model half **wired**; propagator half still unwired |
+| `registry.py` | Catalogue of physics models and propagators, so the simulation can query what is available | **wired**: force models by mask bit, propagators by `PropagatorType` |
 | `propagators.py` | State advancement — **now specifically the readable *reference* implementation** | role narrowed |
 | `body.py` | `BodyHandle`, a UI-facing pointer into the arena | unchanged, never instantiated |
 | `kernels.py` | Compiled scalar twins of the hot paths | **new** |
@@ -30,6 +30,9 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `reference.py` | Independent DOP853 N-body truth trajectories | **new** |
 | `benchmark.py` | Timing primitive (minimum-of-batches) | **new** |
 | `forces.py` | Force-model composition: enabled physics as a per-body bitmask, additive stateless kernels, and the acceleration contract integrators consume | **new** |
+| `gravity.py` | `point_mass_gravity`: the central two-body term relative to the gravitational parent | **new** |
+| `geopotential.py` | `j2`: the J2 zonal perturbation only, composable with `point_mass_gravity` | **new** |
+| `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -334,18 +337,21 @@ engineering log.
 9. `_rehydrate_coes` — recompute local states and elements from final global positions
 10. `_refresh_active_indices` — cache sibling/head index arrays and the flattened topological order
 
-Step 10 is the hook a future spawn/despawn path must call. Nothing calls it after build today.
+Step 10 is the hook a future spawn/despawn path must call. After build, only `set_propagator` calls it.
 
-Per `step()`: propagate → `calc_global` → advance `t` → optionally record.
+Per `step()`: Cowell integrate (relative to each parent's start-of-step state) → Keplerian propagate
+→ `calc_global` → re-base Cowell bodies onto their parents' end-of-step states → advance `t` →
+optionally record.
 
 ---
 
 ## Deliberately not built
 
-- **Propagator dispatch.** `registry.py` is written and never read. `step()` selects Keplerian
-  unconditionally; the compiled/reference choice is an *implementation* switch, not a model switch.
-  Per-body propagator selection belongs with the force-model interface, so it arrives as part of the
-  sweep configuration rather than as a second ad-hoc flag.
+- **Compiled twins for Cowell and the force models.** Per-body propagator selection now exists
+  (`set_propagator`), but `RK4Integrator`, `point_mass_gravity` and `j2` are NumPy only. The
+  compiled/reference switch still applies to the Keplerian path alone.
+- **Massive Cowell bodies, and N-body or third-body forces.** Rejected and unregistered respectively;
+  see the Cowell section above for why each needs more than a new kernel.
 - **Slot compaction and handle indirection.** Dropped from phase 1 once measurement showed they
   addressed ~4% of the step. They become worth doing when there is a despawn path to compact *for*.
 - **Spawn / despawn.** Slots come off a free list and are never returned. Loading bodies mid-run — a

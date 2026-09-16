@@ -81,6 +81,15 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
   `enable_force_model` does it for you. It also clears `accel_accum`: `compose_accelerations` only
   writes rows in the current dispatch set, so without that clear a disabled model's last acceleration
   would persist in its body's row.
+- **A Cowell body integrates its state relative to its `parent_indices` parent, never its absolute
+  global state.** `step()` saves that relative state and re-bases it onto the parent's *end-of-step*
+  position after `calc_global()`. Integrating the absolute state with parent-relative forces silently
+  assumes the parent is fixed. `two_body` cannot catch that, because its primary never moves; use
+  `sun_earth_moon(moon_mu=0.0)`, whose Earth accelerates toward the Sun.
+- **A Cowell body's `coe_states` row is stale**, left at whatever it held before reassignment. Read
+  its `(r, v)` from `global_states`.
+- Change propagators only through `set_propagator`, which validates and calls
+  `_refresh_active_indices`. Writing `propagator_type` directly leaves the dispatch index arrays stale.
 
 ---
 
@@ -96,13 +105,15 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 | `simulator._topological_sort` | Vectorised BFS tier stratification — generic over any parent-index array |
 | `database.py` | Polymorphic ORM: `BaseBodyORM` / `CelestialBodyORM` / `VesselORM` / `VirtualBodyORM` plus `SystemORM`. `VesselORM` already carries `dry_mass`, `fuel_mass`, `drag_area` |
 | `kernels.py` | Compiled scalar kernels: `kepler_propagate`, `calc_global_states`, plus reusable `coe_to_rv_scalar` / `solve_kepler_scalar` / `advance_true_anomaly` |
-| `scenarios.py` | `two_body`, `sun_earth_moon`, `earth_constellation(n_sats=…)` — shared by tests and benchmarks. **Build scenarios from here, never inline in a test** |
+| `scenarios.py` | `two_body`, `sun_earth_moon(moon_mu=…)`, `earth_constellation(n_sats=…)` — shared by tests and benchmarks. `moon_mu=0.0` gives a massless Moon with a genuinely accelerating parent. **Build scenarios from here, never inline in a test** |
 | `reference.py` | `reference_for(sim, times)` → DOP853 N-body truth trajectory. Independent of all engine code |
 | `benchmark.py` | `measure(fn)` → min-of-batches timing with noise ratio |
 | `forces.py` | Force-model composition. `ForceKernel` is the contract a force model implements — additive (`+=`, never `=`), stateless, allocation-free, called once per model per evaluation. `AccelerationProvider` is what an integrator consumes: `(t, state) -> (C,3)`, with `state` explicit so RK sub-stages never touch the arena. Read the module docstring before writing a force model |
 | `registry.py` | `@register_force_model(name, param_names=…, citation=…)` assigns the next uint64 mask bit. `get_force_model` / `all_force_models` / `mask_for`. Bits follow registration order within a process, so **sweep configs persist model names, never raw mask integers** |
 | `geopotential.py` | Force model `"j2"` (`J2_MODEL`): the J2 perturbation only, relative to each body's `parent_indices` parent — not the central `-mu r/r^3` term. Coefficients `(j2, r_eq)` live on the *perturbed* body's row. Earth values `EARTH_J2` and `EARTH_R_EQ` = 6378.137 km (equatorial) — do **not** pair J2 with `scenarios.EARTH_RADIUS` (6371 km, mean), which is 0.2% off. Assumes the parent's spin axis is the frame's +z. Registered on `import orbital_engine`. **Cannot detect a barycentre parent** (the kernel has no `is_system`) and returns a finite but meaningless value there; check with `barycentre_parented()` before enabling. No compiled twin yet |
-| `Simulation` force API | `enable_force_model(name, bodies, **coefficients)` is the sweep-configuration surface; `resolve_force_models()`; `accelerations(t, state=None)` |
+| `gravity.py` | Force model `"point_mass_gravity"`: the central term `-(mu_body + mu_parent) r / r^3` relative to `parent_indices`, the same summed mu the Keplerian path uses. Parent only, so a two-body term and **not** N-body or third-body. Registered on `import orbital_engine` |
+| `integrators.py` | `Integrator` protocol and `RK4Integrator(max_capacity)`: `step(provider, t, state, dt, indices, primaries)` advances `state[indices]` relative to `state[primaries]`, copying each stage's accelerations (the provider returns a shared buffer). Named stage buffers are allocated once in `__init__`, but fancy indexing still allocates temporaries every stage, so it is not allocation-free. The frozen-primary formulation is exact only for forces that depend on position relative to the parent, which covers every model registered today |
+| `Simulation` model API | `enable_force_model(name, bodies, **coefficients)` and `set_propagator(bodies, PropagatorType.COWELL)` are the sweep-configuration surface; `resolve_force_models()`; `accelerations(t, state=None)`. `set_propagator` raises `ValueError` for Cowell on heads, barycentres, kinematic roots, inactive slots and **any body with `mu != 0`**, since a Cowell body bypasses the barycentric accumulation that carries its mass into the reflex kick |
 
 ---
 
@@ -137,14 +148,14 @@ design; use `"N-R"` there.
 
 ### Unwired scaffolding — do not build on without discussing first
 
-The **force-model** half of `registry.py` is now wired (see `forces.py`). The **propagator** half —
-`_PROPAGATOR_REGISTRY` — is still written and never read; `propagator_type` and `g_env` are allocated
-and never read; `BodyHandle` (`body.py`) is never instantiated and `sim.bodies` is always empty.
+Both halves of `registry.py` are now wired. `step()` dispatches Cowell bodies through
+`_PROPAGATOR_REGISTRY` and reads `propagator_type`, which `set_propagator` writes. Only `KEPLERIAN`
+and `COWELL` drive dispatch; any other `PropagatorType` member is unimplemented. `BodyHandle`
+(`body.py`) is still never instantiated and `sim.bodies` is always empty.
 
-`step()` still selects Keplerian propagation unconditionally, and nothing in `step()` calls
-`accelerations()` yet — the force layer is built but not yet driven by a propagator. Per-body
-propagator selection (Keplerian vs Cowell) arrives with the Cowell propagator, as part of the sweep
-configuration rather than a second ad-hoc flag.
+Cowell has no compiled twin, so it runs as NumPy only whatever `use_compiled_kernel` says. Nor do
+`point_mass_gravity` and `j2`. Until twins exist, a Keplerian-vs-Cowell timing comparison measures the
+implementation as well as the model.
 
 Two test-fixture kernels, `test_constant_accel` and `test_radial_bias`, are registered from
 `forces.py` itself, so they occupy two of the 64 mask bits and appear in `all_force_models()` for

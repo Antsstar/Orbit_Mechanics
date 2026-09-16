@@ -569,6 +569,26 @@ smallest possible change, and read the failure message, not just the exit status
 
 ---
 
+### A subagent's "fails on the old code" figure came from a reconstruction
+
+**What happened.** The Fable subagent that fixed the Cowell frame bug wrote into its regression test's
+docstring that the pre-fix integrator gave "~5.12e6 km at *every*" step count, ratios 1.0000–1.0002.
+It had measured that against a standalone copy of the old integrator, not against the old commit.
+
+In review, the figure failed a one-line magnitude check. The test spans two days, so the coherent
+forcing estimate is 0.5 · 5.9e-6 · (1.728e5 s)² ≈ 8.8e4 km, fifty times smaller. Rerunning the test
+on the real pre-fix commit (9649a47, in a temporary worktree, with only the test file and the
+`moon_mu` scenario parameter copied on top) gave 1.07e5, 9.82e4, 9.29e4 and 9.10e4 km, ratios
+1.09 / 1.06 / 1.02. The test still fails for the right reason. Only the recorded evidence was wrong,
+and it was corrected before merge.
+
+**Lesson.** A reconstruction of old code shows what the reconstruction does. To show a test catches a
+bug, run it against the commit that had the bug, with only the minimum needed on top (here, a new
+scenario parameter). Check any quoted magnitude against a back-of-envelope estimate before it goes
+into a docstring. When delegating, ask *how* the pre-fix run was set up, not just whether it failed.
+
+---
+
 ### `git merge -F -` does not read the message from stdin
 
 **Symptom.** `git merge --no-ff <branch> -F -` fed by a heredoc → `error: could not read file '-'`. No
