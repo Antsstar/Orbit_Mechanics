@@ -149,6 +149,9 @@ was left as it is, and this entry is the correction.
 **Cause.** Not determined. Something between the client and the API served Sonnet 5 whenever a
 subagent asked for Fable, both through a frontmatter ID and through the alias, and said nothing. Why
 the agents named Fable, whether the prompt told them so or they echoed the brief, is also not known.
+The rerouting is specific to subagents. A fresh main session switched to Fable 5.1 with `/model` was
+served by `claude-fable-5-1`, per the transcript record, with a real message ID and usage, checked
+2026-09-17. To use Fable, work in a Fable main session. Do not delegate to a subagent.
 
 **How to avoid.** Check the served model in the transcript a few turns after spawning, and compare it
 with the intended model before trusting the run. A model's statement about its own identity is not
