@@ -397,6 +397,14 @@ a gap to fill. The reverse mistake is worse: chasing that 15% by writing tests f
 covered wastes effort and adds nothing. Note the interpreted run is also ~4x slower (22s against 5s),
 which is another reason it belongs in a separate invocation rather than the default one.
 
+**Second trap: import before tracing starts.** On 2026-09-17 a numba-blocking runner script printed
+`orbital_engine.__file__` as a sanity check before calling `pytest.main(["--cov=orbital_engine"])`.
+The package was then imported before pytest-cov began tracing, so every module-level line (imports,
+constants, class bodies, decorator registrations) counted as unhit. `custom_types.py` and
+`exceptions.py` read 0%, and the total read 79%. With the import check removed from the runner, the
+same suite measured **86%**. Verify the import path in a separate command, never in the process
+being measured.
+
 ---
 
 ### The `np.any()` guard is an anti-optimisation on small arrays

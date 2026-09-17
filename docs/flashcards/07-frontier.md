@@ -117,7 +117,7 @@ Yes. Each halving of the step doubles the cost and divides RK4's error by ~16. F
 the time and 16⁴ ≈ 6.6e4× less error. The coarsest point, at 160 s, is pre-asymptotic, which accounts
 for the rest.
 
-> src: README.md - Model-fidelity frontier
+> src: README.md - The model-fidelity frontier
 > sym: run_sweep, cowell_rk4_step
 > tags: frontier, integrators, performance
 
@@ -134,7 +134,7 @@ reaches 4 km for 37 µs, and Cowell needs about 1,000–4,000× the cost to do b
 The question a plot's timing answers has to be stated. This plot measures the cost of the horizon
 state, not the cost of an ephemeris sampled at a fixed cadence.
 
-> src: README.md - Model-fidelity frontier
+> src: README.md - The model-fidelity frontier
 > sym: run_sweep
 > tags: frontier, methodology, measurement
 
