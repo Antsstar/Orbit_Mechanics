@@ -649,3 +649,105 @@ def test_cowell_fused_kernel_is_selected_only_for_point_mass_and_j2(
     assert sim._cowell_fused_ok, "removing the foreign model must re-qualify the fused kernel"
     sim.step(COWELL_DT)
     assert calls == [1], "use_compiled_kernel=False must select the NumPy path"
+
+
+# ==================================================================================================
+# Re-basing Cowell and secular-J2 rows onto their parents' end-of-step states
+# ==================================================================================================
+
+
+def _build_secular_j2_moon(session: Session) -> tuple[Simulation, np.ndarray]:
+    """A massless Moon on SECULAR_J2 about an Earth that is itself Keplerian about the Sun."""
+    sim = scenarios.sun_earth_moon(session, moon_mu=0.0)
+    moon = np.asarray([sim.name_to_index["Moon"]], dtype=np.int64)
+    sim.set_propagator(moon, PropagatorType.SECULAR_J2, j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ)
+    return sim, moon
+
+
+def _secular_constellation(session: Session) -> tuple[Simulation, np.ndarray]:
+    sim, sats = _build_secular_j2_sim(session)
+    return sim, np.asarray(sats, dtype=np.int64)
+
+
+REBASE_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarray]], str]] = [
+    ("cowell_constellation+j2", lambda s: _build_cowell_constellation(s, j2_on="all"), "_cowell_rel"),
+    ("cowell_moon_about_moving_earth", _build_cowell_moon, "_cowell_rel"),
+    ("secular_constellation", _secular_constellation, "_secular_j2_rel"),
+    ("secular_moon_about_moving_earth", _build_secular_j2_moon, "_secular_j2_rel"),
+]
+
+
+@pytest.mark.parametrize("name,build,rel_attr", REBASE_SCENARIOS, ids=[n for n, _, _ in REBASE_SCENARIOS])
+def test_rebase_paths_agree_exactly(
+    name: str, build: Callable[[Session], tuple[Simulation, np.ndarray]], rel_attr: str,
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    `Simulation._rebase`'s compiled and NumPy paths perform one addition and one subtraction per
+    component on the same operands, so like `calc_global` they must agree *bit for bit*. Exercised on
+    a state several steps in, with the parent-relative scratch holding that step's real result, on an
+    Earth at the origin and on a heliocentric Earth whose 1.5e8 km position is where rounding would
+    show if the two ever took a different route.
+    """
+    sim, idx = build(db_session_factory())
+    sim.record_history = False
+    sim.use_compiled_kernel = False
+    for _ in range(5):
+        sim.step(COWELL_DT)
+    rel = getattr(sim, rel_attr)
+    assert np.any(rel[idx] != 0.0), "guard: the relative scratch must hold a real result"
+    assert sim._rebase_compiled_ok, "guard: this scenario must qualify for the compiled re-base"
+
+    # Disturb the rows the re-base writes, so agreement cannot come from both paths being no-ops.
+    before = _snapshot(sim)
+    sim.global_states[idx] = 0.0
+    sim.local_states[idx] = 0.0
+    disturbed = _snapshot(sim)
+
+    sim.use_compiled_kernel = True
+    sim._rebase(idx, rel)
+    compiled_global, compiled_local = sim.global_states.copy(), sim.local_states.copy()
+
+    _restore(sim, disturbed)
+    sim.use_compiled_kernel = False
+    sim._rebase(idx, rel)
+    reference_global, reference_local = sim.global_states.copy(), sim.local_states.copy()
+
+    assert np.array_equal(reference_global[idx], before["global"][idx]), (
+        "guard: re-basing the committed state must reproduce it")
+    assert np.array_equal(compiled_global, reference_global), (
+        f"{name}: max divergence {np.max(np.abs(compiled_global - reference_global)):.3e} km "
+        f"between re-base paths (global)")
+    assert np.array_equal(compiled_local, reference_local), (
+        f"{name}: max divergence {np.max(np.abs(compiled_local - reference_local)):.3e} km "
+        f"between re-base paths (local)")
+
+
+def test_rebase_kernel_is_selected_by_use_compiled_kernel(
+    db_session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wiring: one compiled re-base per propagator per step when enabled, none when disabled."""
+    import orbital_engine.simulator as simulator_module
+
+    calls: list[int] = []
+    real = kernels.rebase_relative_states
+
+    def spy(*args: object) -> None:
+        calls.append(1)
+        real(*args)
+
+    monkeypatch.setattr(simulator_module, "rebase_relative_states", spy)
+
+    sim, sats = _build_cowell_constellation(db_session_factory(), j2_on="all")
+    sim.record_history = False
+    sim.set_propagator(
+        int(sats[0]), PropagatorType.SECULAR_J2, j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ)
+    assert sim._cowell_idx.size > 0 and sim._secular_j2_idx.size > 0
+
+    sim.use_compiled_kernel = True
+    sim.step(COWELL_DT)
+    assert calls == [1, 1], "expected one compiled re-base for the Cowell set and one for the secular set"
+
+    sim.use_compiled_kernel = False
+    sim.step(COWELL_DT)
+    assert calls == [1, 1], "use_compiled_kernel=False must select the NumPy re-base"

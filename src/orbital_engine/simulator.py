@@ -13,7 +13,8 @@ from .propagators import (
     Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates, mean_seeded_p,
 )
 from .kernels import (
-    NUMBA_AVAILABLE, calc_global_states, cowell_rk4_step, kepler_propagate, secular_j2_propagate,
+    NUMBA_AVAILABLE, calc_global_states, cowell_rk4_step, kepler_propagate, rebase_relative_states,
+    secular_j2_propagate,
 )
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
@@ -172,7 +173,10 @@ class Simulation:
         # `_cowell_rel` is the per-step parent-relative result both paths hand to the re-base in
         # `step()`, the same role `_secular_j2_rel` plays for that propagator.
         self._cowell_primaries: NDArray[np.int32] = np.empty(0, dtype=np.int32)
-        self._cowell_bubbles: NDArray[np.int32] = np.empty(0, dtype=np.int32)
+        # Whether `_rebase` may use its compiled twin: false only when a re-based body's parent is
+        # in the same re-base set, where the scalar loop would read the parent live and the NumPy
+        # block reads it gathered. Rebuilt in `_refresh_active_indices`.
+        self._rebase_compiled_ok: bool = True
         self._cowell_rel = np.zeros((max_capacity, 6), dtype=np.float64)
         self._cowell_has_point_mass = np.zeros(max_capacity, dtype=np.bool_)
         self._cowell_has_j2 = np.zeros(max_capacity, dtype=np.bool_)
@@ -316,6 +320,10 @@ class Simulation:
         ).astype(np.int64)
         self._kepler_sib_mask = self.active_mask & ~self.is_head & ~is_cowell & ~is_secular_j2
         self._kepler_sib_idx = np.flatnonzero(self._kepler_sib_mask).astype(np.int64)
+        self._rebase_compiled_ok = not (
+            bool(np.isin(self.parent_indices[self._cowell_idx], self._cowell_idx).any())
+            or bool(np.isin(self.parent_indices[self._secular_j2_idx], self._secular_j2_idx).any())
+        )
         self._refresh_cowell_plan()
 
         # Flatten the tier list into a single topologically ordered slot array. `calc_global_states`
@@ -380,7 +388,6 @@ class Simulation:
         """
         idx = self._cowell_idx
         self._cowell_primaries = self.parent_indices[idx]
-        self._cowell_bubbles = self.body_sys_map[idx]
 
         pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
         j2_bit = np.uint64(1) << np.uint64(get_force_model(geopotential.J2_MODEL).bit)
@@ -1033,29 +1040,42 @@ class Simulation:
                                           body_sys_map=self.body_sys_map, sys_head_map=self.sys_head_map, sib_mask=self._kepler_sib_mask)
         self.calc_global()
 
+        # Adding each parent's now-fresh (post calc_global) position to the saved relative state
+        # places the body correctly regardless of how far its parent moved this step. Cowell first,
+        # then secular J2, so a secular body parented by a Cowell one reads the re-based parent.
         if cowell_idx.size > 0:
-            # Adding the parent's now-fresh (post calc_global) position to the saved relative state
-            # places the Cowell body correctly regardless of how far its parent moved this step.
-            self.global_states[cowell_idx] = (
-                self.global_states[self._cowell_primaries] + self._cowell_rel[cowell_idx]
-            )
-            self.local_states[cowell_idx] = (
-                self.global_states[cowell_idx] - self.global_states[self._cowell_bubbles]
-            )
-
+            self._rebase(cowell_idx, self._cowell_rel)
         if self._secular_j2_idx.size > 0:
-            secular_idx = self._secular_j2_idx
-            secular_parents = self.parent_indices[secular_idx]
-            self.global_states[secular_idx] = (
-                self.global_states[secular_parents] + self._secular_j2_rel[secular_idx]
-            )
-            self.local_states[secular_idx] = (
-                self.global_states[secular_idx] - self.global_states[self.body_sys_map[secular_idx]]
-            )
+            self._rebase(self._secular_j2_idx, self._secular_j2_rel)
 
         self.t += dt
         if self.record_history:
             self._record_state()
+
+    def _rebase(self, indices: NDArray[np.int64], rel: NDArray[np.float64]) -> None:
+        """
+        Write `global_states[indices] = global_states[parent] + rel[indices]` and rebuild
+        `local_states[indices]` against `body_sys_map`, so the arena's invariant - `local_states[i]`
+        relative to `global_states[body_sys_map[i]]` - holds for a Cowell or secular-J2 body exactly
+        as it does for a Keplerian one. Called by `step()` after `calc_global()`, once per propagator.
+
+        The NumPy block below is the definition. `kernels.rebase_relative_states` is its compiled twin,
+        held bit-identical (not merely within a tolerance) by
+        `tests/validation/test_kernel_equivalence.py`, and selected by `use_compiled_kernel` like every
+        other twin - except when `_rebase_compiled_ok` is false, see `_refresh_active_indices`.
+        """
+        if self.use_compiled_kernel and self._rebase_compiled_ok:
+            rebase_relative_states(
+                indices, self.parent_indices, self.body_sys_map, rel,
+                self.global_states, self.local_states,
+            )
+            return
+
+        parents = self.parent_indices[indices]
+        self.global_states[indices] = self.global_states[parents] + rel[indices]
+        self.local_states[indices] = (
+            self.global_states[indices] - self.global_states[self.body_sys_map[indices]]
+        )
 
     def run(self, duration: ScalarSeconds, dt: ScalarSeconds) -> None:
         if self.t == 0 and self.record_history:
