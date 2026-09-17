@@ -41,12 +41,13 @@ trajectories stay representable throughout.
   with Numba, held elementwise equivalent to a readable NumPy reference implementation that is
   retained as the definition of the physics.
 
-### Not yet wired
+- **Per-body model selection as data.** `set_propagator` chooses Keplerian, secular-J2 or Cowell
+  propagation per body. `enable_force_model` composes force models (`point_mass_gravity`, `j2`) from a
+  per-body bitmask, so a sweep enumerates configurations rather than editing code.
+- **Independent truth.** `reference.py` integrates the N-body problem, optionally with J2, using
+  DOP853 and no engine code. Verification and model comparison both run against it.
 
-A propagator registry exists but is not read: `Simulation.step()` selects Keplerian propagation
-unconditionally, choosing only between the compiled and NumPy implementations of it. Perturbation
-models, numerical integrators and the sweep harness are in progress. See `CLAUDE.md` for the current
-state of play, including known-broken code.
+See `CLAUDE.md` for the current state of play, including known-broken code.
 
 ---
 
@@ -85,27 +86,36 @@ common DOP853 + J2 truth, computed once and reused. `benchmarks/frontier_plot.py
 
 ![Model-fidelity frontier](docs/figures/frontier.png)
 
-What the figure shows, as median position error against truth after 24 hours:
+What the figure shows: median position error against truth after 24 hours, and the wall time to
+reach that state.
 
-- **Kepler: 608 km.** No J2 at all.
-- **Kepler + secular J2, seeded from osculating elements: 431 km.** The secular drift removes the
-  cross-track error. The along-track error remains, because mean motion is taken from the
+- **Kepler: 608 km in 21 µs.** No J2 at all.
+- **Kepler + secular J2, seeded from osculating elements: 431 km in 37 µs.** The secular drift removes
+  the cross-track error. The along-track error remains, because mean motion is taken from the
   *osculating* semi-major axis, whose short-period J2 term acts as a fixed rate bias.
-- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km,** at about the same
-  cost (`propagators.mean_seeded_p`, after Kozai 1959 / Brouwer 1959). The remaining few km are the
+- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km in 37 µs**
+  (`propagators.mean_seeded_p`, after Kozai 1959 / Brouwer 1959). The remaining few km are the
   short-period oscillation an averaged theory cannot represent.
-- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step down to 0.0004 km at 10 s.** Wall
-  time rises 16× across that range, as fourth-order Runge-Kutta predicts: each halving of the step
-  doubles the cost and cuts the error about 16-fold.
+- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step (8.6 ms) down to 0.0004 km at 10 s
+  (143 ms).** Wall time rises 16× across that range, as fourth-order Runge-Kutta predicts: each halving
+  of the step doubles the cost and cuts the error about 16-fold.
+
+So the mean-seeded analytic tier sits on the frontier down to a few km. Doing better needs numerical
+integration, at roughly 1,000–4,000× the cost: 0.27 km for 35 ms, 0.0004 km for 143 ms. Timings vary by about 15% from run to run; errors do not.
 
 Two caveats:
 
-- **Timings mix implementations.** Kepler and secular J2 run compiled (numba). Cowell and its force
-  models have no compiled twin yet and run as vectorised NumPy, so part of Cowell's horizontal
-  distance from the analytic tiers is implementation, not model.
+- **The analytic tiers reach the horizon in one step; Cowell has to step.** Kepler and secular J2 are
+  closed-form in time, so their error does not depend on step size: 60 s steps and a single 24-hour
+  step gave identical errors. The plot measures the cost of the horizon state, not of an ephemeris
+  sampled at a fixed cadence, which would charge the analytic tiers per output point.
 - **Single-satellite figures depend on starting phase.** Against the same truth, one secular-J2
   satellite's error after 10 orbits ranges from 0.2 km to 574 km depending on its initial argument of
   latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
+
+Every tier runs compiled. Cowell uses `kernels.cowell_rk4_step`, a fused twin of RK4 +
+`point_mass_gravity` + `j2`, held to the NumPy path at 1e-12 relative. Cowell and secular J2 still pay
+one NumPy re-base per step in `Simulation.step`, about 12 µs.
 
 ---
 

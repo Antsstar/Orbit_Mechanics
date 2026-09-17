@@ -34,17 +34,21 @@ Vallado, D. A., *Fundamentals of Astrodynamics and Applications*, 4th ed., Eq. 1
 """
 from __future__ import annotations
 
+from typing import Final
+
 import numpy as np
 from numpy.typing import NDArray
 
 from .custom_types import ScalarSeconds
 from .registry import register_force_model
 
-__all__ = ["point_mass_gravity_kernel"]
+__all__ = ["POINT_MASS_MODEL", "point_mass_gravity_kernel"]
+
+POINT_MASS_MODEL: Final[str] = "point_mass_gravity"
 
 
 @register_force_model(
-    "point_mass_gravity",
+    POINT_MASS_MODEL,
     param_names=(),
     citation="Vallado, Fundamentals of Astrodynamics and Applications, 4th ed., Eq. 1-35; mu is the "
              "parent+body GM sum, matching KeplerianPropagator's / _rehydrate_coes's two-body "
