@@ -33,11 +33,16 @@ NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied
 Kepler and secular J2 run as interpreted Python and Cowell as vectorised NumPy, so the horizontal axis
 then measures implementation as much as model - printed here, on the figure itself and in
 `README.md`. What remains is `step()`'s Python-level bookkeeping: the Cowell and secular-J2 tiers each
-pay one NumPy re-base per step (eight small fancy-indexed operations) that the Keplerian tier does not.
-Measured from the table this script prints: ~5 us per Kepler step against ~16-18 us per Cowell or
-secular-J2 step, whatever the Cowell step size, so the re-base is ~12 us and dominates both non-Kepler
-tiers. Fusing it into a kernel is the obvious next step; until then the secular-J2 tier sits to the
-right of Kepler for that reason alone, and Cowell at 160 s costs only ~1.2x Kepler.
+pay one NumPy re-base per step (eight small fancy-indexed operations), about 12 us, which the Keplerian
+tier does not.
+
+**The analytic tiers take one step to the horizon (`KEPLER_DT_S = HORIZON_S`).** Kepler and secular J2
+are closed-form in time, so their horizon error does not depend on step size: 60 s steps and a single
+24 h step gave identical medians (607.6, 431.3 and 4.04 km). An earlier version stepped them every 60 s,
+which charged them for 1440 steps they do not need. It made Cowell at a 160 s step look about as cheap
+as Kepler. Measured with one step: Kepler 21-25 us, secular J2 37-38 us, and Cowell 8.6-8.8 ms at 160 s up to
+143-148 ms at 10 s, across two runs. This plot measures the cost of reaching the horizon state. A plot of the cost of a
+fixed-cadence ephemeris would be a different question, with different analytic-tier costs.
 """
 from __future__ import annotations
 
@@ -67,7 +72,7 @@ INCLINATION_DEG = 53.0
 N_SATS = 12
 HORIZON_S = 86400.0  # 1 day
 
-KEPLER_DT_S = 60.0
+KEPLER_DT_S = HORIZON_S  # analytic tiers are closed-form: one step reaches the horizon
 COWELL_DTS_S = [160.0, 80.0, 40.0, 20.0, 10.0]
 
 # Reduced from `run_sweep`'s defaults (5 batches, 2 warmup calls) to keep this script's total runtime
@@ -79,8 +84,8 @@ TIMING_WARMUP = 1
 CAVEAT_COMPILED = (
     "All tiers run compiled (numba): Kepler and secular J2 through their kernels, Cowell through the\n"
     "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2). Wall time is the model, not the\n"
-    "implementation, except that Cowell and secular J2 each pay one NumPy re-base per step in step():\n"
-    "measured ~12 us, against ~5 us for a whole Kepler step, so the secular-J2 points sit right of Kepler."
+    "implementation, except that Cowell and secular J2 each pay one NumPy re-base per step (~12 us).\n"
+    "Kepler and secular J2 are closed-form, so they reach the 24 h horizon in a single step; Cowell must step."
 )
 CAVEAT_INTERPRETED = (
     "numba is NOT installed: Kepler and secular J2 ran as interpreted Python and Cowell as vectorised\n"
