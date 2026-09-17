@@ -318,7 +318,9 @@ candidates); if not, the whole Cowell set runs the NumPy path. The plan is rebui
 `_refresh_active_indices` and `resolve_force_models`, so it tracks `set_propagator` and
 `enable_force_model` without a per-step reduction over the mask. Both paths write the parent-relative
 result into `_cowell_rel` - the kernel by subtracting the parent from the row it has just rounded onto
-the absolute grid, the same arithmetic `step()` applies to the NumPy result - and share one re-base;
+the absolute grid, the same arithmetic `step()` applies to the NumPy result - and share one re-base
+(`Simulation._rebase`, whose own compiled twin `kernels.rebase_relative_states` is held bit-identical,
+like `calc_global_states`, since it is one addition and one subtraction per component);
 for a heliocentric Moon that rounding is an ulp of 1.5e8 km, 8e-14 of the lunar distance per step,
 close enough to the 1e-12 equivalence bound that returning the relative result directly would have
 been a mistake. `tests/validation/test_kernel_equivalence.py` holds the pair at 1e-12 relative on
@@ -561,7 +563,8 @@ Step 10 is the hook a future spawn/despawn path must call. After build, only `se
 Per `step()`: Cowell integrate (relative to each parent's start-of-step state) → secular-J2 advance
 (RAAN/argument of periapsis/mean anomaly, writing a parent-relative state to scratch) → Keplerian
 propagate → `calc_global` → re-base Cowell bodies onto their parents' end-of-step states → re-base
-secular-J2 bodies the same way → advance `t` → optionally record.
+secular-J2 bodies the same way (both through `_rebase`, compiled by default) → advance `t` →
+optionally record.
 
 ---
 

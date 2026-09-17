@@ -40,6 +40,7 @@ from numpy.typing import NDArray
 __all__ = [
     "NUMBA_AVAILABLE", "kepler_propagate", "calc_global_states",
     "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate", "cowell_rk4_step",
+    "rebase_relative_states",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -654,3 +655,45 @@ def calc_global_states(
         p = body_sys_map[s]
         for c in range(6):
             global_states[s, c] = global_states[p, c] + local_states[s, c]
+
+
+@njit
+def rebase_relative_states(
+    indices: NDArray[np.int64],
+    parent_indices: NDArray[np.int32],
+    body_sys_map: NDArray[np.int32],
+    rel: NDArray[np.float64],
+    global_states: NDArray[np.float64],
+    local_states: NDArray[np.float64],
+) -> None:
+    """
+    Place each slot in `indices` at its `parent_indices` parent's current global state plus `rel[s]`,
+    then rebuild its `local_states` row against its `body_sys_map` bubble, in place - the compiled twin
+    of the NumPy block in `Simulation._rebase`, which `step()` runs for Cowell and secular-J2 bodies
+    after `calc_global()` has moved their parents. Held **bit-identical** to that block by
+    `tests/validation/test_kernel_equivalence.py`, the same standard as `calc_global_states`: one
+    addition and one subtraction per component, in the same order on the same operands, so nothing
+    is left for a tolerance to absorb.
+
+    Why this exists: the NumPy block is eight small fancy-indexed operations, about 12 us of dispatch
+    per step, paid by every tier that re-bases and not by the Keplerian tier - measured to dominate
+    the Cowell and secular-J2 tiers' step cost once their propagation ran compiled.
+
+    The NumPy block gathers every parent row *before* it assigns any, so a parent that is itself in
+    `indices` is read at its pre-re-base value. This loop reads it live, which is why
+    `Simulation._refresh_active_indices` falls back to the NumPy path when any body's parent lies in
+    the same re-base set (`_rebase_compiled_ok`) rather than letting the two diverge there. A bubble
+    is a system slot, which neither propagator may be assigned to, so the subtraction has no such
+    hazard.
+    """
+    n = indices.shape[0]
+    for k in range(n):
+        s = indices[k]
+        p = parent_indices[s]
+        for c in range(6):
+            global_states[s, c] = global_states[p, c] + rel[s, c]
+    for k in range(n):
+        s = indices[k]
+        b = body_sys_map[s]
+        for c in range(6):
+            local_states[s, c] = global_states[s, c] - global_states[b, c]

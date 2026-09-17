@@ -25,20 +25,21 @@ common DOP853 + J2 reference, computed once and reused. `benchmarks/frontier_plo
 
 Median position error after 24 hours, and the wall time to reach that state:
 
-- **Kepler: 608 km in 21 µs.** No J2 at all.
-- **Kepler + secular J2, seeded from osculating elements: 431 km in 37 µs.** The secular drift removes
+- **Kepler: 608 km in 26 µs.** No J2 at all.
+- **Kepler + secular J2, seeded from osculating elements: 431 km in about 40 µs.** The secular drift removes
   the cross-track error. The along-track error remains, because mean motion is taken from the
   *osculating* semi-major axis, whose short-period J2 term acts as a fixed rate bias.
-- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km in 37 µs**
+- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km in about 40 µs**
   (`propagators.mean_seeded_p`, after Kozai 1959 / Brouwer 1959). The remaining few km are the
   short-period oscillation an averaged theory cannot represent.
-- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step (8.6 ms) down to 0.0004 km at 10 s
-  (143 ms).** Wall time rises 16× across that range, as fourth-order Runge-Kutta predicts: each halving
-  of the step doubles the cost and cuts the error about 16-fold.
+- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step (5.5 ms) down to 0.0004 km at 10 s
+  (85 ms).** Wall time rises about 16× across that range, as fourth-order Runge-Kutta predicts: each
+  halving of the step doubles the cost and cuts the error about 16-fold.
 
 So the mean-seeded analytic tier sits on the frontier down to a few km. Doing better needs numerical
-integration, at roughly 1,000–4,000× the cost: 0.27 km for 35 ms, 0.0004 km for 143 ms. Timings vary
-by about 15% from run to run; errors do not.
+integration, at roughly 200–3,000× the cost: 0.27 km for 20 ms, 0.0004 km for 85 ms. Timings vary
+by about 20% from run to run (the two secular tiers do identical work and read 38 and 50 µs on the
+plotted run); errors do not.
 
 Two caveats:
 
@@ -51,7 +52,11 @@ Two caveats:
   latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
 
 Every tier runs compiled. Cowell uses `kernels.cowell_rk4_step`, a fused twin of RK4 +
-`point_mass_gravity` + `j2`, held to the NumPy path at 1e-12 relative.
+`point_mass_gravity` + `j2`, held to the NumPy path at 1e-12 relative. The re-base that places a
+Cowell or secular-J2 body on its parent's end-of-step position is compiled too
+(`kernels.rebase_relative_states`, bit-identical to the NumPy block). Measured on the 12-satellite
+scenario, one step costs about 6 µs for Cowell and 7 µs for secular J2 against 5 to 6 µs for Kepler;
+with the NumPy re-base those were 17 and 24 µs.
 
 ---
 

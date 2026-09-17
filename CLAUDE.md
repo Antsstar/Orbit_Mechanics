@@ -203,6 +203,7 @@ Hot paths exist twice: a readable NumPy version and a compiled scalar version.
 | Secular-J2 propagation | `propagators.SecularJ2Propagator` | `kernels.secular_j2_propagate` |
 | Cowell step (RK4 + `point_mass_gravity` + `j2`) | `integrators.RK4Integrator` over `forces.compose_accelerations` | `kernels.cowell_rk4_step` (fused; other masks fall back to the reference) |
 | Global states | `Simulation.calc_global` (else branch) | `kernels.calc_global_states` |
+| Re-base of Cowell / secular-J2 rows after `calc_global` | `Simulation._rebase` (else branch) | `kernels.rebase_relative_states` (bit-identical; NumPy path if a body's parent is in its own re-base set) |
 
 `Simulation.use_compiled_kernel` selects between them; it defaults to `NUMBA_AVAILABLE`, because
 without numba the kernels run as *interpreted* Python and are slower than the NumPy path.
