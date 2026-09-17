@@ -86,20 +86,24 @@ this kernel then models an Earth tilted into the ecliptic. No rotation is applie
   not carry `is_system`, and neither `mu_array` nor `parent_indices` distinguishes a barycentre row.
   On such a body it returns a finite (never NaN, for non-zero separation) but physically meaningless
   value computed from the barycentre's row. The guard is at configuration time instead:
-  `barycentre_parented(is_system, parent_indices, bodies)` returns the offending slots, and a caller
-  enabling `"j2"` should refuse (or zero the coefficients of) any it returns. Enforcing that inside
-  `enable_force_model` needs a per-model validation hook in the registry, which does not exist yet.
+  `barycentre_parented(is_system, parent_indices, bodies)` returns the offending slots, and `"j2"`
+  registers it as its `validate_bodies` hook, so `Simulation.enable_force_model("j2", ...)` raises
+  `ValueError` for such bodies before setting any mask bit. Only a caller that writes
+  `force_model_mask` directly bypasses the guard.
   None of the shipped scenarios parent a body to a barycentre; barycentres parent to bodies.
 """
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .custom_types import ScalarKilometers, ScalarSeconds
 from .registry import register_force_model
+
+if TYPE_CHECKING:
+    from .simulator import Simulation
 
 __all__ = [
     "J2_MODEL", "J2_PARAM_NAMES", "EARTH_J2", "EARTH_R_EQ",
@@ -116,9 +120,21 @@ EARTH_J2: Final[float] = 1.0826266835e-3              # dimensionless, EGM96: -s
 EARTH_R_EQ: Final[ScalarKilometers] = 6378.137         # km, WGS-84 semi-major axis
 
 
+def _reject_barycentre_parents(sim: "Simulation", bodies: NDArray[np.int64]) -> None:
+    """`validate_bodies` hook for `"j2"`: refuse bodies whose Keplerian parent is a barycentre."""
+    offending = barycentre_parented(sim.is_system, sim.parent_indices, bodies)
+    if offending.size > 0:
+        raise ValueError(
+            f"force model '{J2_MODEL}' is meaningless for bodies whose parent is a barycentre (its "
+            f"mu row holds summed system mass); slot(s) {offending.tolist()} qualify. See "
+            f"geopotential.py's module docstring."
+        )
+
+
 @register_force_model(
     J2_MODEL,
     param_names=J2_PARAM_NAMES,
+    validate_bodies=_reject_barycentre_parents,
     citation=(
         "Curtis, Orbital Mechanics for Engineering Students, 3rd ed., Eq. 10.30 (equation number from "
         "memory, unverified); derived in geopotential.py as -grad of Phi_J2 = (mu J2 R^2/r^3) P2(z/r)"

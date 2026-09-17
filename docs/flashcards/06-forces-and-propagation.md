@@ -120,11 +120,12 @@ physical effect, so a sweep can switch that effect on and off alone.
 
 1. **The parent's spin axis is the frame's +z.** That holds for the Earth-centred constellation, but
    is 23.4° off in the ecliptic-framed `sun_earth_moon`.
-2. **The parent is a real body.** The kernel has no `is_system`, so a body whose parent is a barycentre
-   gets a finite, meaningless value. `barycentre_parented()` is the setup-time guard.
+2. **The parent is a real body.** The kernel has no `is_system`, so on its own it would return a
+   finite, meaningless value for a barycentre parent. `"j2"` registers `barycentre_parented` as a
+   `validate_bodies` hook, so `enable_force_model` refuses such bodies before setting any bit.
 
 > src: CLAUDE.md - Existing tools (geopotential.py row)
-> sym: barycentre_parented
+> sym: barycentre_parented, _reject_barycentre_parents
 > tags: j2, assumptions, gotcha
 
 ---

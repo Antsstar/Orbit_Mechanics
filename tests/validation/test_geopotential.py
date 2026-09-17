@@ -429,3 +429,31 @@ def test_negative_control_wrong_z_coefficient_is_caught() -> None:
     assert _rel_err(pole, np.array([[0.0, 0.0, 1.875e-4]]))[0] > MUTANT_MIN_REL_ERROR
 
     assert _richardson_rel_err(mutant) > MUTANT_MIN_REL_ERROR
+
+
+def test_enable_force_model_refuses_j2_on_a_barycentre_parented_body(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """`"j2"` registers `barycentre_parented` as its `validate_bodies` hook, so `enable_force_model`
+    raises before setting any mask bit or coefficient. Refused by slot list and by boolean mask alike,
+    and valid bodies in the same arena still enable. No shipped scenario parents a body to a
+    barycentre, so two satellites are re-pointed at one."""
+    sim = scenarios.earth_constellation(db_session_factory(), n_sats=6, n_planes=6)
+    bary = sim.name_to_index["Earth Barycenter"]
+    sats = np.array(sorted(i for n, i in sim.name_to_index.items() if n.startswith("SAT-")), dtype=np.int64)
+    sim.parent_indices[sats[:2]] = bary
+
+    mask_before = sim.force_model_mask.copy()
+    with pytest.raises(ValueError, match="barycentre"):
+        sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    as_mask = np.zeros(sim.max_capacity, dtype=np.bool_)
+    as_mask[sats[1]] = True
+    with pytest.raises(ValueError, match="barycentre"):
+        sim.enable_force_model(J2_MODEL, as_mask, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    assert np.array_equal(sim.force_model_mask, mask_before)
+    assert J2_MODEL not in sim.force_model_params
+
+    sim.enable_force_model(J2_MODEL, sats[2:], j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    bit = np.uint64(1) << np.uint64(registry.get_force_model(J2_MODEL).bit)
+    assert np.all(sim.force_model_mask[sats[2:]] & bit)
+    assert not np.any(sim.force_model_mask[sats[:2]] & bit)

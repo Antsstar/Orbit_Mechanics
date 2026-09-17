@@ -397,7 +397,7 @@ class Simulation:
     def enable_force_model(
         self,
         name: str,
-        bodies: Union[int, Sequence[int], NDArray[np.bool_]],
+        bodies: Union[int, Sequence[int], NDArray[np.integer[Any]], NDArray[np.bool_]],
         **coefficients: float,
     ) -> None:
         """
@@ -412,9 +412,18 @@ class Simulation:
         `bodies` is an arena slot index, a sequence of slot indices, or a boolean mask shaped
         `(max_capacity,)`. Coefficients are matched against the model's declared `param_names` by
         keyword; an unknown keyword raises rather than silently being dropped.
+
+        If the model registered a `validate_bodies` hook (`registry.BodyValidator`), it runs first,
+        and a `ValueError` from it leaves the mask and coefficients untouched. `"j2"` uses this to
+        refuse bodies whose parent is a barycentre.
         """
         model = get_force_model(name)
         idx: Any = bodies if isinstance(bodies, (int, np.integer)) else np.asarray(bodies)
+
+        if model.validate_bodies is not None:
+            arr = np.asarray(idx)
+            slots = np.flatnonzero(arr) if arr.dtype == np.bool_ else np.atleast_1d(arr).astype(np.int64)
+            model.validate_bodies(self, slots)
 
         bit_value = np.uint64(1) << np.uint64(model.bit)
         self.force_model_mask[idx] |= bit_value

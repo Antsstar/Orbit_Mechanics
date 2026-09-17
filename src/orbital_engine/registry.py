@@ -16,9 +16,10 @@ contract a force model implements.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Tuple, Type, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, Optional, Tuple, Type, TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .custom_types import PropagatorType
 from .exceptions import RegistryError
@@ -26,11 +27,12 @@ from .exceptions import RegistryError
 if TYPE_CHECKING:
     from .propagators import Propagator
     from .forces import ForceKernel
+    from .simulator import Simulation
 
 
 # ==================================================================================================
-# Propagator registry - unchanged. Written, and still not read by `step()`; wiring per-body
-# propagator selection is the integrator work's concern, not this layer's.
+# Propagator registry. `Simulation.step()` dispatches non-Keplerian bodies through it; per-body
+# selection is `Simulation.set_propagator`.
 # ==================================================================================================
 
 _PROPAGATOR_REGISTRY: Dict[int, Type["Propagator"]] = {}
@@ -74,6 +76,13 @@ def get_propagators() -> Dict[int, Type["Propagator"]]:
 
 MAX_FORCE_MODELS = 64  # Bit width of ForceModelMask (np.uint64). See the headroom note in custom_types.py.
 
+# A configuration-time check a model can register: called by `Simulation.enable_force_model` with the
+# slots about to be enabled, *before* any mask bit is set, and expected to raise `ValueError` for
+# bodies the model is meaningless on. It exists for conditions a kernel cannot see from its own
+# arguments, such as `j2` on a body whose parent is a barycentre (`is_system` is not in the kernel
+# signature). Never called inside a step.
+BodyValidator = Callable[["Simulation", NDArray[np.int64]], None]
+
 
 @dataclass(frozen=True)
 class ForceModel:
@@ -90,6 +99,7 @@ class ForceModel:
     kernel: "ForceKernel"
     param_names: Tuple[str, ...] = ()
     citation: str = ""
+    validate_bodies: Optional[BodyValidator] = None
 
     @property
     def n_params(self) -> int:
@@ -105,6 +115,7 @@ def register_force_model(
     *,
     param_names: Tuple[str, ...] = (),
     citation: str = "",
+    validate_bodies: Optional[BodyValidator] = None,
 ) -> Callable[["ForceKernel"], "ForceKernel"]:
     """
     Decorator. Registers `name` at the next free mask bit and returns the kernel unchanged, so the
@@ -114,6 +125,8 @@ def register_force_model(
         @register_force_model("j2", param_names=("j2", "r_eq"), citation="Vallado 4e, Eq. 9-41")
         def j2_kernel(indices, t, state, mu_array, parent_indices, params, out) -> None:
             ...
+
+    `validate_bodies`, if given, is the model's configuration-time check (see `BodyValidator`).
 
     Raises `RegistryError` (not a bare `ValueError`) on a duplicate name or a full registry, so both
     are catchable alongside every other registry lookup failure in this module.
@@ -129,7 +142,7 @@ def register_force_model(
 
         model = ForceModel(
             name=name, bit=_next_force_model_bit, kernel=kernel,
-            param_names=param_names, citation=citation,
+            param_names=param_names, citation=citation, validate_bodies=validate_bodies,
         )
         _FORCE_MODEL_REGISTRY[name] = model
         _next_force_model_bit += 1
