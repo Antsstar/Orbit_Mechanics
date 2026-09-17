@@ -664,6 +664,19 @@ def _build_secular_j2_moon(session: Session) -> tuple[Simulation, np.ndarray]:
     return sim, moon
 
 
+def _leo_sat_in_massive_earth_moon(session: Session, propagator: str) -> tuple[Simulation, np.ndarray]:
+    """A massless satellite about Earth with the real, massive Moon: its parent (Earth) and its bubble
+    (EMB) have different global states, so a re-base that used the wrong one for `local_states` shows."""
+    sim = scenarios.sun_earth_moon(session, leo_satellite=True)
+    sat = np.asarray([sim.name_to_index["LEO-SAT"]], dtype=np.int64)
+    if propagator == "cowell":
+        sim.set_propagator(sat, PropagatorType.COWELL)
+        sim.enable_force_model(gravity.POINT_MASS_MODEL, sat.tolist())
+    else:
+        sim.set_propagator(sat, PropagatorType.SECULAR_J2, j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ)
+    return sim, sat
+
+
 def _secular_constellation(session: Session) -> tuple[Simulation, np.ndarray]:
     sim, sats = _build_secular_j2_sim(session)
     return sim, np.asarray(sats, dtype=np.int64)
@@ -674,6 +687,8 @@ REBASE_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarr
     ("cowell_moon_about_moving_earth", _build_cowell_moon, "_cowell_rel"),
     ("secular_constellation", _secular_constellation, "_secular_j2_rel"),
     ("secular_moon_about_moving_earth", _build_secular_j2_moon, "_secular_j2_rel"),
+    ("cowell_leo_sat_parent_not_bubble", lambda s: _leo_sat_in_massive_earth_moon(s, "cowell"), "_cowell_rel"),
+    ("secular_leo_sat_parent_not_bubble", lambda s: _leo_sat_in_massive_earth_moon(s, "secular"), "_secular_j2_rel"),
 ]
 
 
@@ -721,6 +736,14 @@ def test_rebase_paths_agree_exactly(
     assert np.array_equal(compiled_local, reference_local), (
         f"{name}: max divergence {np.max(np.abs(compiled_local - reference_local)):.3e} km "
         f"between re-base paths (local)")
+
+    # The arena invariant, on the NumPy definition: local_states is relative to the bubble.
+    bubbles = sim.body_sys_map[idx]
+    assert np.array_equal(reference_local[idx], reference_global[idx] - reference_global[bubbles])
+    if "parent_not_bubble" in name:
+        parents = sim.parent_indices[idx]
+        assert not np.array_equal(reference_global[parents, :3], reference_global[bubbles, :3]), (
+            "guard: this scenario exists because the parent and bubble must not coincide")
 
 
 def test_rebase_kernel_is_selected_by_use_compiled_kernel(

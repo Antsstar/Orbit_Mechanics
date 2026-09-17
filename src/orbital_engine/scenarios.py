@@ -97,7 +97,9 @@ def two_body(
     )
 
 
-def sun_earth_moon(session: Session, *, capacity: int = 64, moon_mu: float = MU_MOON) -> Simulation:
+def sun_earth_moon(
+    session: Session, *, capacity: int = 64, moon_mu: float = MU_MOON, leo_satellite: bool = False,
+) -> Simulation:
     """
     Sun heading the Solar System; Earth heading a nested Earth-Moon system whose barycenter is
     itself a member of the Solar System.
@@ -112,6 +114,11 @@ def sun_earth_moon(session: Session, *, capacity: int = 64, moon_mu: float = MU_
     `two_body(mu_secondary=0.0)` exercises), while Earth itself keeps its genuine heliocentric
     acceleration toward the Sun - this is what makes the scenario useful for validating a body whose
     *parent* accelerates, which `two_body`'s always-fixed primary cannot exercise at all.
+
+    `leo_satellite=True` adds a massless vessel, `LEO-SAT`, in a 7000 km orbit about Earth inside the
+    Earth-Moon system. With the default massive Moon, its parent (Earth) and its kinematic bubble (the
+    Earth-Moon barycentre) sit about 4700 km apart. Every other shipped massless body has a parent that
+    coincides with its bubble, which hides any code that confuses `parent_indices` with `body_sys_map`.
     """
     ssb = VirtualBodyORM(name="SSB")
     emb = VirtualBodyORM(name="EMB")
@@ -147,13 +154,21 @@ def sun_earth_moon(session: Session, *, capacity: int = 64, moon_mu: float = MU_
     )
     session.add(moon)
 
+    if leo_satellite:
+        session.add(VesselORM(
+            name="LEO-SAT", mu=0.0, system_id=earth_moon.id, parent_id=earth.id,
+            dry_mass=260.0, fuel_mass=0.0, drag_area=4.0,
+            p=7000.0 * (1.0 - 0.001 ** 2), e=0.001, i=math.radians(51.6),
+            raan=math.radians(40.0), arg_pe=math.radians(10.0), theta=math.radians(75.0),
+        ))
+
     # The Earth-Moon barycenter is itself a body of the Solar System, orbiting the Sun.
     emb.parent_id = sun.id
     emb.system_id = solar.id
     session.commit()
 
     return Simulation(
-        body_names=["Sun", "Earth", "Moon"],
+        body_names=["Sun", "Earth", "Moon"] + (["LEO-SAT"] if leo_satellite else []),
         system_names=["Solar System", "Earth-Moon System"],
         session=session,
         max_capacity=capacity,
