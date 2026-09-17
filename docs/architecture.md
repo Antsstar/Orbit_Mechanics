@@ -369,9 +369,13 @@ Over 12 evenly spaced phases it is better on median and RMS: 287/406 km against 
 
 Two consequences. A sweep must report error **statistics over initial phase**, not one satellite,
 or the tier ranking depends on which slot was picked. And seeding this propagator with a *mean*
-semi-major axis would remove nearly all of its error. That is a mean ↔ osculating conversion, which
-`CLAUDE.md` currently forbids. The rule was written about SGP4's mean elements, but its wording covers
-this case too, so relaxing it is a project decision, not an implementation detail.
+semi-major axis removes nearly all of its error. The user decided to allow that, and `CLAUDE.md`'s rule
+now forbids converting only *externally defined* mean elements (SGP4/TLE). It is implemented as
+`set_propagator(..., mean_seed=True)`, which calls `propagators.mean_seeded_p`:
+a_mean = a_osc · (1 − (3/2) J2 (R/p)² sin²i cos 2u₀).
+After 10 orbits at 550 km / 53°, the error at |cos 2u₀| = 1 falls from 574 km to 6.1–6.2 km, and at
+u₀ = 45° it is 0.16 km. The remainder is the bounded short-period oscillation, which an averaged
+theory cannot represent. The osculating seed stays the default, so the two can be swept side by side.
 
 ---
 

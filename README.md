@@ -85,21 +85,27 @@ common DOP853 + J2 truth, computed once and reused. `benchmarks/frontier_plot.py
 
 ![Model-fidelity frontier](docs/figures/frontier.png)
 
-Plain Kepler propagation lands at 608 km median position error against truth, and adding the analytic
-secular-J2 drift *without* correcting its seed only brings that down to 431 km, because most of what is
-left is a linear along-track drift from caching mean motion off the *osculating* semi-major axis;
-seeding a first-order *mean* semi-major axis instead (`propagators.mean_seeded_p`, Kozai 1959 / Brouwer
-1959) collapses the same tier to 4.0 km median at essentially the same cost. Cowell integration with
-`point_mass_gravity` and `j2` traces a genuine fidelity/cost curve as the step size shrinks, from 231 km
-at a 160 s step down to 0.0004 km at a 10 s step — roughly 450× more wall time for roughly four to five
-orders of magnitude less error. That Cowell curve should not be read against the other three tiers'
-wall time at face value: Kepler and secular-J2 run compiled (Numba), while Cowell and its force models
-have no compiled twin yet and run as interpreted NumPy, so part of the gap on the plot is an
-implementation penalty rather than a modelling one. The figures above are single points on one
-phase-spread constellation, not a fixed property of each model — `docs/architecture.md`'s secular-J2
-section shows a single satellite's error against the same truth varying by two orders of magnitude with
-its initial argument of latitude alone, which is why the sweep reports statistics over bodies (median,
-RMS, max) rather than one satellite's number.
+What the figure shows, as median position error against truth after 24 hours:
+
+- **Kepler: 608 km.** No J2 at all.
+- **Kepler + secular J2, seeded from osculating elements: 431 km.** The secular drift removes the
+  cross-track error. The along-track error remains, because mean motion is taken from the
+  *osculating* semi-major axis, whose short-period J2 term acts as a fixed rate bias.
+- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km,** at about the same
+  cost (`propagators.mean_seeded_p`, after Kozai 1959 / Brouwer 1959). The remaining few km are the
+  short-period oscillation an averaged theory cannot represent.
+- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step down to 0.0004 km at 10 s.** Wall
+  time rises 16× across that range, as fourth-order Runge-Kutta predicts: each halving of the step
+  doubles the cost and cuts the error about 16-fold.
+
+Two caveats:
+
+- **Timings mix implementations.** Kepler and secular J2 run compiled (numba). Cowell and its force
+  models have no compiled twin yet and run as vectorised NumPy, so part of Cowell's horizontal
+  distance from the analytic tiers is implementation, not model.
+- **Single-satellite figures depend on starting phase.** Against the same truth, one secular-J2
+  satellite's error after 10 orbits ranges from 0.2 km to 574 km depending on its initial argument of
+  latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
 
 ---
 
