@@ -77,6 +77,38 @@ correct, and a dedicated CI job gates that path.
 
 ---
 
+## Model-fidelity frontier
+
+`orbital_engine.sweep` runs one scenario under several model configurations and diffs each against a
+common DOP853 + J2 truth, computed once and reused. `benchmarks/frontier_plot.py` demonstrates it on a
+12-satellite, 550 km / 53 deg constellation over a 24-hour horizon:
+
+![Model-fidelity frontier](docs/figures/frontier.png)
+
+What the figure shows, as median position error against truth after 24 hours:
+
+- **Kepler: 608 km.** No J2 at all.
+- **Kepler + secular J2, seeded from osculating elements: 431 km.** The secular drift removes the
+  cross-track error. The along-track error remains, because mean motion is taken from the
+  *osculating* semi-major axis, whose short-period J2 term acts as a fixed rate bias.
+- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km,** at about the same
+  cost (`propagators.mean_seeded_p`, after Kozai 1959 / Brouwer 1959). The remaining few km are the
+  short-period oscillation an averaged theory cannot represent.
+- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step down to 0.0004 km at 10 s.** Wall
+  time rises 16× across that range, as fourth-order Runge-Kutta predicts: each halving of the step
+  doubles the cost and cuts the error about 16-fold.
+
+Two caveats:
+
+- **Timings mix implementations.** Kepler and secular J2 run compiled (numba). Cowell and its force
+  models have no compiled twin yet and run as vectorised NumPy, so part of Cowell's horizontal
+  distance from the analytic tiers is implementation, not model.
+- **Single-satellite figures depend on starting phase.** Against the same truth, one secular-J2
+  satellite's error after 10 orbits ranges from 0.2 km to 574 km depending on its initial argument of
+  latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
+
+---
+
 ## Verification
 
 | | |
