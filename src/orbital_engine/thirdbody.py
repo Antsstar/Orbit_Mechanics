@@ -26,8 +26,8 @@ pull on the parent (the *indirect* term). It enters with a minus sign because th
 rides on the parent and inherits that acceleration. Omitting it is not a small error. For the Moon
 both terms are about mu_Sun/AU^2 = 5.9e-6 km/s^2 and their difference, the solar tide, is about
 2 mu_Sun r / AU^3 = 3.0e-8 km/s^2. So dropping the indirect term adds a spurious 5.9e-6 km/s^2,
-two hundred times the real perturbation. `tests/validation/test_third_body.py`
-catches it by seven orders of magnitude.
+two hundred times the real perturbation. With it dropped, the 30-day verification in
+`tests/validation/test_third_body.py` measured 2.1e7 km against an expected 2.6 km.
 
 Only the parent's acceleration *from this perturber* is subtracted. Anything else accelerating the
 parent, such as the parent's own parent when that is a different body, is a separate perturber and

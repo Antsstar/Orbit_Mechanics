@@ -821,6 +821,32 @@ closes the gap.
 
 ---
 
+### The third-body freeze estimate was 7x too high, for a reason unrelated to the code
+
+**Symptom.** The derived magnitude for `third_body`'s frozen-perturber error on the Moon over 30 days
+was `5e-3 h` km. It came from a coherent-forcing bound on `d a_tide/dt`, scaled by the 0.33 that the
+whole solar perturbation reaches of its own bound. The measurement was `7.3e-4 h`, cleanly first order,
+seven times smaller. A rotation-only refinement (Sun direction lagged by `n_E h/2`, with the
+sensitivity taken from the truth) then got the direction right to cos 0.997, but came out 19 % low.
+
+**Cause.** Two effects were missing. (1) Most of the Moon's 30-day solar displacement is the secular
+drift from the orbit-*averaged* tide, and that average does not depend on the Sun's direction. The 0.33
+scaling therefore transferred a large quantity the lag cannot touch. (2) A time lag also lags Earth's
+heliocentric *distance* (e = 0.0167, near maximum rate at the scenario epoch). The secular response to
+tide magnitude is large, which accounts for the missing 19 %.
+
+**Fix.** Predict the lag as what it is, a time shift. With the Moon massless, Sun-Earth is an exact
+two-body pair, so a truth with the Sun delayed by `tau` is built purely from `reference.py`
+(back-integrate Sun and Earth under negated velocities). Then `err = (h/2) dr/dtau`. That matched to
+2.6 % at h = 3600 s, and the mismatch halves with h, as the derived `(h^2/12)|Delta a|` remainder
+predicts. The test asserts the vector prediction, not just the ratio.
+
+**Lesson.** The same one as the J2 mutant entry above: a factor-of-several miss means a physical
+effect is missing. Here the independent route was to replace a scaling argument with a
+perturbation of the truth itself.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
