@@ -119,9 +119,40 @@ no longer does in this environment.
   "agent type not found", and the tempting fallback — `general-purpose` with the prompt inlined —
   discards the frontmatter's model *and* effort pins.
 
-**Fix.** Pin full model IDs in frontmatter, spawn pinned agents *without* a per-invocation `model`,
-restart the session after adding an agent file, and ask each agent to state its model ID at the top
-of its report.
+**Fix.** Pin full model IDs in frontmatter, spawn pinned agents *without* a per-invocation `model`, and
+restart the session after adding an agent file. Do **not** rely on an agent stating its own model ID.
+See the next entry.
+
+---
+
+### Every Fable agent actually ran on Sonnet 5
+
+**Symptom.** The user noticed that about a day of "Fable 5.1" subagent work had barely touched their
+Fable credit balance.
+
+**What the transcripts show.** Each subagent's API responses record the serving model in
+`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`. Counting those fields on
+2026-09-17:
+
+- **Fable intended, Sonnet served.** Five agents: three `force-model-architect` agents pinned to
+  `claude-fable-5-1` (force layer, secular J2, sweep harness) and two `general-purpose` agents given
+  `model: "fable"` (Cowell, and one stopped attempt). All 721 of their responses came from
+  `claude-sonnet-5`.
+- **Opus intended, Opus served.** The three `physics-kernel` agents pinned to `claude-opus-5` (RSW,
+  J2, J2 truth).
+
+The Fable agents' own reports all began "claude-fable-5-1". The orchestrating session relied on those
+reports as confirmation, following this project's own delegation guide at the time. Commits and merge
+messages from those agents therefore carry a wrong `Co-Authored-By: Claude Fable 5.1` line. The history
+was left as it is, and this entry is the correction.
+
+**Cause.** Not determined. Something between the client and the API served Sonnet 5 whenever a
+subagent asked for Fable, both through a frontmatter ID and through the alias, and said nothing. Why
+the agents named Fable, whether the prompt told them so or they echoed the brief, is also not known.
+
+**How to avoid.** Check the served model in the transcript a few turns after spawning, and compare it
+with the intended model before trusting the run. A model's statement about its own identity is not
+evidence. The same applies to any pin, including Opus.
 
 ---
 

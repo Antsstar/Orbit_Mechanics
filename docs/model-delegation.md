@@ -57,8 +57,13 @@ Verified against the Claude Code subagent docs:
 4. **New agent files may not register until the session restarts.** If a `subagent_type` is reported
    as not found, restart rather than falling back to `general-purpose` with an inlined prompt — the
    fallback loses the frontmatter's model and effort pins.
-5. **Ask agents to state their model ID** at the top of their report. It is the only cheap way to
-   confirm the pin took effect.
+5. **Verify the served model from the transcript, never from the agent's report.** Every "Fable" agent
+   in September 2026 reported `claude-fable-5-1` while every one of its API responses came from
+   `claude-sonnet-5`. The authoritative record is the `"model"` field of the assistant messages in
+   `~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`:
+   `grep -o '"model":"[^"]*"' agent-<id>.jsonl | sort | uniq -c`. Check it after the agent's first few
+   turns, not after it finishes. See the engineering log entry "Every Fable agent actually ran on
+   Sonnet 5".
 6. **Parallel agents in worktrees must set `PYTHONPATH`.** The package is an editable install of the
    main repository, so a worktree's bare `pytest` imports the *main* repo's code and reports green on
    changes it never exercised. Run `PYTHONPATH="$(pwd)/src" <env>/python.exe -m pytest` from the
