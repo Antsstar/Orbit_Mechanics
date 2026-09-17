@@ -95,7 +95,7 @@ as it is for gravity and J2.
 
 Limitations
 -----------
-- There is a single exponential band. Real density falls by about 10 over 100 km in LEO, and `H` itself
+- There is a single exponential band. Real density falls by a factor of roughly 5 to 12 per 100 km in LEO, and `H` itself
   grows with altitude (about 8 km near the ground, 60 km or more above 500 km). One band is accurate
   over a few scale heights around `h0`. A decaying orbit that crosses several bands needs a
   piecewise table (Vallado Table 8-4) or NRLMSISE via `pymsis`. Both are out of scope.
