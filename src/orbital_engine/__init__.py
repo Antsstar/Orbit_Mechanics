@@ -3,3 +3,4 @@ from .registry import register_force_model, get_force_model, all_force_models, m
 # enable "point_mass_gravity" and "j2" by name without importing their modules itself.
 from . import gravity
 from . import geopotential
+from . import drag

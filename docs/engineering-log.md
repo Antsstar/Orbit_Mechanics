@@ -821,6 +821,35 @@ closes the gap.
 
 ---
 
+### Drag: the co-rotation factor at `a0` is not the prediction, and a factor carried across altitudes
+
+**What happened.** The drag brief's co-rotation check was "decay reduced by roughly
+`(1 - omega r / v)^2`". At a = 6921 km that is 0.8714. The measured prograde-to-non-rotating ratio was
+0.87047, 1.1e-3 away, which is larger than the derived ratio tolerance of 1e-4. Separately, the
+retrograde factor in the first draft of the test (1.1330) had been carried over from a scratch
+estimate made at a = 6778 km. The correct value at 6921 km is 1.1374.
+
+**Diagnosis.** The measurement was right, and a bare-factor assertion would have forced the tolerance
+wider. Over the run, density rises by `exp(|Delta a| / H)`, about 1.7% for 1 km of decay at
+H = 60 km. The prograde body decays about 13% more slowly, so it climbs less far into denser air. The
+ratio of the two *integrated* decays therefore differs from the instantaneous factor by roughly
+`(1 - f) * 0.85%`, about 1e-3. Integrating the mean equation `da/dt = -rho(a) B sqrt(mu a) f(a)` for each
+body gives 0.870470 against a measured 0.870474.
+
+**Correction.** `tests/validation/test_drag.py` predicts every `Delta a` from that ODE, scalar RK4 in the
+test, and checks the ratio of ODE predictions. It asserts `f(a0)` only as a sanity value. It also
+asserts that a constant-density prediction misses by more than the decay tolerance, which proves
+the tolerance resolves the density term. Scale-dependent constants in the test are now computed from
+the scenario constants, with the one literal checked to 1e-4.
+
+**Worktree mechanics.** A heredoc that wrote a scratch script and then ran it in the same Bash call
+was refused as "too complex to verify that it stays inside the worktree", even though the target was
+the session scratchpad. Writing the file with the Write tool and running it in a separate command
+worked. A runner in the scratchpad that sets `PYTHONPATH` inside `subprocess.run` handled both the
+worktree import and the no-numba run (a `numba.py` raising `ImportError`, earlier on the path).
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
