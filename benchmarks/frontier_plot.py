@@ -32,9 +32,13 @@ through their kernels, Cowell through `kernels.cowell_rk4_step`, which fuses RK4
 NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied). Without numba,
 Kepler and secular J2 run as interpreted Python and Cowell as vectorised NumPy, so the horizontal axis
 then measures implementation as much as model - printed here, on the figure itself and in
-`README.md`. What remains is `step()`'s Python-level bookkeeping: the Cowell and secular-J2 tiers each
-pay one NumPy re-base per step (eight small fancy-indexed operations), about 12 us, which the Keplerian
-tier does not.
+`README.md`. The re-base each Cowell and secular-J2 body needs after `calc_global()` also runs compiled
+(`kernels.rebase_relative_states`, bit-identical to the NumPy block in `Simulation._rebase`); before
+it did, that block cost 11 us per Cowell step and 17 us per secular-J2 step (12 satellites, measured
+with `benchmark.measure`) and dominated both tiers: a step now costs ~6 us against ~5-6 us for
+Kepler. What remains
+is the ordinary Python of `step()`, paid by every tier alike; `README.md` carries the measured
+per-tier timings.
 
 **The analytic tiers take one step to the horizon (`KEPLER_DT_S = HORIZON_S`).** Kepler and secular J2
 are closed-form in time, so their horizon error does not depend on step size: 60 s steps and a single
@@ -84,7 +88,7 @@ TIMING_WARMUP = 1
 CAVEAT_COMPILED = (
     "All tiers run compiled (numba): Kepler and secular J2 through their kernels, Cowell through the\n"
     "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2). Wall time is the model, not the\n"
-    "implementation, except that Cowell and secular J2 each pay one NumPy re-base per step (~12 us).\n"
+    "implementation: the per-step re-base of Cowell and secular-J2 rows is compiled too (bit-identical twin).\n"
     "Kepler and secular J2 are closed-form, so they reach the 24 h horizon in a single step; Cowell must step."
 )
 CAVEAT_INTERPRETED = (
