@@ -33,6 +33,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `gravity.py` | `point_mass_gravity`: the central two-body term relative to the gravitational parent | **new** |
 | `geopotential.py` | `j2`: the J2 zonal perturbation only, composable with `point_mass_gravity` | **new** |
 | `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
+| `drag.py` | `drag`: atmospheric drag in a co-rotating, single-exponential atmosphere, composable with `point_mass_gravity` and `j2` | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -414,6 +415,38 @@ a_mean = a_osc · (1 − (3/2) J2 (R/p)² sin²i cos 2u₀).
 After 10 orbits at 550 km / 53°, the error at |cos 2u₀| = 1 falls from 574 km to 6.1–6.2 km, and at
 u₀ = 45° it is 0.16 km. The remainder is the bounded short-period oscillation, which an averaged
 theory cannot represent. The osculating seed stays the default, so the two can be swept side by side.
+
+---
+
+## Atmospheric drag: a velocity-dependent force model
+
+`drag.py` registers `"drag"`, the first model whose acceleration depends on **velocity**. It fits the
+existing Cowell formulation without change, because `RK4Integrator` writes `state[primaries] +
+candidate` into the velocity columns at every stage as well as the position columns. So
+`state[i,3:] - state[P,3:]` is the stage's parent-relative velocity. Drag depends only on
+parent-relative position and velocity, and the relative-state argument in the Cowell section holds
+for it unchanged.
+
+**Units live in one place.** The coefficients use their conventional units (`B` in m^2/kg, `rho0` in
+kg/m^3, lengths in km, `omega` in rad/s). The kernel applies one factor of 1e3 to `rho * B` to turn
+1/m into 1/km. A slip there gives a smooth decay that is wrong by 1000x, and a dropped 1/2 gives one
+that is wrong by 2x. Neither raises an error, so the validation pins the magnitude.
+`tests/validation/test_drag.py` checks a closed-form acceleration recomputed in SI and orbit-averaged
+decay `da/dt = -rho B sqrt(mu a)`, integrated as an ODE so the density rise over the run is resolved.
+It also checks an energy balance against `integral(a_drag . v dt)` and the co-rotation factor
+`(1 -/+ omega a/v)^2` on prograde and retrograde equatorial orbits. Measured errors are 4e-5 against
+a derived 2e-4 budget. Real-file mutants of the co-rotation sign, the 1/2 and the unit conversion each
+fail these checks.
+
+**Coefficients sit on the body's row**, as `j2`'s do, although five of the six describe the parent's
+atmosphere. The reasons are the same: one setter, and per-body sweeps in a single arena.
+`VesselORM.drag_area` and `dry_mass` could supply `B` at ingest, but a drag coefficient `C_d` is not
+stored, so `B` is an explicit coefficient for now.
+
+**What it does not do.** There is one exponential band, a spherical altitude `|r| - r_ref`, no solar or
+geomagnetic activity, and no diurnal bulge. A decaying orbit that crosses several scale heights needs
+a piecewise table or `pymsis`. The fused compiled Cowell twin does not include drag, so enabling it
+on any Cowell body sends the whole Cowell set down the NumPy path.
 
 ---
 
