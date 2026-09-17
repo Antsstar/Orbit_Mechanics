@@ -157,11 +157,28 @@ against true N-body is currently **unmeasured**.
 That gap is not a defect — quantifying exactly this kind of modelling error is the purpose of the
 project. It is the first headline comparison the engine should produce once the sweep harness exists.
 
-### Open validation
+### Time-reversibility, tested
 
-Time-reversibility is a falsifiable claim and is **not currently tested**. `test_orbit_closes_after_
-integer_periods` checks a different property — return after a whole period, not backward recovery. A
-forward-then-backward test would directly exercise the design rationale above and is cheap to write.
+`tests/validation/test_time_reversibility.py` steps the arena forward N times and back N times. The
+arena must return to its initial global state within a bound derived from the Kepler solver's
+stopping tolerance plus a rounding allowance. It runs on both implementations, for `two_body`,
+`sun_earth_moon`, the constellation, and the constellation on secular J2.
+
+Measured relative return errors after 1000 steps each way:
+
+| Case | Relative error |
+|---|---:|
+| two_body | 3.4e-11 |
+| sun_earth_moon | 3.7e-11 |
+| constellation | 4.4e-13 |
+| Cowell control (RK4) | 2.2e-4 |
+
+The analytic cases sit at the rounding floor. Cowell's RK4 is not time-symmetric, and its return error
+is the test's negative control.
+
+It is the only test that steps backwards. A planted `abs(dt)` in the compiled elliptic anomaly advance
+passed all 319 other tests and failed exactly the three compiled cases here. `test_orbit_closes_after_
+integer_periods` checks a different property, return after a whole period.
 
 ---
 
