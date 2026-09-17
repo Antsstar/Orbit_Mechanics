@@ -32,6 +32,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `forces.py` | Force-model composition: enabled physics as a per-body bitmask, additive stateless kernels, and the acceleration contract integrators consume | **new** |
 | `gravity.py` | `point_mass_gravity`: the central two-body term relative to the gravitational parent | **new** |
 | `geopotential.py` | `j2`: the J2 zonal perturbation only, composable with `point_mass_gravity` | **new** |
+| `thirdbody.py` | `third_body`: one named perturber's point-mass pull, direct minus indirect, relative to the parent | **new** |
 | `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
 | `drag.py` | `drag`: atmospheric drag in a co-rotating, single-exponential atmosphere, composable with `point_mass_gravity` and `j2` | **new** |
 
@@ -298,8 +299,8 @@ relative-state formulation above carries no error at all from the parent's motio
 matter how fast or non-uniformly it accelerates — but a hypothetical future force depending on some
 *other* body's absolute position (a solar tidal term on the Moon, say) would see that other body frozen
 at its start-of-step position across all four RK4 sub-stages, since this integrator only ever
-re-evaluates `indices` and reads (never advances) `primaries` between stages. No such model is
-registered today, so this is a documented constraint on what CAN be added next, not a live limitation.
+re-evaluates `indices` and reads (never advances) `primaries` between stages. `third_body` is now
+such a model, and this freeze is a live limitation. It is quantified in its own section below.
 Both restrictions above (mass and kinematic role) are also documented restrictions of *this* phase, not
 accidents.
 
@@ -450,6 +451,39 @@ on any Cowell body sends the whole Cowell set down the NumPy path.
 
 ---
 
+## Third-body perturbation: the first force that is not parent-relative
+
+`thirdbody.py` registers `third_body`: the point-mass pull of one named perturber, relative to the
+body's parent, `mu_s [(r_s - r)/|r_s - r|^3 - r_s/|r_s|^3]`. The second (indirect) term is the
+perturber's pull on the parent, which the parent-relative frame inherits. For the Moon each term is
+about 5.9e-6 km/s^2 while their difference, the tide, is about 3e-8.
+
+**Naming the perturber.** The kernel contract has only float `params` rows, so the perturber is stored
+as a float slot index, which is exact. Slots are not stable across builds, though, so sweeps never
+carry them. `sweep.ForceModelSpec.body_coefficients={"perturber": "Sun"}` is resolved to a slot by
+`apply_config`. Validation needs the coefficient's value, which `BodyValidator` never sees, so the
+registry gained a second, additive hook, `validate_coefficients`. It rejects a missing or non-slot
+perturber, and one that is the body itself, its parent, a barycentre, inactive, or massless. A
+perturber must be massive, so it is always Keplerian, never Cowell.
+
+**What freezing the perturber costs.** `RK4Integrator` holds every row outside the Cowell set at its
+start-of-step value, so the tide is evaluated with the Sun `h/2` late (RK4's effective evaluation time
+is mid-step). That error is first order in the step size, not fourth. With the Moon massless,
+Sun-Earth is an exact two-body pair, which makes the error predictable as a vector:
+`err = (h/2) dr/dtau + O(h^2)`. Here `dr/dtau` is the truth's sensitivity to delaying the Sun, taken from
+`reference.py` alone. Measured over 30 days: 2.64 km at h = 3600 s and 1.34 km at 1800 s, within
+2.6 % and 1.3 % of that prediction. Without `third_body` the error is 2.5e4 km. A test-only oracle
+that supplies the Sun at each stage's true time brings back fourth order (ratios 17.9, 17.0, 16.5,
+down to 2.1e-4 km at 2700 s). So the freeze is the only residual, and it dominates RK4's own
+error below a step of about a day. Removing it means advancing perturbers per stage, which is not
+built. A LEO satellite perturbed by the Moon sees a perturber turning 13 times faster, and its
+coefficient is unmeasured.
+
+**Composition.** Its bit is foreign to `_refresh_cowell_plan`, so any Cowell set that includes a
+`third_body` body runs on the NumPy path. There is no compiled twin.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
@@ -537,8 +571,10 @@ secular-J2 bodies the same way → advance `t` → optionally record.
   `j2` only (see the Cowell section); `forces.compose_accelerations` and any other model stay NumPy,
   and a Cowell body carrying one falls back to `RK4Integrator`. A general compiled dispatcher would
   need force models to be registered as compiled callables, which no model yet asks for.
-- **Massive Cowell bodies, and N-body or third-body forces.** Rejected and unregistered respectively;
-  see the Cowell section above for why each needs more than a new kernel.
+- **Massive Cowell bodies, N-body forces, and perturbers advanced per stage.** Massive Cowell bodies
+  are rejected and N-body forces are unregistered; see the Cowell section above for why each needs
+  more than a new kernel. `third_body` exists, but its perturber is frozen within a step (see its
+  section).
 - **Slot compaction and handle indirection.** Dropped from phase 1 once measurement showed they
   addressed ~4% of the step. They become worth doing when there is a despawn path to compact *for*.
 - **Spawn / despawn.** Slots come off a free list and are never returned. Loading bodies mid-run — a

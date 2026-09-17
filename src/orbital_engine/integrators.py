@@ -49,7 +49,7 @@ a full, absolute-frame `(C, 6)` array to evaluate every enabled model on every d
 kernel reads `state[primaries]` and `state[indices]` and expects them in one common frame (see
 `forces.ForceKernel`). At each RK4 sub-stage this integrator reconstructs `state[indices]` as
 `state[primaries] + candidate_relative_state`, calls `provider`, and discards the reconstruction once
-the acceleration is read back. Because every current force kernel's output depends only on
+the acceleration is read back. Because `point_mass_gravity`, `j2` and `drag` depend only on
 `state[primaries] - state[indices]`, and that difference is unchanged by adding the *same* offset to
 both sides, the acceleration returned is exactly the correct relative acceleration regardless of what
 value `state[primaries]` happens to hold - it is read, never written, throughout one Cowell step, so
@@ -58,16 +58,16 @@ responsible for translating the integrator's result - which is therefore express
 parent's *start-of-step* position - into the parent's freshly Keplerian-propagated position once that
 is known; see its docstring for exactly where that happens.
 
-**What remains an approximation, and what does not.** For any force that depends only on a body's
-position relative to its own parent - the entire current model set - this formulation carries *no*
-approximation from the parent's motion during the step: the relative ODE is exact regardless of how
-fast or how non-uniformly the parent accelerates, because the parent's absolute trajectory never enters
-the relative equation of motion at all. What is *not* handled is a force depending on some *other*
-body's absolute position - a third-body perturbation, or sibling-sibling coupling - which no force
-model currently registers. Such a model would need that other body's position at each RK4 sub-stage's
-true time, and this integrator does not re-evaluate any row outside `indices` (or `primaries`, which is
-read but never advanced) between stages - so a future such model would see that other body frozen at
-its start-of-step position, a real limitation for whoever builds it.
+**What remains an approximation, and what does not.** For a force that depends only on a body's
+state relative to its own parent (`point_mass_gravity`, `j2`, `drag`), this formulation carries *no*
+approximation from the parent's motion during the step. The relative ODE is exact however the parent
+accelerates, because the parent's absolute trajectory never enters it. A force that depends on some
+*other* body's position is different. `third_body` is one; sibling-sibling coupling would be another.
+This integrator does not advance any row outside `indices` between stages (`primaries` is read but never
+advanced), so such a model sees the other body frozen at its start-of-step position. For `third_body`
+that makes Cowell **first order** in dt rather than fourth: the tide is effectively applied h/2 late.
+The Moon's 30-day error is 2.64 km at 3600 s and 1.34 km at 1800 s; see `thirdbody.py` and
+`tests/validation/test_third_body.py`. Removing the freeze would mean advancing perturbers per stage.
 
 References
 ----------

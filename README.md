@@ -76,9 +76,10 @@ Every tier runs compiled. Cowell uses `kernels.cowell_rk4_step`, a fused twin of
 - **Propagators** (`Simulation.set_propagator`): Keplerian; secular J2 (first-order drift of Ω, ω and
   M, with optional mean seeding); and Cowell (fourth-order Runge-Kutta, integrated relative to the
   body's parent so an accelerating parent is handled correctly).
-- **Force models** (`Simulation.enable_force_model`): `point_mass_gravity` and `j2`, composed through a
-  per-body bitmask. A model can register a configuration-time check: `j2` refuses bodies whose parent
-  is a barycentre.
+- **Force models** (`Simulation.enable_force_model`): `point_mass_gravity`, `j2`, `drag` (exponential,
+  co-rotating atmosphere) and `third_body` (one named point-mass perturber), composed through a
+  per-body bitmask. Models can register configuration-time checks: `j2` and `drag` refuse bodies whose
+  parent is a barycentre, and `third_body` refuses invalid perturbers.
 - **Sweep** (`orbital_engine.sweep`): `ModelConfig` lists run against one scenario. It reports median,
   RMS and max error over bodies, plus minimum-of-batches wall time.
 - **Independent truth** (`reference.py`): Newtonian N-body integration with DOP853, optionally with J2,
@@ -98,8 +99,8 @@ Every tier runs compiled. Cowell uses `kernels.cowell_rk4_step`, a fused twin of
 
 | | |
 |---|---|
-| Tests | 345 passing |
-| Type checking | `mypy --strict`, clean across 20 source files |
+| Tests | 370 passing |
+| Type checking | `mypy --strict`, clean across 22 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
 | Coverage | 86%, measured with Numba disabled |
 
@@ -325,9 +326,11 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
 
 ## Known limitations
 
-- **Parent-relative forces only.** Cowell bodies feel only forces relative to their own parent, so
-  third-body and full N-body forces are not modelled yet. Cowell bodies must be massless, and heads
-  and barycentres cannot use Cowell.
+- **Third-body forces are first order in the step size.** A Cowell body can carry one named point-mass
+  perturber (`third_body`), but the perturber is held at its start-of-step position across the RK4
+  stages. That lowers convergence from fourth to first order: 2.6 km on the Moon over 30 days at a
+  1-hour step, against 2.5e4 km without the model. Full N-body forces are not modelled. Cowell bodies
+  must be massless, and heads and barycentres cannot use Cowell.
 - **J2 assumes a fixed spin axis.** The parent's spin axis is taken as the frame's z-axis. That is
   exact for the Earth-centred scenarios and 23.4° off in the ecliptic Sun–Earth–Moon scenario.
 - **Secular J2 is first order.** Mean seeding corrects only the semi-major axis.
@@ -350,10 +353,11 @@ Ordered so that each stage makes the next one safe rather than merely possible.
 3. **Force-model interface and events.** Bitmask composition and per-body propagator selection are
    **done**. Exact-time event handling for impulsive manoeuvres is not started.
 4. ~~**Benchmark harness**~~: the sweep and the frontier plot. **Done.**
-5. **Model library.** J2 (force model, secular propagator and reference) and Cowell RK4 are **done**.
-   Planned: higher geopotential harmonics, atmospheric drag across fidelity tiers, solar radiation
-   pressure with shadow geometry, third-body perturbations, thrust, Encke, symplectic integrators and
-   an SGP4 bridge.
+5. **Model library.** J2 (force model, secular propagator and reference), Cowell RK4 and point-mass
+   third-body perturbations, and exponential-atmosphere drag are **done**. Planned: perturbers
+   advanced per integrator stage, higher geopotential harmonics, tabulated and NRLMSISE atmospheres,
+   solar radiation pressure with shadow
+   geometry, thrust, Encke, symplectic integrators and an SGP4 bridge.
 6. **Constellation and inter-satellite link modelling**, the application this engine is being shaped
    for.
 
