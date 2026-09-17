@@ -30,8 +30,9 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
-from orbital_engine import geopotential, kernels, scenarios
+from orbital_engine import geopotential, gravity, kernels, scenarios
 from orbital_engine.custom_types import PropagatorType
+from orbital_engine.integrators import RK4Integrator
 from orbital_engine.propagators import KeplerianPropagator, SecularJ2Propagator
 from orbital_engine.simulator import Simulation
 
@@ -417,3 +418,234 @@ def test_secular_j2_bodies_do_not_change_plain_keplerian_bit_identity(
             assert np.array_equal(
                 reference_sim.local_states[ref_idx], mixed_sim.local_states[mix_idx]
             ), f"{name}'s local state diverged (use_compiled_kernel={use_compiled})"
+
+
+# ==================================================================================================
+# Cowell: RK4 + point_mass_gravity + j2
+# ==================================================================================================
+#
+# `kernels.cowell_rk4_step` is the fused twin of `integrators.RK4Integrator.step` driving
+# `Simulation.accelerations` with `point_mass_gravity` and/or `j2`, plus the subtraction `step()` makes
+# afterwards. Same tolerance as the Keplerian pair and for the same reason: identical arithmetic in the
+# same order, differing only in the summation order inside `np.einsum` for the three squared
+# components, so an ulp or so per force evaluation.
+
+COWELL_DT = 60.0
+
+
+def _build_cowell_constellation(
+    session: Session, *, j2_on: str, n_sats: int = 8, n_planes: int = 2,
+) -> tuple[Simulation, np.ndarray]:
+    """Every satellite on Cowell + `point_mass_gravity`; `j2_on` is "all", "none" or "half" - the
+    last leaves the per-body J2 flag genuinely mixed inside one kernel call."""
+    sim = scenarios.earth_constellation(session, n_sats=n_sats, n_planes=n_planes, altitude_km=550.0)
+    sats = np.asarray(
+        [idx for name, idx in sim.name_to_index.items() if name.startswith("SAT-")], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(gravity.POINT_MASS_MODEL, sats.tolist())
+    with_j2 = {"all": sats, "none": sats[:0], "half": sats[::2]}[j2_on]
+    if with_j2.size:
+        sim.enable_force_model(
+            geopotential.J2_MODEL, with_j2.tolist(), j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ)
+    return sim, sats
+
+
+def _build_cowell_two_body(session: Session, **kwargs: float) -> tuple[Simulation, np.ndarray]:
+    sim = scenarios.two_body(session, **kwargs)
+    sats = np.asarray([sim.name_to_index["Secondary"]], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(gravity.POINT_MASS_MODEL, sats.tolist())
+    sim.enable_force_model(
+        geopotential.J2_MODEL, sats.tolist(), j2=geopotential.EARTH_J2, r_eq=geopotential.EARTH_R_EQ)
+    return sim, sats
+
+
+def _run_cowell_reference(
+    sim: Simulation, idx: np.ndarray, dt: float, steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The definition: `RK4Integrator` against `Simulation.accelerations`, then the subtraction
+    `Simulation.step` applies to recover the parent-relative result."""
+    integrator = RK4Integrator(sim.max_capacity)
+    primaries = sim.parent_indices[idx]
+    rel = np.zeros((idx.size, 6))
+    for _ in range(steps):
+        parent_start = sim.global_states[primaries].copy()
+        integrator.step(sim.accelerations, sim.t, sim.global_states, dt, idx, primaries)
+        rel = sim.global_states[idx] - parent_start
+    return sim.global_states[idx].copy(), rel
+
+
+def _run_cowell_kernel(
+    sim: Simulation, idx: np.ndarray, dt: float, steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    rel_out = np.zeros((sim.max_capacity, 6), dtype=np.float64)
+    for _ in range(steps):
+        kernels.cowell_rk4_step(
+            dt, sim.global_states, sim.mu_array, sim.parent_indices, idx,
+            sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params, rel_out,
+        )
+    return sim.global_states[idx].copy(), rel_out[idx].copy()
+
+
+COWELL_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarray]]]] = [
+    ("point_mass", lambda s: _build_cowell_constellation(s, j2_on="none")),
+    ("point_mass+j2", lambda s: _build_cowell_constellation(s, j2_on="all")),
+    ("mixed_j2", lambda s: _build_cowell_constellation(s, j2_on="half")),
+    ("eccentric+j2", lambda s: _build_cowell_two_body(s, p=11000.0, e=0.7)),
+    ("inclined+j2", lambda s: _build_cowell_two_body(s, p=9000.0, e=0.3, i=1.1, raan=2.0, arg_pe=0.8)),
+]
+
+
+@pytest.mark.parametrize("name,build", COWELL_SCENARIOS, ids=[n for n, _ in COWELL_SCENARIOS])
+@pytest.mark.parametrize("steps", [1, 50])
+def test_cowell_kernel_matches_reference_state(
+    name: str, build: Callable[[Session], tuple[Simulation, np.ndarray]], steps: int,
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    Direct calls, isolating the kernel from the rest of `step()`: the integrated absolute rows and the
+    parent-relative results must agree. The parent is at the origin in every scenario here, so the
+    relative result is compared at its own scale with no rounding floor from re-basing (see the
+    whole-step test below for the heliocentric case, where that floor exists and is derived).
+    """
+    reference_sim, ref_idx = build(db_session_factory())
+    kernel_sim, ker_idx = build(db_session_factory())
+    assert np.array_equal(reference_sim.global_states, kernel_sim.global_states)
+    assert kernel_sim._cowell_fused_ok, "guard: this scenario must qualify for the fused kernel"
+
+    ref_abs, ref_rel = _run_cowell_reference(reference_sim, ref_idx, COWELL_DT, steps)
+    ker_abs, ker_rel = _run_cowell_kernel(kernel_sim, ker_idx, COWELL_DT, steps)
+
+    assert np.all(np.isfinite(ref_rel)), "reference produced non-finite state"
+    assert np.all(np.isfinite(ker_rel)), "kernel produced non-finite state"
+
+    every = np.ones(ref_idx.size, dtype=bool)
+    abs_diff = _relative_difference(ref_abs, ker_abs, every)
+    rel_diff = _relative_difference(ref_rel, ker_rel, every)
+    assert abs_diff < KERNEL_AGREEMENT_REL_TOL, (
+        f"{name}: Cowell absolute state disagrees by {abs_diff:.3e} after {steps} steps")
+    assert rel_diff < KERNEL_AGREEMENT_REL_TOL, (
+        f"{name}: Cowell parent-relative state disagrees by {rel_diff:.3e} after {steps} steps")
+
+
+def test_cowell_comparison_would_detect_a_perturbed_kernel(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    Same negative control as the two above, for the Cowell pair: a relative-1e-9 nudge to Earth's mu on
+    the kernel side changes every acceleration by 1e-9, which over 10 steps of 60 s displaces a 550 km
+    satellite by ~0.5 * 8e-12 km/s^2 * (600 s)^2 ~ 1.5e-6 km, 2e-10 of its radius - a thousand times
+    below any effect worth caring about and well above the 1e-12 bound - and must be detected.
+    """
+    ref_sim, ref_idx = _build_cowell_constellation(db_session_factory(), j2_on="all")
+    _, ref_rel = _run_cowell_reference(ref_sim, ref_idx, COWELL_DT, 10)
+
+    ker_sim, ker_idx = _build_cowell_constellation(db_session_factory(), j2_on="all")
+    ker_sim.mu_array[ker_sim.name_to_index["Earth"]] *= (1.0 + 1e-9)
+    _, ker_rel = _run_cowell_kernel(ker_sim, ker_idx, COWELL_DT, 10)
+
+    diff = _relative_difference(ref_rel, ker_rel, np.ones(ref_idx.size, dtype=bool))
+    assert diff > KERNEL_AGREEMENT_REL_TOL, (
+        f"a deliberately perturbed kernel was not detected (diff {diff:.3e}); "
+        f"the tolerance is too loose to be meaningful")
+
+
+def _build_cowell_moon(session: Session) -> tuple[Simulation, np.ndarray]:
+    """The accelerating-parent case: a massless Moon on Cowell + `point_mass_gravity` around an Earth
+    that is itself Keplerian about the Sun, so re-basing onto a moving parent is exercised."""
+    sim = scenarios.sun_earth_moon(session, moon_mu=0.0)
+    moon = np.asarray([sim.name_to_index["Moon"]], dtype=np.int64)
+    sim.set_propagator(moon, PropagatorType.COWELL)
+    sim.enable_force_model(gravity.POINT_MASS_MODEL, moon.tolist())
+    return sim, moon
+
+
+WHOLE_STEP_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarray]]]] = [
+    ("constellation+j2", lambda s: _build_cowell_constellation(s, j2_on="all")),
+    ("moon_about_moving_earth", _build_cowell_moon),
+]
+
+
+@pytest.mark.parametrize("name,build", WHOLE_STEP_SCENARIOS, ids=[n for n, _ in WHOLE_STEP_SCENARIOS])
+@pytest.mark.parametrize("steps", [1, 50])
+def test_cowell_step_paths_agree(
+    name: str, build: Callable[[Session], tuple[Simulation, np.ndarray]], steps: int,
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The wired path: `Simulation.step` with `use_compiled_kernel` on and off must leave every active
+    body's global state within the bound, so the frontier plot's compiled Cowell tier is the same
+    physics as the NumPy one. (The Keplerian and secular twins this also toggles are certified above.)
+
+    The Cowell rows' parent-relative state is checked too, with a floor derived from re-basing rather
+    than fitted: each step both paths compute `global[parent] + rel` and later subtract the parent
+    again, and because the two sims' parents differ at the Keplerian twins' own ~1e-15, that rounding
+    is not identical between them - up to one ulp of the parent's position per step, 8e-14 of the lunar
+    distance for a heliocentric Earth and exactly zero for an Earth at the origin.
+    """
+    numpy_sim, numpy_idx = build(db_session_factory())
+    compiled_sim, compiled_idx = build(db_session_factory())
+    numpy_sim.use_compiled_kernel = False
+    compiled_sim.use_compiled_kernel = True
+    assert compiled_sim._cowell_fused_ok, "guard: this scenario must qualify for the fused kernel"
+    for sim in (numpy_sim, compiled_sim):
+        sim.record_history = False
+
+    for _ in range(steps):
+        numpy_sim.step(COWELL_DT)
+        compiled_sim.step(COWELL_DT)
+
+    active = numpy_sim.active_mask
+    global_diff = _relative_difference(numpy_sim.global_states, compiled_sim.global_states, active)
+    assert global_diff < KERNEL_AGREEMENT_REL_TOL, (
+        f"{name}: global state disagrees by {global_diff:.3e} after {steps} steps")
+
+    parents = numpy_sim.parent_indices[numpy_idx]
+    numpy_rel = numpy_sim.global_states[numpy_idx] - numpy_sim.global_states[parents]
+    compiled_rel = compiled_sim.global_states[compiled_idx] - compiled_sim.global_states[parents]
+    parent_scale = float(np.max(np.abs(numpy_sim.global_states[parents, :3])))
+    rel_scale = float(np.min(np.linalg.norm(numpy_rel[:, :3], axis=1)))
+    rebase_floor = steps * np.finfo(np.float64).eps * parent_scale / rel_scale
+    rel_diff = _relative_difference(numpy_rel, compiled_rel, np.ones(numpy_idx.size, dtype=bool))
+    assert rel_diff < KERNEL_AGREEMENT_REL_TOL + rebase_floor, (
+        f"{name}: Cowell parent-relative state disagrees by {rel_diff:.3e} after {steps} steps "
+        f"(bound {KERNEL_AGREEMENT_REL_TOL:.1e} + re-base floor {rebase_floor:.1e})")
+
+
+def test_cowell_fused_kernel_is_selected_only_for_point_mass_and_j2(
+    db_session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The fallback is data: a Cowell body carrying any other model sends the set down the NumPy path,
+    and enabling that model after the plan was built must re-plan. Observed by spying on the name
+    `Simulation.step` calls, so this fails if the wiring silently stops reaching the kernel too.
+    """
+    import orbital_engine.simulator as simulator_module
+
+    calls: list[int] = []
+    real = kernels.cowell_rk4_step
+
+    def spy(*args: object, **kwargs: object) -> None:
+        calls.append(1)
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(simulator_module, "cowell_rk4_step", spy)
+
+    sim, sats = _build_cowell_constellation(db_session_factory(), j2_on="half")
+    sim.record_history = False
+    sim.use_compiled_kernel = True
+    assert sim._cowell_fused_ok
+    sim.step(COWELL_DT)
+    assert calls == [1], "the fused kernel was not used for a point_mass_gravity + j2 configuration"
+
+    sim.enable_force_model("test_constant_accel", [int(sats[0])], ax=0.0, ay=0.0, az=0.0)
+    assert not sim._cowell_fused_ok, "a foreign force model must disqualify the fused kernel"
+    sim.step(COWELL_DT)
+    assert calls == [1], "the fused kernel ran despite a model it does not implement"
+
+    sim.use_compiled_kernel = False
+    sim.force_model_mask[:] = np.uint64(0)
+    sim.enable_force_model(gravity.POINT_MASS_MODEL, sats.tolist())
+    assert sim._cowell_fused_ok, "removing the foreign model must re-qualify the fused kernel"
+    sim.step(COWELL_DT)
+    assert calls == [1], "use_compiled_kernel=False must select the NumPy path"

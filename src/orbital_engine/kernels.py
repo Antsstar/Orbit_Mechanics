@@ -39,7 +39,7 @@ from numpy.typing import NDArray
 
 __all__ = [
     "NUMBA_AVAILABLE", "kepler_propagate", "calc_global_states",
-    "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate",
+    "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate", "cowell_rk4_step",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -430,6 +430,191 @@ def secular_j2_propagate(
         rel_out[s, 3] = vx
         rel_out[s, 4] = vy
         rel_out[s, 5] = vz
+
+
+# ==================================================================================================
+# Cowell: RK4 with point-mass gravity and J2, fused
+# ==================================================================================================
+
+@njit
+def _cowell_accel(
+    px: float, py: float, pz: float,
+    cx: float, cy: float, cz: float,
+    mu_total: float, mu_par: float,
+    has_point_mass: bool, has_j2: bool, j2: float, r_eq: float,
+) -> tuple[float, float, float]:
+    """
+    Acceleration on one body at candidate position `(cx, cy, cz)` with its parent at `(px, py, pz)`:
+    the sum `forces.compose_accelerations` would build from `gravity.point_mass_gravity_kernel` and
+    `geopotential.j2_kernel`, with each term's arithmetic written in the same order as its NumPy
+    reference so the two agree to rounding. Composition order is irrelevant for two terms (IEEE
+    addition is commutative), and a disabled term contributes exactly `0.0`, as an absent model does.
+    """
+    ax = 0.0
+    ay = 0.0
+    az = 0.0
+
+    if has_point_mass:
+        # point_mass_gravity: rel points from the body toward its primary; mu is the two-body sum.
+        rx = px - cx
+        ry = py - cy
+        rz = pz - cz
+        r2 = rx * rx + ry * ry + rz * rz
+        r = math.sqrt(r2)
+        if r > 0.0:
+            k = mu_total / (r2 * r)
+            ax += k * rx
+            ay += k * ry
+            az += k * rz
+
+    if has_j2:
+        # j2: rel points from the primary to the body; mu is the parent's alone.
+        x = cx - px
+        y = cy - py
+        z = cz - pz
+        r2 = x * x + y * y + z * z
+        if r2 > 0.0:
+            inv_r2 = 1.0 / r2
+            k = 1.5 * j2 * mu_par * r_eq * r_eq * inv_r2 * inv_r2 * math.sqrt(inv_r2)
+            five_s2 = 5.0 * z * z * inv_r2
+            ax += k * x * (five_s2 - 1.0)
+            ay += k * y * (five_s2 - 1.0)
+            az += k * z * (five_s2 - 3.0)
+
+    return ax, ay, az
+
+
+@njit
+def cowell_rk4_step(
+    dt: float,
+    state: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
+    parent_indices: NDArray[np.int32],
+    indices: NDArray[np.int64],
+    has_point_mass: NDArray[np.bool_],
+    has_j2: NDArray[np.bool_],
+    j2_params: NDArray[np.float64],
+    rel_out: NDArray[np.float64],
+) -> None:
+    """
+    One classical RK4 step of every body in `indices`, integrated relative to its `parent_indices`
+    parent under `point_mass_gravity` and/or `j2` - the compiled twin of `integrators.RK4Integrator
+    .step` driving `Simulation.accelerations` with exactly those models, fused with the subtraction
+    `Simulation.step` performs afterwards. Held equivalent to that pair at 1e-12 relative by
+    `tests/validation/test_kernel_equivalence.py`.
+
+    **Why fused rather than dispatched.** The NumPy path composes an arbitrary list of Python force
+    kernels; numba cannot call into that list. This kernel therefore hard-codes the one combination
+    the fidelity sweep runs (`_cowell_accel`), and `Simulation._refresh_cowell_plan` selects it only
+    when every Cowell body's mask is a subset of `{point_mass_gravity, j2}` - any other model falls
+    back to the NumPy path, so the fallback is data (`Simulation._cowell_fused_ok`), not a branch on
+    a model name inside the step.
+
+    **What it writes.** `state[s]` is left holding `state[parent] + relative_result`, exactly as
+    `RK4Integrator.step` leaves it, and `rel_out[s]` holds that row minus `state[parent]` - the same
+    arithmetic `Simulation.step` applies to the NumPy result before re-basing it onto the parent's
+    end-of-step position. The subtraction is done here, on the value already rounded to the absolute
+    grid, rather than by returning the relative result directly: for a Moon at 1.5e8 km heliocentric
+    the two differ by an ulp of the absolute position, 8e-14 of the lunar distance per step, which is
+    too close to the equivalence bound to leave to chance. `state[parent]` is read and never written,
+    so a Cowell body whose parent is itself in `indices` is excluded by the caller's plan.
+
+    Per-body flags rather than one global pair so a mixed arena - some satellites with J2, some
+    without - stays on the compiled path. `j2_params` is `force_model_params["j2"]` when any body has
+    the J2 bit, and a one-row dummy otherwise; a row is only ever read behind its body's `has_j2`.
+    `t` is not a parameter: neither model depends on time. Scalar stage values live in registers, so
+    unlike `RK4Integrator` this needs no stage scratch and allocates nothing.
+    """
+    half_dt = 0.5 * dt
+    sixth_dt = dt / 6.0
+    n = indices.shape[0]
+
+    for k in range(n):
+        s = indices[k]
+        par = parent_indices[s]
+        pm = has_point_mass[s]
+        jj = has_j2[s]
+        mu_par = mu_array[par]
+        mu_total = mu_array[s] + mu_par
+        j2 = 0.0
+        r_eq = 0.0
+        if jj:
+            j2 = j2_params[s, 0]
+            r_eq = j2_params[s, 1]
+
+        px = state[par, 0]
+        py = state[par, 1]
+        pz = state[par, 2]
+        pvx = state[par, 3]
+        pvy = state[par, 4]
+        pvz = state[par, 5]
+
+        # Initial relative state y0 = state[s] - state[par]; stage 1 is evaluated on the committed row.
+        cx = state[s, 0]
+        cy = state[s, 1]
+        cz = state[s, 2]
+        r0x = cx - px
+        r0y = cy - py
+        r0z = cz - pz
+        v0x = state[s, 3] - pvx
+        v0y = state[s, 4] - pvy
+        v0z = state[s, 5] - pvz
+
+        a1x, a1y, a1z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        v1x = v0x + half_dt * a1x
+        v1y = v0y + half_dt * a1y
+        v1z = v0z + half_dt * a1z
+
+        # Stage 2 at t + dt/2: candidate row rebuilt as parent + (r0 + dt/2 v0), as the reference does.
+        cx = px + (r0x + half_dt * v0x)
+        cy = py + (r0y + half_dt * v0y)
+        cz = pz + (r0z + half_dt * v0z)
+        a2x, a2y, a2z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        v2x = v0x + half_dt * a2x
+        v2y = v0y + half_dt * a2y
+        v2z = v0z + half_dt * a2z
+
+        # Stage 3 at t + dt/2.
+        cx = px + (r0x + half_dt * v1x)
+        cy = py + (r0y + half_dt * v1y)
+        cz = pz + (r0z + half_dt * v1z)
+        a3x, a3y, a3z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        v3x = v0x + dt * a3x
+        v3y = v0y + dt * a3y
+        v3z = v0z + dt * a3z
+
+        # Stage 4 at t + dt.
+        cx = px + (r0x + dt * v2x)
+        cy = py + (r0y + dt * v2y)
+        cz = pz + (r0z + dt * v2z)
+        a4x, a4y, a4z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+
+        # Weighted combination on the relative state, then back onto the parent's start-of-step row.
+        rnx = r0x + sixth_dt * (v0x + 2.0 * v1x + 2.0 * v2x + v3x)
+        rny = r0y + sixth_dt * (v0y + 2.0 * v1y + 2.0 * v2y + v3y)
+        rnz = r0z + sixth_dt * (v0z + 2.0 * v1z + 2.0 * v2z + v3z)
+        vnx = v0x + sixth_dt * (a1x + 2.0 * a2x + 2.0 * a3x + a4x)
+        vny = v0y + sixth_dt * (a1y + 2.0 * a2y + 2.0 * a3y + a4y)
+        vnz = v0z + sixth_dt * (a1z + 2.0 * a2z + 2.0 * a3z + a4z)
+
+        gx = px + rnx
+        gy = py + rny
+        gz = pz + rnz
+        gvx = pvx + vnx
+        gvy = pvy + vny
+        gvz = pvz + vnz
+        state[s, 0] = gx
+        state[s, 1] = gy
+        state[s, 2] = gz
+        state[s, 3] = gvx
+        state[s, 4] = gvy
+        state[s, 5] = gvz
+        rel_out[s, 0] = gx - px
+        rel_out[s, 1] = gy - py
+        rel_out[s, 2] = gz - pz
+        rel_out[s, 3] = gvx - pvx
+        rel_out[s, 4] = gvy - pvy
+        rel_out[s, 5] = gvz - pvz
 
 
 @njit

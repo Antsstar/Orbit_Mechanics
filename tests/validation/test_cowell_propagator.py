@@ -373,6 +373,9 @@ def test_broken_integrator_fails_the_convergence_order_test(
         cowell_sim, _, cowell_secondary = _build_two_body_cowell(db_session_factory())
         cowell_sim.record_history = False
         cowell_sim._cowell_integrator = _AliasedRK4Integrator()  # type: ignore[assignment]
+        # The fused compiled twin (`kernels.cowell_rk4_step`) never calls `_cowell_integrator`, so
+        # this control only exercises the swapped integrator on the NumPy path.
+        cowell_sim.use_compiled_kernel = False
         for _ in range(n_steps):
             cowell_sim.step(dt)
         r_broken = cowell_sim.global_states[cowell_secondary, :3].copy()

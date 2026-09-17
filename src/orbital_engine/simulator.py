@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session
 from .propagators import (
     Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates, mean_seeded_p,
 )
-from .kernels import NUMBA_AVAILABLE, calc_global_states, kepler_propagate, secular_j2_propagate
+from .kernels import (
+    NUMBA_AVAILABLE, calc_global_states, cowell_rk4_step, kepler_propagate, secular_j2_propagate,
+)
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
 from .registry import get_force_model, get_propagators
@@ -162,6 +164,22 @@ class Simulation:
         self._resolved_force_models: List[forces.ResolvedForceModel] = []
         self._force_dispatch_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
+        # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
+        # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
+        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity` and `j2` only,
+        # so `_cowell_fused_ok` records whether the current masks let `step()` use it; any other
+        # model on a Cowell body sends the whole Cowell set down the NumPy `RK4Integrator` path.
+        # `_cowell_rel` is the per-step parent-relative result both paths hand to the re-base in
+        # `step()`, the same role `_secular_j2_rel` plays for that propagator.
+        self._cowell_primaries: NDArray[np.int32] = np.empty(0, dtype=np.int32)
+        self._cowell_bubbles: NDArray[np.int32] = np.empty(0, dtype=np.int32)
+        self._cowell_rel = np.zeros((max_capacity, 6), dtype=np.float64)
+        self._cowell_has_point_mass = np.zeros(max_capacity, dtype=np.bool_)
+        self._cowell_has_j2 = np.zeros(max_capacity, dtype=np.bool_)
+        self._no_j2_params = np.zeros((1, len(geopotential.J2_PARAM_NAMES)), dtype=np.float64)
+        self._cowell_j2_params: NDArray[np.float64] = self._no_j2_params
+        self._cowell_fused_ok: bool = False
+
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
 
     def _build_universe(self, body_names: List[str], system_names: List[str], session: Optional[Session] = None) -> None:
@@ -298,6 +316,7 @@ class Simulation:
         ).astype(np.int64)
         self._kepler_sib_mask = self.active_mask & ~self.is_head & ~is_cowell & ~is_secular_j2
         self._kepler_sib_idx = np.flatnonzero(self._kepler_sib_mask).astype(np.int64)
+        self._refresh_cowell_plan()
 
         # Flatten the tier list into a single topologically ordered slot array. `calc_global_states`
         # needs only the ordering, not the tier boundaries, since a forward pass over a topological
@@ -338,6 +357,42 @@ class Simulation:
         # "Keplerian", the second configuration would silently still carry J2. This is O(capacity),
         # but it runs once per configuration change, never per step, so step cost is unaffected.
         self.accel_accum.fill(0.0)
+        self._refresh_cowell_plan()
+
+    def _refresh_cowell_plan(self) -> None:
+        """
+        Decide, from data, whether `step()` may run the Cowell set through the fused compiled kernel.
+
+        `kernels.cowell_rk4_step` hard-codes `point_mass_gravity` and `j2` (numba cannot dispatch
+        over the Python kernel list `forces.compose_accelerations` walks), with per-body flags so a
+        mixed arena - some Cowell bodies with J2, some without, some with neither - still qualifies.
+        Two conditions disqualify the whole set, and the fallback is then the NumPy path for every
+        Cowell body, not a per-body split: any Cowell body carrying a bit outside those two models,
+        and any Cowell body whose parent is itself Cowell (the kernel reads a parent's row as fixed
+        across the four stages; `RK4Integrator` would see the parent's stage candidates instead).
+
+        Cached here, at configuration time, for the same reason `_force_dispatch_idx` is: the step
+        must not pay a NumPy reduction over the mask to discover a configuration that only changes
+        when `set_propagator`, `enable_force_model` or `resolve_force_models` is called. The
+        `"j2"` coefficient array is bound here too, since `forces.resolve_force_models` allocates it
+        lazily; a one-row dummy stands in until it exists, and the kernel only reads a row behind
+        that body's `has_j2` flag.
+        """
+        idx = self._cowell_idx
+        self._cowell_primaries = self.parent_indices[idx]
+        self._cowell_bubbles = self.body_sys_map[idx]
+
+        pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
+        j2_bit = np.uint64(1) << np.uint64(get_force_model(geopotential.J2_MODEL).bit)
+        np.not_equal(self.force_model_mask & pm_bit, np.uint64(0), out=self._cowell_has_point_mass)
+        np.not_equal(self.force_model_mask & j2_bit, np.uint64(0), out=self._cowell_has_j2)
+
+        foreign = (self.force_model_mask[idx] & ~(pm_bit | j2_bit)) != np.uint64(0)
+        parent_is_cowell = np.isin(self._cowell_primaries, idx)
+        self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
+
+        j2_params = self.force_model_params.get(geopotential.J2_MODEL)
+        self._cowell_j2_params = self._no_j2_params if j2_params is None else j2_params
 
     def enable_force_model(
         self,
@@ -921,20 +976,28 @@ class Simulation:
         parent graphs diverge; see `docs/architecture.md`), just without a `parent_state_at_start` to
         subtract first, since nothing here was integrated relative to a snapshot.
         """
-        cowell_result: Optional[NDArray[np.float64]] = None
-        cowell_primaries: Optional[NDArray[np.int32]] = None
-        parent_state_at_start: Optional[NDArray[np.float64]] = None
-        if self._cowell_idx.size > 0:
-            cowell_primaries = self.parent_indices[self._cowell_idx]
-            parent_state_at_start = self.global_states[cowell_primaries].copy()
-
-            cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
-            cowell_propagator.propagate(
-                dt=dt, integrator=self._cowell_integrator, provider=self.accelerations,
-                t=self.t, state=self.global_states, indices=self._cowell_idx,
-                primaries=cowell_primaries,
-            )
-            cowell_result = self.global_states[self._cowell_idx].copy()
+        cowell_idx = self._cowell_idx
+        if cowell_idx.size > 0:
+            if self.use_compiled_kernel and self._cowell_fused_ok:
+                # Fused twin: leaves global_states[cowell_idx] exactly as RK4Integrator would and
+                # writes the parent-relative result straight into _cowell_rel. See
+                # `_refresh_cowell_plan` for when this branch is available.
+                cowell_rk4_step(
+                    float(dt), self.global_states, self.mu_array, self.parent_indices, cowell_idx,
+                    self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
+                    self._cowell_rel,
+                )
+            else:
+                parent_state_at_start = self.global_states[self._cowell_primaries].copy()
+                cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
+                cowell_propagator.propagate(
+                    dt=dt, integrator=self._cowell_integrator, provider=self.accelerations,
+                    t=self.t, state=self.global_states, indices=cowell_idx,
+                    primaries=self._cowell_primaries,
+                )
+                # The integrator's result is (parent_state_at_start + relative_state); subtracting
+                # the start-of-step parent reference recovers the pure relative state.
+                self._cowell_rel[cowell_idx] = self.global_states[cowell_idx] - parent_state_at_start
 
         if self._secular_j2_idx.size > 0:
             if self.use_compiled_kernel:
@@ -961,19 +1024,14 @@ class Simulation:
                                           body_sys_map=self.body_sys_map, sys_head_map=self.sys_head_map, sib_mask=self._kepler_sib_mask)
         self.calc_global()
 
-        if (
-            cowell_result is not None
-            and cowell_primaries is not None
-            and parent_state_at_start is not None
-        ):
-            # The integrator's result is (parent_state_at_start + relative_state); subtracting the
-            # start-of-step parent reference recovers the pure relative state, and adding the parent's
-            # now-fresh (post calc_global) position places the Cowell body correctly regardless of how
-            # far its parent moved during this step.
-            relative_state = cowell_result - parent_state_at_start
-            self.global_states[self._cowell_idx] = self.global_states[cowell_primaries] + relative_state
-            self.local_states[self._cowell_idx] = (
-                self.global_states[self._cowell_idx] - self.global_states[self.body_sys_map[self._cowell_idx]]
+        if cowell_idx.size > 0:
+            # Adding the parent's now-fresh (post calc_global) position to the saved relative state
+            # places the Cowell body correctly regardless of how far its parent moved this step.
+            self.global_states[cowell_idx] = (
+                self.global_states[self._cowell_primaries] + self._cowell_rel[cowell_idx]
+            )
+            self.local_states[cowell_idx] = (
+                self.global_states[cowell_idx] - self.global_states[self._cowell_bubbles]
             )
 
         if self._secular_j2_idx.size > 0:
