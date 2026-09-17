@@ -61,9 +61,15 @@ __all__ = [
 class ForceModelSpec:
     """One `Simulation.enable_force_model` call: a registered model name and its coefficients, if any
     (`registry.py`'s `param_names`) - e.g. `ForceModelSpec("j2", {"j2": EARTH_J2, "r_eq": EARTH_R_EQ})`.
+
+    `body_coefficients` holds coefficients whose value is a *body*, given by name, e.g.
+    `ForceModelSpec("third_body", body_coefficients={"perturber": "Sun"})`. `apply_config` resolves
+    each name to its arena slot for the simulation being configured, so a config never carries a slot
+    number, which is not stable across builds. A key may appear in only one of the two mappings.
     """
     name: str
     coefficients: Mapping[str, float] = field(default_factory=dict)
+    body_coefficients: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -161,7 +167,20 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
         # integer array even though the implementation accepts one via ordinary fancy indexing - a
         # pre-existing signature narrowness in `Simulation.enable_force_model`, not something this
         # module should widen.
-        sim.enable_force_model(fm.name, idx.tolist(), **fm.coefficients)
+        coefficients = dict(fm.coefficients)
+        for key, body_name in fm.body_coefficients.items():
+            if key in coefficients:
+                raise ValueError(
+                    f"config '{config.name}', force model '{fm.name}': coefficient '{key}' is given both "
+                    f"as a number and as a body name."
+                )
+            if body_name not in sim.name_to_index:
+                raise KeyError(
+                    f"config '{config.name}', force model '{fm.name}': {key}={body_name!r} is not a body "
+                    f"in this simulation; have {sorted(sim.name_to_index)}"
+                )
+            coefficients[key] = float(sim.name_to_index[body_name])
+        sim.enable_force_model(fm.name, idx.tolist(), **coefficients)
 
     return idx
 

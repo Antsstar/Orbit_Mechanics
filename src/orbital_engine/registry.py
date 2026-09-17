@@ -16,7 +16,7 @@ contract a force model implements.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Optional, Tuple, Type, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, Mapping, Optional, Tuple, Type, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -83,6 +83,12 @@ MAX_FORCE_MODELS = 64  # Bit width of ForceModelMask (np.uint64). See the headro
 # signature). Never called inside a step.
 BodyValidator = Callable[["Simulation", NDArray[np.int64]], None]
 
+# The same kind of check, but also given the keyword coefficients `enable_force_model` was called with. It is for models
+# whose validity depends on a coefficient's value, such as `"third_body"`, whose perturber slot must be neither the body
+# nor its parent. It runs after `validate_bodies`, still before any bit or coefficient is written. It is a separate hook
+# rather than a wider `BodyValidator`, so existing two-argument validators stay valid.
+CoefficientValidator = Callable[["Simulation", NDArray[np.int64], Mapping[str, float]], None]
+
 
 @dataclass(frozen=True)
 class ForceModel:
@@ -100,6 +106,7 @@ class ForceModel:
     param_names: Tuple[str, ...] = ()
     citation: str = ""
     validate_bodies: Optional[BodyValidator] = None
+    validate_coefficients: Optional[CoefficientValidator] = None
 
     @property
     def n_params(self) -> int:
@@ -116,6 +123,7 @@ def register_force_model(
     param_names: Tuple[str, ...] = (),
     citation: str = "",
     validate_bodies: Optional[BodyValidator] = None,
+    validate_coefficients: Optional[CoefficientValidator] = None,
 ) -> Callable[["ForceKernel"], "ForceKernel"]:
     """
     Decorator. Registers `name` at the next free mask bit and returns the kernel unchanged, so the
@@ -127,6 +135,7 @@ def register_force_model(
             ...
 
     `validate_bodies`, if given, is the model's configuration-time check (see `BodyValidator`).
+    `validate_coefficients` is the coefficient-aware variant (see `CoefficientValidator`).
 
     Raises `RegistryError` (not a bare `ValueError`) on a duplicate name or a full registry, so both
     are catchable alongside every other registry lookup failure in this module.
@@ -143,6 +152,7 @@ def register_force_model(
         model = ForceModel(
             name=name, bit=_next_force_model_bit, kernel=kernel,
             param_names=param_names, citation=citation, validate_bodies=validate_bodies,
+            validate_coefficients=validate_coefficients,
         )
         _FORCE_MODEL_REGISTRY[name] = model
         _next_force_model_bit += 1
