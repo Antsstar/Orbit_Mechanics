@@ -19,19 +19,25 @@ a full multi-plane constellation.
 - Kepler (`PropagatorType.KEPLERIAN`), compiled.
 - Secular J2, osculating-seeded (`PropagatorType.SECULAR_J2`, `mean_seed=False`), compiled.
 - Secular J2, mean-seeded (`mean_seed=True`), compiled.
-- Cowell + `point_mass_gravity` + `j2`, NumPy only (no compiled twin - see `CLAUDE.md`'s "Unwired
-  scaffolding" section), swept over several step sizes to trace a fidelity/cost curve.
+- Cowell + `point_mass_gravity` + `j2`, compiled through the fused twin `kernels.cowell_rk4_step`,
+  swept over several step sizes to trace a fidelity/cost curve.
 
 **Axes.** Error (log) against wall time (log), both from `sweep.SweepResult` - median position error
 over the 12 satellites, and minimum-of-batches wall time for the propagation alone (truth generation
 and `Simulation` construction excluded, per `sweep.run_sweep`).
 
-**The compiled-vs-NumPy caveat.** Kepler and secular-J2 run compiled (if numba is installed - both
-tiers fall back to interpreted Python otherwise, which `Simulation.use_compiled_kernel`'s docstring
-already flags as slower than the NumPy path it replaces). Cowell and its force models have no compiled
-twin at all. The Cowell curve's wall time therefore mixes a real modelling-cost difference (RK4 at a
-given step size against closed-form propagation) with an implementation penalty neither this plot nor
-`sweep.py` can separate - printed here, and repeated on the figure itself and in `README.md`.
+**The implementation caveat.** With numba installed every tier runs compiled: Kepler and secular J2
+through their kernels, Cowell through `kernels.cowell_rk4_step`, which fuses RK4 with exactly the
+`point_mass_gravity` + `j2` combination this script sweeps (any other model would fall back to the
+NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied). Without numba,
+Kepler and secular J2 run as interpreted Python and Cowell as vectorised NumPy, so the horizontal axis
+then measures implementation as much as model - printed here, on the figure itself and in
+`README.md`. What remains is `step()`'s Python-level bookkeeping: the Cowell and secular-J2 tiers each
+pay one NumPy re-base per step (eight small fancy-indexed operations) that the Keplerian tier does not.
+Measured from the table this script prints: ~5 us per Kepler step against ~16-18 us per Cowell or
+secular-J2 step, whatever the Cowell step size, so the re-base is ~12 us and dominates both non-Kepler
+tiers. Fusing it into a kernel is the obvious next step; until then the secular-J2 tier sits to the
+right of Kepler for that reason alone, and Cowell at 160 s costs only ~1.2x Kepler.
 """
 from __future__ import annotations
 
@@ -70,11 +76,18 @@ COWELL_DTS_S = [160.0, 80.0, 40.0, 20.0, 10.0]
 TIMING_BATCHES = 3
 TIMING_WARMUP = 1
 
-CAVEAT = (
-    "Kepler and secular J2 run compiled (numba); Cowell + point_mass_gravity + j2 has no compiled\n"
-    "twin and runs as NumPy only, so its wall time carries an implementation penalty alongside the\n"
-    "genuine step-size/fidelity cost."
+CAVEAT_COMPILED = (
+    "All tiers run compiled (numba): Kepler and secular J2 through their kernels, Cowell through the\n"
+    "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2). Wall time is the model, not the\n"
+    "implementation, except that Cowell and secular J2 each pay one NumPy re-base per step in step():\n"
+    "measured ~12 us, against ~5 us for a whole Kepler step, so the secular-J2 points sit right of Kepler."
 )
+CAVEAT_INTERPRETED = (
+    "numba is NOT installed: Kepler and secular J2 ran as interpreted Python and Cowell as vectorised\n"
+    "NumPy, so wall time here measures implementation as much as model. Install [perf] for a fair\n"
+    "timing comparison."
+)
+CAVEAT = CAVEAT_COMPILED if NUMBA_AVAILABLE else CAVEAT_INTERPRETED
 
 
 def fresh_session() -> Session:

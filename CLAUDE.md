@@ -80,7 +80,8 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 - **Call `resolve_force_models()` after any change to `force_model_mask` or `active_mask`.**
   `enable_force_model` does it for you. It also clears `accel_accum`: `compose_accelerations` only
   writes rows in the current dispatch set, so without that clear a disabled model's last acceleration
-  would persist in its body's row.
+  would persist in its body's row. It also rebuilds the Cowell dispatch plan (`_refresh_cowell_plan`),
+  which decides whether the fused compiled kernel applies; `set_propagator` rebuilds it too.
 - **A Cowell body integrates its state relative to its `parent_indices` parent, never its absolute
   global state.** `step()` saves that relative state and re-bases it onto the parent's *end-of-step*
   position after `calc_global()`. Integrating the absolute state with parent-relative forces silently
@@ -111,15 +112,15 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 | `utilities.Kepler` / `utilities.Barker` | Time ↔ mean anomaly for elliptic/hyperbolic and parabolic cases |
 | `simulator._topological_sort` | Vectorised BFS tier stratification — generic over any parent-index array |
 | `database.py` | Polymorphic ORM: `BaseBodyORM` / `CelestialBodyORM` / `VesselORM` / `VirtualBodyORM` plus `SystemORM`. `VesselORM` already carries `dry_mass`, `fuel_mass`, `drag_area` |
-| `kernels.py` | Compiled scalar kernels: `kepler_propagate`, `calc_global_states`, plus reusable `coe_to_rv_scalar` / `solve_kepler_scalar` / `advance_true_anomaly` |
+| `kernels.py` | Compiled scalar kernels: `kepler_propagate`, `secular_j2_propagate`, `cowell_rk4_step`, `calc_global_states`, plus reusable `coe_to_rv_scalar` / `solve_kepler_scalar` / `advance_true_anomaly` |
 | `scenarios.py` | `two_body`, `sun_earth_moon(moon_mu=…)`, `earth_constellation(n_sats=…)` — shared by tests and benchmarks. `moon_mu=0.0` gives a massless Moon with a genuinely accelerating parent. **Build scenarios from here, never inline in a test** |
 | `reference.py` | `reference_for(sim, times, oblateness={"Earth": (j2, r_eq)})` → DOP853 N-body truth trajectory, optionally with J2 on named bodies (reaction included, spin axis = frame +z). Independent of all engine code: oblateness is passed **explicitly**, never read from `force_model_params`, and the field is written from a different derivation than `geopotential.py`. Omitting it is bit-identical to the point-mass truth. **For frontier-plot truth pass `rtol=TRUTH_RTOL, atol=TRUTH_ATOL` (1e-13, 1e-12)**: the default `atol=1e-9` governs LEO velocity components and costs ~4x in truth error (3.5e-9 against 8.6e-10 km per orbit). `energy_drift` is mu-weighted, so it certifies nothing about massless satellites |
 | `benchmark.py` | `measure(fn)` → min-of-batches timing with noise ratio |
 | `forces.py` | Force-model composition. `ForceKernel` is the contract a force model implements — additive (`+=`, never `=`), stateless, allocation-free, called once per model per evaluation. `AccelerationProvider` is what an integrator consumes: `(t, state) -> (C,3)`, with `state` explicit so RK sub-stages never touch the arena. Read the module docstring before writing a force model |
 | `registry.py` | `@register_force_model(name, param_names=…, citation=…)` assigns the next uint64 mask bit. `get_force_model` / `all_force_models` / `mask_for`. Bits follow registration order within a process, so **sweep configs persist model names, never raw mask integers** |
-| `geopotential.py` | Force model `"j2"` (`J2_MODEL`): the J2 perturbation only, relative to each body's `parent_indices` parent — not the central `-mu r/r^3` term. Coefficients `(j2, r_eq)` live on the *perturbed* body's row. Earth values `EARTH_J2` and `EARTH_R_EQ` = 6378.137 km (equatorial) — do **not** pair J2 with `scenarios.EARTH_RADIUS` (6371 km, mean), which is 0.2% off. Assumes the parent's spin axis is the frame's +z. Registered on `import orbital_engine`. **Cannot detect a barycentre parent** (the kernel has no `is_system`) and returns a finite but meaningless value there; check with `barycentre_parented()` before enabling. No compiled twin yet |
-| `gravity.py` | Force model `"point_mass_gravity"`: the central term `-(mu_body + mu_parent) r / r^3` relative to `parent_indices`, the same summed mu the Keplerian path uses. Parent only, so a two-body term and **not** N-body or third-body. Registered on `import orbital_engine` |
-| `integrators.py` | `Integrator` protocol and `RK4Integrator(max_capacity)`: `step(provider, t, state, dt, indices, primaries)` advances `state[indices]` relative to `state[primaries]`, copying each stage's accelerations (the provider returns a shared buffer). Named stage buffers are allocated once in `__init__`, but fancy indexing still allocates temporaries every stage, so it is not allocation-free. The frozen-primary formulation is exact only for forces that depend on position relative to the parent, which covers every model registered today |
+| `geopotential.py` | Force model `"j2"` (`J2_MODEL`): the J2 perturbation only, relative to each body's `parent_indices` parent — not the central `-mu r/r^3` term. Coefficients `(j2, r_eq)` live on the *perturbed* body's row. Earth values `EARTH_J2` and `EARTH_R_EQ` = 6378.137 km (equatorial) — do **not** pair J2 with `scenarios.EARTH_RADIUS` (6371 km, mean), which is 0.2% off. Assumes the parent's spin axis is the frame's +z. Registered on `import orbital_engine`. **Cannot detect a barycentre parent** (the kernel has no `is_system`) and returns a finite but meaningless value there; check with `barycentre_parented()` before enabling. Compiled twin: fused into `kernels.cowell_rk4_step` with RK4 and `point_mass_gravity` |
+| `gravity.py` | Force model `"point_mass_gravity"`: the central term `-(mu_body + mu_parent) r / r^3` relative to `parent_indices`, the same summed mu the Keplerian path uses. Parent only, so a two-body term and **not** N-body or third-body. Registered on `import orbital_engine`. Name constant `POINT_MASS_MODEL`. Compiled twin: fused into `kernels.cowell_rk4_step` |
+| `integrators.py` | `Integrator` protocol and `RK4Integrator(max_capacity)`: `step(provider, t, state, dt, indices, primaries)` advances `state[indices]` relative to `state[primaries]`, copying each stage's accelerations (the provider returns a shared buffer). Named stage buffers are allocated once in `__init__`, but fancy indexing still allocates temporaries every stage, so it is not allocation-free. The frozen-primary formulation is exact only for forces that depend on position relative to the parent, which covers every model registered today. Compiled twin `kernels.cowell_rk4_step`, fused with `point_mass_gravity` and `j2`; `step()` uses it when `use_compiled_kernel` is set **and** `Simulation._cowell_fused_ok` (rebuilt by `_refresh_cowell_plan`: every Cowell body's mask is a subset of those two models and no Cowell body parents another), otherwise this NumPy path runs |
 | `propagators.py` | `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`): analytic Keplerian propagation plus first-order secular drift of RAAN, argument of periapsis and mean anomaly under J2 — Vallado 4e Eq. 9-41 is the likely reference, **unverified against the text**. `p`, `e`, `i` held constant, matching the theory; `secular_j2_rates(...)` derives the three rates once, cached rather than recomputed per step. Compiled twin `kernels.secular_j2_propagate`. Configured only through `Simulation.set_propagator(bodies, PropagatorType.SECULAR_J2, j2=..., r_eq=...)` — coefficients are mandatory, unlike `enable_force_model("j2", ...)`'s silent-no-op convention. Optional `mean_seed=True` (default `False`, bit-identical to the prior behaviour) replaces the seeded `p` with a first-order mean value via `propagators.mean_seeded_p` — Kozai 1959 / Brouwer 1959, **unverified against the text**; corrects only `p`, never `e` or `i`. See `docs/architecture.md`'s Cowell section for the shared restriction reasoning and its own section for what this propagator adds |
 | `Simulation` model API | `enable_force_model(name, bodies, **coefficients)` and `set_propagator(bodies, PropagatorType.COWELL \| PropagatorType.SECULAR_J2, **coefficients)` are the sweep-configuration surface; `resolve_force_models()`; `accelerations(t, state=None)`. `set_propagator` raises `ValueError` for Cowell on heads, barycentres, kinematic roots, inactive slots and **any body with `mu != 0`**, since a Cowell body bypasses the barycentric accumulation that carries its mass into the reflex kick; `SECULAR_J2` carries the same restrictions plus a non-barycentre Keplerian parent, `0 <= e < 1`, and mandatory `j2`/`r_eq` coefficients |
 
@@ -161,9 +162,14 @@ Both halves of `registry.py` are now wired. `step()` dispatches Cowell bodies th
 `COWELL` and `SECULAR_J2` drive dispatch; any other `PropagatorType` member is unimplemented. `BodyHandle`
 (`body.py`) is still never instantiated and `sim.bodies` is always empty.
 
-Cowell has no compiled twin, so it runs as NumPy only whatever `use_compiled_kernel` says. Nor do
-`point_mass_gravity` and `j2`. Until twins exist, a Keplerian-vs-Cowell timing comparison measures the
-implementation as well as the model.
+Cowell's compiled twin is **fused**: `kernels.cowell_rk4_step` hard-codes RK4 with `point_mass_gravity`
+and `j2` (per-body flags), because numba cannot dispatch over the Python kernel list
+`forces.compose_accelerations` walks. A Cowell body carrying any other model, or parented by another
+Cowell body, sends the whole Cowell set down the NumPy `RK4Integrator` path (`_cowell_fused_ok`). The
+composition layer itself, and every other force model, remain NumPy only; a new force model that
+wants to be timed fairly against the analytic tiers needs its term added to `kernels._cowell_accel`
+and the plan's accepted-bit set. `test_constant_accel` and `test_radial_bias` are deliberately not
+in that set.
 
 Two test-fixture kernels, `test_constant_accel` and `test_radial_bias`, are registered from
 `forces.py` itself, so they occupy two of the 64 mask bits and appear in `all_force_models()` for
@@ -193,6 +199,7 @@ Hot paths exist twice: a readable NumPy version and a compiled scalar version.
 |---|---|---|
 | Propagation | `propagators.KeplerianPropagator` | `kernels.kepler_propagate` |
 | Secular-J2 propagation | `propagators.SecularJ2Propagator` | `kernels.secular_j2_propagate` |
+| Cowell step (RK4 + `point_mass_gravity` + `j2`) | `integrators.RK4Integrator` over `forces.compose_accelerations` | `kernels.cowell_rk4_step` (fused; other masks fall back to the reference) |
 | Global states | `Simulation.calc_global` (else branch) | `kernels.calc_global_states` |
 
 `Simulation.use_compiled_kernel` selects between them; it defaults to `NUMBA_AVAILABLE`, because

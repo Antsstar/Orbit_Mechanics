@@ -285,6 +285,27 @@ registered today, so this is a documented constraint on what CAN be added next, 
 Both restrictions above (mass and kinematic role) are also documented restrictions of *this* phase, not
 accidents.
 
+**The compiled twin is fused, not composed.** `kernels.cowell_rk4_step` is the second-implementation
+half of this propagator: one scalar loop per body doing all four RK4 stages with `point_mass_gravity`
+and `j2` inlined (`kernels._cowell_accel`, each term's arithmetic in the same order as its NumPy
+kernel), selected by `use_compiled_kernel` exactly like the Keplerian and secular twins. It cannot
+call `forces.compose_accelerations` - numba does not dispatch over a list of Python callables - so
+instead of a general compiled composition layer it hard-codes the one combination the fidelity sweep
+runs, with per-body flags so a mixed arena (some satellites with J2, some without) still qualifies.
+`Simulation._refresh_cowell_plan` decides at configuration time, from the mask alone, whether every
+Cowell body's models are a subset of those two and no Cowell body is parented by another Cowell body
+(the kernel reads a parent's row as fixed across the stages, where `RK4Integrator` would see its stage
+candidates); if not, the whole Cowell set runs the NumPy path. The plan is rebuilt by both
+`_refresh_active_indices` and `resolve_force_models`, so it tracks `set_propagator` and
+`enable_force_model` without a per-step reduction over the mask. Both paths write the parent-relative
+result into `_cowell_rel` - the kernel by subtracting the parent from the row it has just rounded onto
+the absolute grid, the same arithmetic `step()` applies to the NumPy result - and share one re-base;
+for a heliocentric Moon that rounding is an ulp of 1.5e8 km, 8e-14 of the lunar distance per step,
+close enough to the 1e-12 equivalence bound that returning the relative result directly would have
+been a mistake. `tests/validation/test_kernel_equivalence.py` holds the pair at 1e-12 relative on
+direct calls and through `step()` (measured 1e-14 after 50 steps; single steps bit-identical), with a
+negative control and a spy test that the plan really selects the kernel and really falls back.
+
 ---
 
 ## Secular-J2 propagation: the third tier, and why it is a propagator, not a force model
@@ -462,9 +483,10 @@ secular-J2 bodies the same way → advance `t` → optionally record.
 
 ## Deliberately not built
 
-- **Compiled twins for Cowell and the force models.** Per-body propagator selection now exists
-  (`set_propagator`), but `RK4Integrator`, `point_mass_gravity` and `j2` are NumPy only. The
-  compiled/reference switch still applies to the Keplerian path alone.
+- **A compiled force-composition layer.** Cowell's compiled twin is fused for `point_mass_gravity` +
+  `j2` only (see the Cowell section); `forces.compose_accelerations` and any other model stay NumPy,
+  and a Cowell body carrying one falls back to `RK4Integrator`. A general compiled dispatcher would
+  need force models to be registered as compiled callables, which no model yet asks for.
 - **Massive Cowell bodies, and N-body or third-body forces.** Rejected and unregistered respectively;
   see the Cowell section above for why each needs more than a new kernel.
 - **Slot compaction and handle indirection.** Dropped from phase 1 once measurement showed they

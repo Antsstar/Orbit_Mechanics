@@ -96,13 +96,18 @@ What the figure shows, as median position error against truth after 24 hours:
   short-period oscillation an averaged theory cannot represent.
 - **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step down to 0.0004 km at 10 s.** Wall
   time rises 16× across that range, as fourth-order Runge-Kutta predicts: each halving of the step
-  doubles the cost and cuts the error about 16-fold.
+  doubles the cost and cuts the error about 16-fold. At 160 s it costs 1.1–1.3× the Kepler tier (three runs) and is
+  already 2.6× more accurate; at 80 s it costs less than either secular-J2 tier.
 
 Two caveats:
 
-- **Timings mix implementations.** Kepler and secular J2 run compiled (numba). Cowell and its force
-  models have no compiled twin yet and run as vectorised NumPy, so part of Cowell's horizontal
-  distance from the analytic tiers is implementation, not model.
+- **Every tier runs compiled, but not every tier pays the same bookkeeping.** Kepler and secular J2
+  run through their numba kernels; Cowell runs through `kernels.cowell_rk4_step`, a fused compiled
+  twin of RK4 + `point_mass_gravity` + `j2` held to the NumPy path at 1e-12 relative. What remains
+  is one NumPy re-base per step in `Simulation.step` that the Cowell and secular-J2 tiers pay and
+  the Kepler tier does not: about 12 µs, against about 5 µs for a whole Kepler step. That is why
+  the secular-J2 points sit to the right of Kepler despite doing no more arithmetic, and it is
+  the next thing to fuse.
 - **Single-satellite figures depend on starting phase.** Against the same truth, one secular-J2
   satellite's error after 10 orbits ranges from 0.2 km to 574 km depending on its initial argument of
   latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
