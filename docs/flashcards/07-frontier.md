@@ -111,18 +111,32 @@ ranking depends on which slot was picked.
 
 ---
 
-### On the frontier plot, Cowell's wall time rises 16× while its error falls ~5.7 orders of magnitude. Is that consistent with RK4, and why can't its timings be compared directly with Kepler's?
+### On the frontier plot, Cowell's wall time rises 16× while its error falls ~5.7 orders of magnitude. Is that consistent with RK4?
 
-**Consistent:** each halving of the step doubles the cost and divides RK4's error by ~16. Four
-halvings give 16× the time and 16⁴ ≈ 6.6e4× less error. The coarsest point is pre-asymptotic, which
-accounts for the rest.
+Yes. Each halving of the step doubles the cost and divides RK4's error by ~16. Four halvings give 16×
+the time and 16⁴ ≈ 6.6e4× less error. The coarsest point, at 160 s, is pre-asymptotic, which accounts
+for the rest.
 
-**Not comparable:** when the plot was made, Kepler and secular J2 ran compiled while Cowell ran as
-vectorised NumPy. Part of the horizontal gap was implementation, not model.
+> src: README.md - Model-fidelity frontier
+> sym: run_sweep, cowell_rk4_step
+> tags: frontier, integrators, performance
+
+---
+
+### Why do the analytic tiers on the frontier plot take a single step to the 24-hour horizon, and what went wrong before they did?
+
+Kepler and secular J2 are **closed-form in time**: their horizon error is the same whether they get
+there in one step or in 1440. The first plot stepped them every 60 s, which charged them for steps
+they don't need. That made Cowell at a 160 s step look about as cheap as Kepler. With one step the
+errors were identical (608, 431, 4.0 km) and the cost was 21–37 µs. Mean-seeded secular J2 then
+reaches 4 km for 37 µs, and Cowell needs about 1,000–4,000× the cost to do better.
+
+The question a plot's timing answers has to be stated. This plot measures the cost of the horizon
+state, not the cost of an ephemeris sampled at a fixed cadence.
 
 > src: README.md - Model-fidelity frontier
 > sym: run_sweep
-> tags: frontier, integrators, performance
+> tags: frontier, methodology, measurement
 
 ---
 

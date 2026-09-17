@@ -25,7 +25,7 @@ than trusted. A decision that has no source to point at is a decision that was n
 | `04-validation.md` | 15 | Why the test suite is shaped this way; verification vs comparison |
 | `05-performance.md` | 12 | What was measured, what it meant, and the reasoning errors it exposed |
 | `06-forces-and-propagation.md` | 14 | Force-model composition, RSW, J2, Cowell, and what "fails without the fix" has to mean |
-| `07-frontier.md` | 12 | J2 truth, secular J2 and mean seeding, the sweep and frontier plot, time-reversibility, verifying which model ran |
+| `07-frontier.md` | 13 | J2 truth, secular J2 and mean seeding, the sweep and frontier plot, time-reversibility, verifying which model ran |
 
 ## Using them
 
