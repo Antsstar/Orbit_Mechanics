@@ -44,8 +44,8 @@ per-tier timings.
 are closed-form in time, so their horizon error does not depend on step size: 60 s steps and a single
 24 h step gave identical medians (607.6, 431.3 and 4.04 km). An earlier version stepped them every 60 s,
 which charged them for 1440 steps they do not need. It made Cowell at a 160 s step look about as cheap
-as Kepler. Measured with one step: Kepler 21-25 us, secular J2 37-38 us, and Cowell 8.6-8.8 ms at 160 s up to
-143-148 ms at 10 s, across two runs. This plot measures the cost of reaching the horizon state. A plot of the cost of a
+as Kepler. Measured with one step, compiled re-base, idle machine, two runs: Kepler 20 us, secular J2
+23-25 us, and Cowell 3.1-3.7 ms at 160 s up to 51-54 ms at 10 s. This plot measures the cost of reaching the horizon state. A plot of the cost of a
 fixed-cadence ephemeris would be a different question, with different analytic-tier costs.
 """
 from __future__ import annotations

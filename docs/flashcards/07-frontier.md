@@ -128,8 +128,9 @@ for the rest.
 Kepler and secular J2 are **closed-form in time**: their horizon error is the same whether they get
 there in one step or in 1440. The first plot stepped them every 60 s, which charged them for steps
 they don't need. That made Cowell at a 160 s step look about as cheap as Kepler. With one step the
-errors were identical (608, 431, 4.0 km) and the cost was 21–37 µs. Mean-seeded secular J2 then
-reaches 4 km for 37 µs, and Cowell needs about 1,000–4,000× the cost to do better.
+errors were identical (608, 431, 4.0 km) and the cost was 20–24 µs. Mean-seeded secular J2 then
+reaches 4 km for 24 µs, and Cowell needs about 500–2,000× the cost to do better (idle-machine timings,
+compiled re-base).
 
 The question a plot's timing answers has to be stated. This plot measures the cost of the horizon
 state, not the cost of an ephemeris sampled at a fixed cadence.

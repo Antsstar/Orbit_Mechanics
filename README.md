@@ -25,21 +25,21 @@ common DOP853 + J2 reference, computed once and reused. `benchmarks/frontier_plo
 
 Median position error after 24 hours, and the wall time to reach that state:
 
-- **Kepler: 608 km in 26 µs.** No J2 at all.
-- **Kepler + secular J2, seeded from osculating elements: 431 km in about 40 µs.** The secular drift removes
+- **Kepler: 608 km in 20 µs.** No J2 at all.
+- **Kepler + secular J2, seeded from osculating elements: 431 km in 24 µs.** The secular drift removes
   the cross-track error. The along-track error remains, because mean motion is taken from the
   *osculating* semi-major axis, whose short-period J2 term acts as a fixed rate bias.
-- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km in about 40 µs**
+- **The same propagator seeded with a first-order *mean* semi-major axis: 4.0 km in 24 µs**
   (`propagators.mean_seeded_p`, after Kozai 1959 / Brouwer 1959). The remaining few km are the
   short-period oscillation an averaged theory cannot represent.
-- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step (5.5 ms) down to 0.0004 km at 10 s
-  (85 ms).** Wall time rises about 16× across that range, as fourth-order Runge-Kutta predicts: each
+- **Cowell + `point_mass_gravity` + `j2`: 231 km at a 160 s step (3.1 ms) down to 0.0004 km at 10 s
+  (51 ms).** Wall time rises 16× across that range, as fourth-order Runge-Kutta predicts: each
   halving of the step doubles the cost and cuts the error about 16-fold.
 
 So the mean-seeded analytic tier sits on the frontier down to a few km. Doing better needs numerical
-integration, at roughly 200–3,000× the cost: 0.27 km for 20 ms, 0.0004 km for 85 ms. Timings vary
-by about 20% from run to run (the two secular tiers do identical work and read 38 and 50 µs on the
-plotted run); errors do not.
+integration, at roughly 500–2,000× the cost: 0.27 km for 13 ms, 0.0004 km for 51 ms. Timings are
+from an otherwise idle machine and agreed within 5% across two runs, except Cowell's coarsest point
+(15%); errors do not vary.
 
 Two caveats:
 
@@ -104,7 +104,7 @@ with the NumPy re-base those were 17 and 24 µs.
 
 | | |
 |---|---|
-| Tests | 370 passing |
+| Tests | 377 passing |
 | Type checking | `mypy --strict`, clean across 22 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
 | Coverage | 86%, measured with Numba disabled |
