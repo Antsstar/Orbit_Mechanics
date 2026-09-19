@@ -284,6 +284,51 @@ def test_conical_shadow_matches_an_independent_disc_overlap_quadrature(
     assert nu[-1] == 1.0, "beyond alpha + beta the source is fully visible"
 
 
+def test_the_kernel_multiplies_the_acceleration_by_the_shadow_factor() -> None:
+    """
+    The shadow reaches the *acceleration*, not just `shadow_factor`'s return value.
+
+    Four bodies at the same 42164 km from the occulter, so the closed form is identical for all of
+    them and only `nu` differs: deep umbra (`nu = 0`), full sun (`nu = 1`), umbra geometry but
+    `r_occ = 0` (the no-occulter convention, `nu = 1`), and one placed in the conical penumbra, whose
+    acceleration must equal `nu` times the unshadowed value **exactly** - the kernel multiplies, it
+    does not re-derive.
+
+    Without this, a kernel that computed `nu` and then ignored it would be caught only by the
+    convergence check in section 5, and only indirectly.
+    """
+    r_occ, d_occ = EARTH_R_EQ, 42164.0
+    alpha = math.asin(SUN_RADIUS / AU2KM)
+    state, mu, parents, params, out = _bare_arena(6)
+    state[1, :3] = [AU2KM, 0.0, 0.0]
+    state[2, :3] = [-d_occ, 0.0, 0.0]                         # deep umbra
+    state[3, :3] = [-d_occ, 3.0 * r_occ, 0.0]                 # full sun
+    state[4, :3] = [-d_occ, 0.0, 0.0]                         # umbra geometry, no occulter
+    state[5, :3] = [-d_occ, r_occ, 0.0]                       # conical penumbra, near half-lit
+    base = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, r_occ, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
+    params[2:5] = base
+    params[4, 4] = 0.0
+    params[5] = base
+    params[5, 6] = SHADOW_MODEL_CONICAL
+
+    idx = np.arange(2, 6, dtype=np.int64)
+    srp_kernel(idx, 0.0, state, mu, parents, params, out)
+
+    def unshadowed(slot: int) -> float:
+        d = float(np.linalg.norm(state[1, :3] - state[slot, :3]))
+        return CR * SOLAR_PRESSURE_1AU * AREA_MASS * (AU2KM / d) ** 2 * 1e-3
+
+    assert np.all(out[2] == 0.0), "a body in the umbra must feel exactly nothing"
+    assert float(np.linalg.norm(out[3])) == pytest.approx(unshadowed(3), rel=CLOSED_FORM_REL_TOL)
+    assert float(np.linalg.norm(out[4])) == pytest.approx(unshadowed(4), rel=CLOSED_FORM_REL_TOL)
+
+    nu = float(shadow_factor(*_geometry(state[5:6, :3], state[1, :3], state[0, :3]),
+                             np.array([SUN_RADIUS]), np.array([r_occ]), np.array([True]))[0])
+    assert 0.4 < nu < 0.6, f"guard: the terminator should be near half-lit, got {nu}"
+    assert float(np.linalg.norm(out[5])) == pytest.approx(nu * unshadowed(5), rel=CLOSED_FORM_REL_TOL)
+    assert alpha > 0.0
+
+
 def test_penumbra_is_monotonic_and_brackets_the_cylindrical_terminator() -> None:
     """
     Across the penumbra `nu` rises monotonically from exactly 0 to exactly 1, and the cylindrical

@@ -1057,6 +1057,44 @@ cannot collide, and re-check `orbital_engine.__file__` after any surprise.
 
 ---
 
+## A step-size scan must land on the same *time*, or it measures nothing
+
+**Symptom.** A convergence scan for `srp`'s shadow reported position errors of 260 km at `dt = 80 s`
+and 41 km at both 40 s and 20 s, against a reference at `dt = 0.25 s`, on an orbit whose entire
+perturbation budget was 0.2 km. The cylindrical and conical shadow models produced *identical* errors
+to four digits, which is impossible if the shadow is what is being measured.
+
+**Cause.** The harness computed `n_steps = int(round(total / dt))` from a horizon that was not a
+multiple of every step size. The runs therefore ended at times differing by up to `dt/2`, and at
+7 km/s a 35 s offset is 245 km of along-track position. The measurement was almost entirely the
+difference in stop time, which is why both shadow models agreed: it had nothing to do with either.
+
+**Fix.** Choose the horizon as an exact multiple of every step size in the ladder (`8800 s` for
+`10, 5, 2.5, 1.25`) and assert `abs(n * dt - total) < 1e-9` in the harness. The errors then came out
+at the expected `1e-5` to `1e-4` km and the two shadow models separated by a factor of 7.
+
+**How to avoid.** Any comparison of two propagations at different step sizes has an along-track
+sensitivity of `|v| x delta_t`, which for LEO is 7 km per second of mismatch - typically orders above
+whatever is being measured. Make the horizon commensurate, or interpolate to a common epoch; do not
+round the step count. The same trap applies to comparing against a `reference.py` truth sampled on a
+grid that the step size does not divide.
+
+---
+
+### A scratch script named after a stdlib module breaks the interpreter
+
+**Symptom.** A scratchpad script called `numbers.py` failed at `import numpy` with
+`ModuleNotFoundError: No module named 'tests'` - a traceback pointing *into* numpy's own
+`numerictypes.py`, which imports `numbers`.
+
+**Cause.** The script's own directory is first on `sys.path`, so `numbers.py` shadowed the standard
+library's `numbers` module, and numpy re-entered the script mid-import.
+
+**Fix.** Rename it. Scratch helpers now carry a worktree suffix (`srp_numbers_a4f9.py`), which
+happens to solve this and the shared-scratchpad collision below at the same time.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
