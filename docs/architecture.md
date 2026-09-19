@@ -40,6 +40,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 ---
 
 | `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
+| `manoeuvres.py` | Impulsive Delta-v in RSW, applied now or scheduled at an epoch `step()` splits for. The first physics that is neither a force model nor a propagator, and the first that every propagator can use | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -540,6 +541,63 @@ can exceed the physical one by up to `T dt`.
 
 ---
 
+## Impulsive manoeuvres: physics on a third axis
+
+`manoeuvres.py` adds an instantaneous Delta-v: position continuous, velocity discontinuous, elements
+re-derived. It is the complement of `thrust.py` — and the first piece of physics here that **every**
+propagator can use, which is the point of it. A Delta-v on a Keplerian body is not an integration
+problem at all; it is `rv_to_coe` of the new `(r, v)`. That makes the analytic tiers usable for
+mission work, which they were not before: a Hohmann transfer on the Keplerian propagator now costs
+two element re-derivations and reaches the target radius to `3e-6 km`.
+
+**Why it is not in `registry.py`.** Both existing axes are wrong for it. A force model is an
+acceleration `forces.compose_accelerations` sums and an integrator consumes — an impulse smeared over
+a step *is* `thrust.py`, which already exists, and running an impulse through that axis would deny it
+to the analytic tiers for no gain. A `PropagatorType` is a way of advancing state through time, which
+an impulse is not. So a third axis would be needed ("scheduled events"), and one event type does not
+justify it: manoeuvres are a plain list on the `Simulation`, sorted by epoch, configured through
+`schedule_delta_v` exactly as propagator assignment is configured through `set_propagator`. The day
+`sweep.py` wants to enumerate mission profiles as configuration data, that list is what it would
+serialise, and that is the point to add the axis rather than before.
+
+**Per propagator, which is the whole difficulty.** The arena keeps a body's state in up to three
+places and which of them is *authoritative* depends on the propagator. A Cowell body's truth is
+`global_states`, so an impulse is one vector addition and its `coe_states` row stays stale as
+documented. A Keplerian body's truth is `coe_states` — `KeplerianPropagator` rewrites `local_states`
+from the elements every single step — so an impulse that changed only the Cartesian state would be
+silently erased by the next `step()`, with no error and a perfectly plausible orbit. A secular-J2
+body carries a third thing: `_secular_j2_rates`, cached at `set_propagator` time because `p`, `e` and
+`i` are constant under that theory. An impulse changes all three, so the cache is rebuilt here. That
+is the failure this feature's sharpest test exists for: a stale rate leaves the position, the
+elements and the energy all correct and only the nodal drift wrong, which nothing else would notice.
+The closed form is exact — a prograde kick `dv = d·v_c` on a circular orbit scales the nodal rate by
+`(1 − 2d − d²)^{3/2} (1 + d)^{−4} = 1 − 7d + 22d²`, matched to 2.2e-13.
+
+**Step splitting, and its honest cost.** `step()` cuts itself at a manoeuvre's epoch, so a burn lands
+where it was asked for rather than at the next multiple of `dt`; quantising the Hohmann
+circularisation to a 60 s grid would place it 21 s off apoapsis and leave `e ~ 1e-4` instead of
+`4e-10`. The split is for the whole arena, so the question is what it costs a body that is not
+manoeuvring. For an analytic body, nothing: propagating `h1` then `h2` is the same closed-form advance
+as `h1 + h2` (measured difference exactly 0.0). For a **Cowell** body it cannot be nothing and is not
+claimed to be — RK4's stages sit at nodes fixed by the step size, so one split perturbs that step by
+its own local truncation error, `r(nh)^5/120`, measured at `4.7e-4 km` over the following 2.3 orbits
+against a derived bound of `1.5e-3 km`, and 2.4e-8 of the manoeuvring vessel's own displacement.
+
+**Restrictions mirror `set_propagator`'s**, and for the arena's reasons rather than physics': heads
+(their motion is a reflex kick recomputed every step, so an impulse on one is overwritten), barycentres,
+roots, inactive slots, and `mu != 0` — a massive body's impulse would have to reach its barycentre's
+own element row, a different slot this call does not touch. The kernel computes the entire transaction
+before committing any of it, so a refusal leaves the arena bit-identical, including the bodies of the
+call that were valid.
+
+**What it does not do.** No propellant coupling: an impulse does not draw down `thrust.py`'s mass,
+because the rocket equation needs an `Isp` belonging to the stage rather than to the impulse, plus a
+policy for an impulse the tanks cannot deliver — guessing either was worse than leaving it out. RSW is
+the only input frame, and there is no finite-burn correction; `thrust.py` is the model for when burn
+duration matters.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
@@ -614,7 +672,8 @@ engineering log.
 
 Step 10 is the hook a future spawn/despawn path must call. After build, only `set_propagator` calls it.
 
-Per `step()`: Cowell integrate (relative to each parent's start-of-step state) → secular-J2 advance
+Per `step()`: split the step at any scheduled manoeuvre epoch (`_advance` per sub-interval, impulse
+between them) → then, per sub-interval: Cowell integrate (relative to each parent's start-of-step state) → secular-J2 advance
 (RAAN/argument of periapsis/mean anomaly, writing a parent-relative state to scratch) → Keplerian
 propagate → `calc_global` → re-base Cowell bodies onto their parents' end-of-step states → re-base
 secular-J2 bodies the same way (both through `_rebase`, compiled by default) → advance `t` →

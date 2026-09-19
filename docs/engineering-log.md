@@ -943,6 +943,56 @@ rather than widen the tolerance.
 
 ---
 
+### An RK4 error estimate built on mean motion was four orders low on an eccentric orbit
+
+**Symptom.** The Cowell-vs-Keplerian difference over a Hohmann transfer (`test_manoeuvres.py`) was
+predicted at `1.0e-5 km` and measured at `1.06e-1 km` — a factor of 10 000, in a test whose whole
+purpose is to notice a factor of 1.03.
+
+**Cause.** The estimate used the *mean* motion `n` as the rate in RK4's per-step phase error
+`(w h)^5 / 120`. A Hohmann transfer has `e = 0.715`, and the instantaneous angular rate at perigee is
+`8.6 n`. The local error goes as the fifth power of that rate, so the perigee arc alone contributes
+`8.6^5 = 4.7e4` times what the mean-motion estimate allows — and the perigee arc is where the
+integrator actually spends its error budget.
+
+**Fix.** Integrate the local error over the orbit instead of evaluating it at an average:
+`(h^4/120) INT w^5 dt = (h^4/120)(H^4/p^8) INT_0^pi (1 + e cos th)^8 dth`, using `dth = w dt` and
+`w = H/r^2`. That gives `1.2e-2 km`, and the measurement is 8.0x it — the remaining factor being the
+order-unity constants dropped (the `1/120` belongs to a scalar linear model) plus along-track growth
+from the accumulated energy error. The assertion is a decade either side of that estimate *plus* the
+measured fourth-order convergence (18.7x and 17.5x per halving of `dt`, ideal 16), which is what
+actually identifies the residue as truncation rather than a manoeuvre bug.
+
+**How to avoid.** For anything that scales as a high power of a rate, an eccentric orbit is not
+characterised by its mean motion. Integrate over the orbit, or evaluate at perigee and accept an
+over-estimate — never at the mean.
+
+---
+
+### Negative controls for the impulsive-manoeuvre suite
+
+Recorded because the test module refers to them, and because control B needs a non-obvious scenario to
+bite at all. Both mutate `src/orbital_engine/manoeuvres.py`, one change each, restored with
+`git checkout --` afterwards.
+
+**A — skip the element re-derivation for analytic bodies** (`coe_rows` emptied before the commit).
+9 tests fail, including every Hohmann assertion and the secular-J2 nodal rate. The failure mode it
+models is the quiet one: the Cartesian state *is* updated, so a single-step inspection looks right,
+and the impulse simply vanishes on the next `step()` when `KeplerianPropagator` rewrites
+`local_states` from the untouched elements.
+
+**B — apply the Delta-v in the inertial frame as though it were RSW** (`dv_cart = dv_rsw`, broadcast).
+6 tests fail. This one is only caught because `scenarios.hohmann_pair` is **inclined and rotated**: at
+`i = raan = arg_pe = theta = 0` the RSW basis coincides with the inertial axes at the departure point
+and the two are numerically identical, so the whole suite would have passed a completely wrong frame.
+The scenario's non-zero attitude is there for exactly this reason and should not be "simplified".
+
+**Lesson.** A negative control can be defeated by a scenario's symmetry rather than by a tolerance.
+Check that the control *would* differ numerically before trusting the test that is supposed to catch
+it — the same class of mistake as the vacuous-tolerance one above, one level further out.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
