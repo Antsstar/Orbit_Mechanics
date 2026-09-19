@@ -82,15 +82,20 @@ Budget: 6.8e-6 + 8e-7 is about 8e-6. `ORBIT_RAISE_REL_TOL = 5e-5` is 6x that.
 
 Negative controls
 -----------------
-Both were applied to `src/orbital_engine/thrust.py` itself, one at a time, and reverted with
+Each was applied to `src/orbital_engine/thrust.py` itself, one at a time, and reverted with
 `git checkout`:
 
-- *Dropping `_M_PER_S2_TO_KM_PER_S2`* (a factor 1e3): every physics test in this file fails.
-- *Flipping the direction sign* (`out[indices] -= ...`): the closed-form, rocket-equation and
-  orbit-raising tests fail; the burnout and registration tests still pass, which is correct - they
-  never look at the sign.
-
-Results are in the handback report and `docs/engineering-log.md`.
+- *Dropping `_M_PER_S2_TO_KM_PER_S2`* (a factor 1e3): 5 failures - both closed-form checks, both
+  rocket-equation checks, and orbit raising (8447 km of raising against 4.53 predicted).
+- *Flipping the direction sign* (`out[indices] -= ...`): 4 failures - both closed-form checks, the
+  rocket equation and orbit raising (`Delta a = -4.53 km`). The burnout, registration and
+  depletion-arithmetic tests still pass, which is correct: they never look at the sign.
+  **This mutant initially escaped the rocket-equation test**, because `|v_powered - v_coasting|` is a
+  magnitude and cannot see a sign. That test now asserts the projection of the twin difference onto
+  `S` as well, before its magnitude.
+- *Transposing the R and S direction columns*: 5 failures, including
+  `test_radial_burn_is_the_axis_control`, which exists for exactly this mutation and which neither of
+  the other two mutants trips.
 """
 from __future__ import annotations
 
@@ -375,8 +380,15 @@ def test_rocket_equation_against_a_thrust_free_twin(db_session: Session) -> None
     assert m1 > float(params[powered, 3])
     assert m0 - m1 == pytest.approx(ROCKET_MDOT * ROCKET_DT * ROCKET_STEPS, rel=1e-12)
 
-    dv_measured = float(np.linalg.norm(
-        _relative_state(sim, powered)[3:] - _relative_state(sim, coasting)[3:]))
+    dv_vector = _relative_state(sim, powered)[3:] - _relative_state(sim, coasting)[3:]
+    dv_measured = float(np.linalg.norm(dv_vector))
+
+    # Direction, before magnitude: the delta-v must lie along +S, the direction that was commanded.
+    # A norm alone cannot see a sign flip, so assert the projection too. S turns by phi = 1.5e-3 rad
+    # over the burn, costing cos(phi) - 1 = -1.1e-6 of the projection; 1e-5 is 9x that.
+    s_hat = _rsw_basis_by_hand(
+        _relative_state(sim, coasting)[:3], _relative_state(sim, coasting)[3:])[1]
+    assert float(dv_vector @ s_hat) / dv_measured == pytest.approx(1.0, abs=1e-5)
 
     dv_exact = ROCKET_ISP * STANDARD_GRAVITY * math.log(m0 / m1) * 1e-3          # km/s
     dv_discrete = float(np.sum(ROCKET_THRUST_N * 1e-3 / np.array(masses)) * ROCKET_DT)
