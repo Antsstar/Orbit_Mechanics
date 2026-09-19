@@ -225,7 +225,8 @@ def altitude_series(positions_km: ArrayFloat, *, body_radius_km: float) -> Array
         pos = pos[:, np.newaxis, :]
     if pos.ndim != 3 or pos.shape[2] != 3:
         raise ValueError(f"positions_km must have shape (n_times, n_bodies, 3), got {pos.shape}.")
-    return cast(ArrayFloat, np.linalg.norm(pos, axis=2) - body_radius_km)
+    altitudes: ArrayFloat = np.linalg.norm(pos, axis=2) - body_radius_km
+    return altitudes
 
 
 def position_error(
@@ -251,7 +252,8 @@ def position_error(
             f"generate truth on the same time grid."
         )
     truth_pos = np.stack([truth.position_of(name) for name in names], axis=1)
-    return cast(ArrayFloat, np.linalg.norm(pos - truth_pos, axis=2))
+    errors: ArrayFloat = np.linalg.norm(pos - truth_pos, axis=2)
+    return errors
 
 
 def error_curve(

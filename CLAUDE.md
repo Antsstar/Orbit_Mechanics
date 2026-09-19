@@ -27,6 +27,18 @@ C:/Users/antss/miniconda3/envs/orbital_env/python.exe
 CI gates on `mypy --strict` across Python 3.10 / 3.11 / 3.12, plus a second job that installs
 *without* numba to gate the fallback path. Both must stay clean.
 
+**Check CI after every push — a local green run is not enough.** The runners resolve their own
+numpy, so `mypy --strict` can fail there while passing here (local numpy 2.4.6, mypy 2.1.0):
+
+```
+gh run list --limit 3                    # newest runs, with status
+gh run view <run-id> --log-failed        # only the failing steps
+```
+
+The recurring case is `redundant-cast`: `cast(ArrayFloat, np.linalg.norm(...))` is needed where the
+stub returns `Any` and redundant where it does not. Prefer an **annotated assignment**
+(`out: ArrayFloat = np.linalg.norm(...); return out`), which satisfies both.
+
 **Coverage is under-reported for `kernels.py`.** `coverage.py` traces bytecode, and `@njit` functions
 run as machine code, so the compiled run shows ~15% for a module that is ~88% covered. Measure it
 with numba disabled — see `docs/engineering-log.md`. Do not write tests to chase that phantom gap.
