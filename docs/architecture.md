@@ -36,6 +36,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
 | `drag.py` | `drag`: atmospheric drag in a co-rotating atmosphere, composable with `point_mass_gravity` and `j2`. The density law is a per-body coefficient, not a hard-coded formula | **new** |
 | `atmosphere.py` | The density laws `drag` chooses between: one exponential band, or Vallado Table 8-4's 28-band piecewise-exponential profile | **new** |
+| `srp.py` | `srp`: cannonball solar radiation pressure from a named light source, with a cylindrical or conical shadow. The shadow geometry is a per-body coefficient, the same way `drag` selects its density law | **new** |
 | `viz.py` | Plot-*data* preparation: trajectory sampling over a time grid, ground tracks via `frames`' body-fixed transforms, altitude series, and error curves against a `reference.py` truth. No matplotlib import, so the library stays installable without it — `benchmarks/figures.py` is the consumer that draws | **new** |
 | `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
 | `manoeuvres.py` | Impulsive Delta-v in RSW, applied now or scheduled at an epoch `step()` splits for. The first physics that is neither a force model nor a propagator, and the first that every propagator can use | **new** |
@@ -548,6 +549,71 @@ coefficient is unmeasured.
 
 **Composition.** Its bit is foreign to `_refresh_cowell_plan`, so any Cowell set that includes a
 `third_body` body runs on the NumPy path. There is no compiled twin.
+
+---
+
+## Solar radiation pressure: the first model with a discontinuity
+
+`srp.py` registers `srp`: the cannonball form `a = -nu C_r P_srp (A/m) (AU/d)^2 u_hat`, where `u_hat`
+points from the body **to** the light source, so the acceleration is anti-sunward, and `nu` in
+`[0, 1]` is the shadow factor. With `drag.py` already in place it completes the comparison an analyst
+actually wants: which perturbation dominates at which altitude. Measured against `atmosphere.py`'s
+Vallado Table 8-4 at `C_r = 1.3`, `C_d = 2.2`, the two are equal at **631 km** - the area-to-mass
+ratio cancels exactly from the balance, so the crossover is a property of `C_r/C_d` and the
+atmosphere alone. The 800 km figure usually quoted assumes an atmosphere about eight times denser
+(elevated solar activity); the crossover moves roughly 140 km per decade of density, so both numbers
+are the same physics under different atmospheres.
+
+**Naming the Sun** reuses `thirdbody.py`'s answer wholesale: a float slot in `force_model_params`,
+given by body *name* in a sweep (`body_coefficients={"source": "Sun"}`) and resolved by
+`apply_config`, validated through the registry's `validate_coefficients` hook. Both `source` and
+`p_srp` are mandatory - an unwritten row would name slot 0 at zero pressure and produce exactly no
+force, which is the plausible-looking silent failure the per-feature contract's item 5 exists to
+catch. The pressure is a coefficient rather than a constant because the literature genuinely forks:
+`S = 1367 W/m^2` gives the usual `4.56e-6 N/m^2`, the IAU 2015 nominal `1361` gives 0.44 % less.
+
+**Two shadow models, selected per body**, exactly as `atmosphere.py` is selected: `shadow_model = 0.0`
+is a cylindrical umbra (the all-zero default), `1.0` is the conical umbra/penumbra computed as the
+occulted fraction of the source's apparent disc. The occulter is the body's Keplerian parent, and
+`r_occ <= 0` means no occulter at all - the right answer for a heliocentric body, and the same
+silent-no-op convention `drag.py` uses for `scale_height <= 0`.
+
+**The cylinder is discontinuous, and that is the model.** `nu` steps between 0 and 1 across a surface
+of zero thickness, so the acceleration jumps by the full `C_r P_srp (A/m) (AU/d)^2`. This is the
+first force model here whose right-hand side is not continuous, and it breaks an assumption RK4
+makes: on the step that straddles the terminator the four stages disagree about which side the body
+is on, the switch is mistimed by up to `h`, and the resulting velocity error is about `Delta_a h / 2`
+per crossing with essentially random sign. That is **first order in `h`**, against RK4's own fourth.
+It is measured rather than argued: over 1.5 orbits with 4 crossings, successive step-halving
+differences fall 4.2x then 1.96x - the 1.96 is the first-order signature, where a smooth problem
+would give 16. The same run without a shadow gives `2.27e-5 km` against the cylinder's `1.55e-4`, so
+the discontinuity is 7x the rest of the error budget, and the conical model's `2.25e-5` is
+indistinguishable from no shadow at all. **That, not the penumbra's extra fidelity, is the reason to
+prefer conical.** The real fix is event detection - stepping exactly to the terminator - and it is
+not built.
+
+**The frozen source**, the approximation `thirdbody.py` derives in full, applies here too and is
+negligible. The fastest-varying part of the geometry is the body's own position, and `RK4Integrator`
+stages that correctly; what the freeze misses is the Sun turning at `1.99e-7 rad/s` as seen from the
+parent, worth about `5e-6 km` per day at `h = 60 s` - four orders below the eclipse crossings.
+Measured end to end, changing `dt` from 40 s to 10 s moves the orbit-scale result by `1.1e-4`
+relative, against a model residual of 0.76 %.
+
+**What it is validated against.** A closed form recomputed in SI, with the direction checked as a
+*vector projection* onto the body-Sun line rather than a magnitude, because a magnitude cannot see a
+sign error. The conical shadow against a one-dimensional numerical quadrature of the disc overlap
+that shares no code with the two-arccos closed form. And at orbit scale, the orbit-averaged Gauss
+rate for the eccentricity *vector* under a constant inertial force, derived from
+`de/dt = [f x h + r (v.f) - f (v.r)]/mu` as `<de/dt> = -(3/2)(h_hat x f)/(n a)` - so the eccentricity
+vector grows **perpendicular** to the force. Over 20 orbits that predicts `|de| = 2.674e-5`; measured
+`2.678e-5`, a vector mismatch of 0.76 % against a budgeted 1-2 %, with `cos = 0.999972`.
+
+**Composition.** Its bit is foreign to `_refresh_cowell_plan`, so a Cowell set containing an `srp`
+body runs on the NumPy path. There is no compiled twin. What it does not model: attitude and flat
+panels, Earth albedo and infrared re-radiation (the largest omission, 10-30 % of direct SRP in LEO),
+thermal re-radiation, Poynting-Robertson, solar limb darkening, and atmospheric refraction into the
+umbra. Only one occulter per body, and it must be the Keplerian parent, so a lunar eclipse of an
+Earth satellite is not modelled.
 
 ---
 
