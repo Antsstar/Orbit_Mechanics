@@ -183,6 +183,7 @@ from orbital_engine.database import Base
 from orbital_engine.drag import DRAG_MODEL, DRAG_PARAM_NAMES, EARTH_OMEGA
 from orbital_engine.geopotential import EARTH_R_EQ
 from orbital_engine.simulator import Simulation
+from orbital_engine.sweep import ForceModelSpec, ModelConfig, apply_config
 
 ArrF = NDArray[np.float64]
 
@@ -595,6 +596,42 @@ def test_the_layered_law_still_disqualifies_the_fused_compiled_cowell_kernel() -
     assert sim._cowell_fused_ok
     sim.enable_force_model(DRAG_MODEL, bodies=sats[0], **_LAYERED_COEFFS)
     assert not sim._cowell_fused_ok
+
+
+@pytest.mark.parametrize(
+    "label, selector, extra",
+    [("exponential", DENSITY_MODEL_EXPONENTIAL,
+      dict(rho0=2e-11, h0=550.0, scale_height=60.0)),
+     ("layered", DENSITY_MODEL_LAYERED, {})],
+)
+def test_a_model_config_can_select_the_density_law_as_plain_sweep_data(
+    label: str, selector: float, extra: Dict[str, float],
+) -> None:
+    """The whole reason the law is a coefficient and not a second registered force model: a sweep
+    expresses the choice as one more key in a `ForceModelSpec`'s `coefficients`, with no new
+    machinery, no second mask bit, and no way for a body to end up carrying both laws at once. This
+    is item 3 of `CLAUDE.md`'s per-feature contract - the model is immediately sweepable - checked
+    through `sweep.apply_config` rather than asserted in prose."""
+    config = ModelConfig(
+        name=f"cowell + drag ({label})", propagator=PropagatorType.COWELL, dt=30.0,
+        force_models=(
+            ForceModelSpec(gravity.POINT_MASS_MODEL),
+            ForceModelSpec(DRAG_MODEL, dict(density_model=selector, **_COMMON_COEFFS, **extra)),
+        ),
+    )
+    sim = scenarios.earth_constellation(_session(), n_sats=4, n_planes=2)
+    sim.record_history = False
+    idx = apply_config(sim, config)
+
+    assert idx.size == 4
+    column = DRAG_PARAM_NAMES.index("density_model")
+    assert np.all(sim.force_model_params[DRAG_MODEL][idx, column] == selector)
+    assert not sim._cowell_fused_ok, "drag of either flavour must keep the fused plan disabled"
+
+    before = sim.global_states[idx].copy()
+    sim.step(config.dt)
+    assert np.all(np.isfinite(sim.global_states[idx]))
+    assert not np.array_equal(sim.global_states[idx], before)
 
 
 def test_drags_citation_and_parameter_layout_carry_the_density_law() -> None:
