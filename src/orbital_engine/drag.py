@@ -18,10 +18,34 @@ For body `i` with parent `P = parent_indices[i]`, let `r = state[i,:3] - state[P
 
     v_rel = v - w x r,        w = (0, 0, omega)          (atmosphere co-rotates about the frame's +z)
     h     = |r| - r_ref
-    rho   = rho0 * exp(-(h - h0) / H)
+    rho   = rho(h)                                       (see "Choosing a density law" below)
     a     = -(1/2) rho B |v_rel| v_rel,    B = C_d A / m
 
 Written out, `w x r = (-omega y, omega x, 0)`, so `v_rel = (vx + omega y, vy - omega x, vz)`.
+
+Choosing a density law
+----------------------
+`rho(h)` is a **per-body model choice**, held in the `density_model` coefficient and implemented in
+`atmosphere.py`:
+
+| `density_model` | law | which coefficients it reads |
+|---|---|---|
+| `0.0` (`DENSITY_MODEL_EXPONENTIAL`, the default) | `rho0 exp(-(h - h0) / H)` | `rho0`, `h0`, `scale_height` |
+| `1.0` (`DENSITY_MODEL_LAYERED`) | piecewise exponential, 28 bands, Vallado Table 8-4 | none of those three |
+
+An unwritten coefficient row is all zeros, so **0.0 is the single-exponential law and every existing
+configuration keeps its previous behaviour bit for bit**. Under the layered law `rho0`, `h0` and
+`scale_height` are ignored entirely - including `scale_height <= 0`, which is a silent no-op only for
+the single-band law, since the layered law has no per-body scale height that could be missing.
+
+The choice is a float coefficient rather than a second registered model, so it is one more key in a
+`sweep.ForceModelSpec`'s `coefficients` mapping and costs no mask bit:
+
+    ForceModelSpec("drag", {"ballistic_coeff": B, "r_ref": EARTH_R_EQ, "omega": EARTH_OMEGA,
+                            "density_model": DENSITY_MODEL_LAYERED})
+
+`validate_coefficients` rejects any value that is not exactly one of the two selectors, so a typo in a
+sweep config raises at configuration time rather than silently rounding to the nearer law.
 
 Citations
 ---------
@@ -31,9 +55,10 @@ Citations
   Mechanics for Engineering Students*, 3rd ed., Sec. 10.2, gives the drag form. **All equation numbers
   are from memory and unverified.** The section numbers are more likely right than the equation
   numbers.
-- Exponential density: Vallado 4e, Sec. 8.6.2, Eq. 8-33 and Table 8-4 (piecewise `h0`, `rho0`, `H`).
-  **Unverified.** This module implements one band of that table; the per-body coefficients are one
-  row of it.
+- Density: Vallado 4e, Sec. 8.6.2, Eq. 8-33 (exponential) and Table 8-4 (the piecewise `h0`, `rho0`,
+  `H` fit). **Unverified.** Under `DENSITY_MODEL_EXPONENTIAL` the per-body coefficients are one row of
+  that table, supplied by the caller; under `DENSITY_MODEL_LAYERED` the whole table is used. See
+  `atmosphere.py` for the table, its citation, and how far it can be trusted.
 
 The physics checks that do not rely on the citations are in `tests/validation/test_drag.py`. They
 are a closed-form acceleration recomputed in SI units, orbit-averaged decay
@@ -52,6 +77,7 @@ Every coefficient follows its usual convention, and the kernel works in engine u
 | `scale_height`  | 3 | km     |
 | `r_ref`         | 4 | km     |
 | `omega`         | 5 | rad/s, signed, about the frame's +z |
+| `density_model` | 6 | selector, dimensionless: 0.0 single exponential, 1.0 layered |
 
 `rho [kg/m^3] * B [m^2/kg]` has units of 1/m, and the engine needs 1/km. **The only unit conversion is
 `_PER_M_TO_PER_KM = 1e3`**, applied once to `rho * B`. Then `(1/km) * (km/s)^2 = km/s^2`. Scale height
@@ -95,22 +121,27 @@ as it is for gravity and J2.
 
 Limitations
 -----------
-- There is a single exponential band. Real density falls by a factor of roughly 5 to 12 per 100 km in LEO, and `H` itself
-  grows with altitude (about 8 km near the ground, 60 km or more above 500 km). One band is accurate
-  over a few scale heights around `h0`. A decaying orbit that crosses several bands needs a
-  piecewise table (Vallado Table 8-4) or NRLMSISE via `pymsis`. Both are out of scope.
-- The model ignores solar and geomagnetic activity, day/night bulge and winds. Those effects are what
-  `pymsis` would add, and they matter more than the table choice does for real prediction.
+- Under `DENSITY_MODEL_EXPONENTIAL` there is a single band. Real density falls by a factor of roughly
+  5 to 12 per 100 km in LEO, and `H` itself grows with altitude (about 8 km near the ground, 60 km or
+  more above 500 km). One band is accurate over a few scale heights around `h0`; a decaying orbit that
+  crosses several bands is not. `DENSITY_MODEL_LAYERED` is the answer to that, and
+  `tests/validation/test_atmosphere.py` measures what the choice costs in predicted decay.
+- Neither law models solar or geomagnetic activity, the day/night bulge or winds. Those effects are
+  what `pymsis` would add, and they matter more for real prediction than the choice of density law
+  does - see `atmosphere.py`'s "Not modelled".
 - Nothing stops the orbit when it reaches `h < 0`. The density grows exponentially, and the RK4 step
   eventually fails.
 """
 from __future__ import annotations
 
-from typing import Final, TYPE_CHECKING
+from typing import Final, Mapping, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
+from .atmosphere import (
+    DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, exponential_density, layered_density,
+)
 from .custom_types import ScalarSeconds
 from .geopotential import barycentre_parented
 from .registry import register_force_model
@@ -120,16 +151,20 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DRAG_MODEL", "DRAG_PARAM_NAMES", "EARTH_OMEGA", "drag_kernel",
+    "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED",
 ]
 
 DRAG_MODEL: Final[str] = "drag"
-DRAG_PARAM_NAMES: Final = ("ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega")
+DRAG_PARAM_NAMES: Final = (
+    "ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega", "density_model",
+)
 _B_COL: Final[int] = 0
 _RHO0_COL: Final[int] = 1
 _H0_COL: Final[int] = 2
 _SCALE_HEIGHT_COL: Final[int] = 3
 _R_REF_COL: Final[int] = 4
 _OMEGA_COL: Final[int] = 5
+_DENSITY_MODEL_COL: Final[int] = 6
 
 # rho [kg/m^3] * B [m^2/kg] is 1/m; the engine wants 1/km. This is the model's only unit conversion.
 _PER_M_TO_PER_KM: Final[float] = 1.0e3
@@ -150,14 +185,40 @@ def _reject_barycentre_parents(sim: "Simulation", bodies: NDArray[np.int64]) -> 
         )
 
 
+_DENSITY_MODELS: Final = (DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED)
+
+
+def _reject_unknown_density_model(
+    sim: "Simulation", bodies: NDArray[np.int64], coefficients: Mapping[str, float],
+) -> None:
+    """
+    `validate_coefficients` hook for `"drag"`: `density_model` must be exactly one of the two
+    selectors in `atmosphere.py`.
+
+    The kernel dispatches on `>= 0.5`, so an unrecognised value such as `2.0` would otherwise pick
+    the layered law silently - a config typo that changes the physics and raises nothing, which is
+    precisely the failure mode `CLAUDE.md`'s item 5 exists to catch. Omitting the coefficient is
+    still legal and still means the single exponential, so no existing call site is affected.
+    """
+    requested = coefficients.get("density_model")
+    if requested is not None and float(requested) not in _DENSITY_MODELS:
+        raise ValueError(
+            f"force model '{DRAG_MODEL}': density_model={requested!r} is not a known density law; "
+            f"use atmosphere.DENSITY_MODEL_EXPONENTIAL ({DENSITY_MODEL_EXPONENTIAL}) or "
+            f"atmosphere.DENSITY_MODEL_LAYERED ({DENSITY_MODEL_LAYERED})."
+        )
+
+
 @register_force_model(
     DRAG_MODEL,
     param_names=DRAG_PARAM_NAMES,
     validate_bodies=_reject_barycentre_parents,
+    validate_coefficients=_reject_unknown_density_model,
     citation=(
         "Vallado, Fundamentals of Astrodynamics and Applications, 4th ed., Sec. 8.6.2, Eq. 8-28/8-29 "
-        "(drag, v_rel = v - w x r) and Eq. 8-33 (exponential density); Montenbruck & Gill, Satellite "
-        "Orbits, Eq. 3.97/3.98. Equation numbers from memory, unverified."
+        "(drag, v_rel = v - w x r), Eq. 8-33 (exponential density) and Table 8-4 (the piecewise "
+        "table in atmosphere.py); Montenbruck & Gill, Satellite Orbits, Eq. 3.97/3.98. Equation and "
+        "table numbers from memory, unverified."
     ),
 )
 def drag_kernel(
@@ -172,6 +233,11 @@ def drag_kernel(
     """
     Add `-(1/2) rho(h) B |v_rel| v_rel` to `out[indices]`, km/s^2, with `v_rel = v - w x r` measured
     against each body's Keplerian parent and `w = omega z_hat`.
+
+    `rho(h)` is whichever law the row's `density_model` coefficient selects - `atmosphere.py`'s
+    single exponential (0.0, the default) or its 28-band piecewise table (1.0). Both laws are
+    evaluated for every row and masked, which keeps the kernel branch-free over a mixed arena where
+    different bodies have been configured with different atmospheres.
 
     Coefficient units and the single conversion (`_PER_M_TO_PER_KM`) are in the module docstring.
     `t` and `mu_array` are unused: the atmosphere is steady in the frame co-rotating with the parent.
@@ -192,13 +258,21 @@ def drag_kernel(
 
     altitude = np.sqrt(r2) - coeff[:, _R_REF_COL]
 
-    # Rows with no scale height or no separation contribute exactly zero. The exponential is not
-    # evaluated there, so an unconfigured row (H = 0) or a root body (r = 0, which would put h far
-    # below h0) can neither divide by zero nor overflow.
-    valid = (scale_height > 0.0) & (r2 > 0.0)
-    exponent = np.divide(altitude - coeff[:, _H0_COL], scale_height,
-                         out=np.zeros_like(r2), where=valid)
-    density = np.exp(-exponent, out=np.zeros_like(r2), where=valid) * coeff[:, _RHO0_COL]  # kg/m^3
+    # Which density law each row uses. The two masks partition the rows, so exactly one of the two
+    # terms below is non-zero per row and the sum is a branchless select - no `np.where` over a
+    # freshly allocated pair, and no `if np.any(...)` guard (`CLAUDE.md`, Conventions).
+    #
+    # Rows with no separation contribute exactly zero under either law, and a row with no scale
+    # height contributes zero under the single-band law only (an unconfigured row, H = 0). Neither
+    # exponential is evaluated on an excluded row, so a root body (r = 0, altitude = -r_ref, which
+    # would overflow `exp`) can neither divide by zero nor overflow.
+    separated = r2 > 0.0
+    use_layered = coeff[:, _DENSITY_MODEL_COL] >= 0.5
+    density = (                                                                       # kg/m^3
+        exponential_density(altitude, coeff[:, _RHO0_COL], coeff[:, _H0_COL], scale_height,
+                            separated & ~use_layered & (scale_height > 0.0))
+        + layered_density(altitude, separated & use_layered)
+    )
 
     # 0.5 * rho [kg/m^3] * B [m^2/kg] * 1e3 -> 1/km; times |v_rel| [km/s] times v_rel [km/s].
     k = 0.5 * density * coeff[:, _B_COL] * _PER_M_TO_PER_KM * speed
