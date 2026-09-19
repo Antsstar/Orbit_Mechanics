@@ -60,6 +60,56 @@ with the NumPy re-base those were 17 and 24 µs.
 
 ---
 
+## The gallery
+
+`orbital_engine.viz` turns a simulation and a time grid into plottable arrays — ground tracks,
+altitude series, error curves — with no plotting dependency of its own, exactly as `sweep.py` has
+none. `benchmarks/figures.py` imports matplotlib and draws these:
+
+### Ground tracks
+
+![Ground tracks](docs/figures/ground_tracks.png)
+
+Twelve satellites, three planes, 550 km / 53°, over 24 hours, Cowell + `point_mass_gravity` + `j2`
+at a 60 s step, projected onto a co-rotating Earth. Each revolution's equator crossing is **24.19°
+further west** than the last. Earth rotation alone accounts for 23.94° of that; the remaining 0.25°
+is J2, which regresses the node westward and shortens the period. Turn `j2` off and the engine gives
+−23.94089563° against a predicted −23.94089577° — an assertion in `tests/validation/test_viz.py`.
+
+### Error growth by model tier
+
+![Error growth](docs/figures/error_growth.png)
+
+The time axis the frontier scatter collapses to a single point per tier. The final medians reproduce
+the frontier's own numbers — 607.61 km, 431.31 km, 4.04 km — and the shape adds what the scatter
+cannot show: **the mean-seeded curve is flat.** Its 4 km is a bounded short-period oscillation that
+an averaged theory cannot represent, not an error that accumulates. Kepler and the osculating-seeded
+tier grow without bound, and Cowell's curve is RK4 truncation.
+
+### Drag decay
+
+![Drag decay](docs/figures/drag_decay.png)
+
+Two identical 550 km satellites over 20 orbits, one with `drag.py`'s exponential atmosphere enabled.
+The measured drop is **3.6586 km against an orbit-averaged closed form of 3.6600 km**, a ratio of
+0.9996. That closed form is derived independently in the figure script and carries two effects the
+plot exists to make visible: the prograde co-rotation factor *f* = 0.8714, and the density feedback
+as the orbit descends, which alone raises the mean rate 3.1% above the initial tangent. The control
+holds altitude to 1 × 10⁻⁴ km.
+
+### The two parent graphs
+
+![Hierarchy](docs/figures/hierarchy.png)
+
+`sun_earth_moon` over 60 days, drawn in the barycentric frame. Neither the Earth nor the Moon is the
+other's Keplerian parent: both are measured about the Earth-Moon barycentre, which is the body
+carrying the heliocentric ellipse. The Earth also *heads* that system, so its own element row is
+deliberately zeroed — its motion is not an orbit but a 4697 km reflex kick, entirely inside its own
+surface. The measured radius ratio equals μ_Moon/μ_Earth to **8 × 10⁻¹⁵**, which is the barycentric
+model's defining invariant drawn rather than asserted.
+
+---
+
 ## What is in the engine
 
 **Architecture**
@@ -206,11 +256,12 @@ Orbit_Mechanics/
 ├── .github/workflows/       # Multi-version CI, plus a job without Numba
 ├── benchmarks/
 │   ├── bench_step.py        # Step-cost instrument: propagator comparison, scaling, breakdown
+│   ├── figures.py           # Ground tracks, error growth, drag decay, hierarchy
 │   └── frontier_plot.py     # Runs the sweep and writes docs/figures/frontier.png
 ├── docs/
 │   ├── architecture.md      # Why the engine is shaped this way
 │   ├── engineering-log.md   # Problems hit and how they were resolved
-│   ├── figures/
+│   ├── figures/             # frontier.png plus the gallery
 │   ├── flashcards/          # Anki decks and exporter
 │   └── historical/          # Superseded design documents, kept for provenance only
 ├── notebooks/               # Derivations and visualisation
@@ -224,6 +275,7 @@ Orbit_Mechanics/
 │   ├── geopotential.py      # j2
 │   ├── registry.py          # Force-model and propagator registration
 │   ├── sweep.py             # Model configurations as data; error and timing statistics
+│   ├── viz.py               # Plot-data preparation: ground tracks, altitude, error curves
 │   ├── reference.py         # Independent DOP853 truth, optionally with J2 (SciPy, optional)
 │   ├── scenarios.py         # Scenario builders shared by tests and benchmarks
 │   ├── frames.py            # Coordinate and state-space transformations, RSW
@@ -255,6 +307,7 @@ on NumPy without either.
 pytest                               # test suite
 mypy src/ --strict                   # type checking
 python benchmarks/frontier_plot.py   # regenerate the frontier figure (about a minute)
+python benchmarks/figures.py         # regenerate the gallery (about a minute)
 python benchmarks/bench_step.py      # step-cost benchmarks
 ```
 

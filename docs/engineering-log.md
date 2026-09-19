@@ -876,6 +876,34 @@ perturbation of the truth itself.
 
 ---
 
+## `ReferenceFrames.inertia_to_fixed` takes the negative of the rotation angle you want
+
+**Symptom.** A ground track built with `inertia_to_fixed(r, v, theta)` where `theta = omega_E * t`
+comes out perfectly smooth, perfectly periodic, with correct latitudes and correct altitudes — and
+drifts *east* at 23.94 deg per revolution instead of west. Nothing raises. Every shape-based check
+passes.
+
+**Cause.** `Transformations.Rz(theta)` is an **active** vector rotation: `Rz(t) @ v` turns `v`
+counter-clockwise by `t` in a fixed frame. `inertia_to_fixed` applies exactly that, `Rz(theta) @ r_i`.
+But expressing an inertial vector in the coordinates of a frame whose own axes have turned by
+`+theta` is the *passive* transform, `Rz(-theta) @ r_i` — the inverse. So the argument that produces
+a body-fixed position is `-theta`, not `theta`. Checked directly: an inertial `(1, 0, 0)` with the
+body turned 90 deg must read longitude −90 deg, and `inertia_to_fixed(..., +pi/2)` gives +90 deg.
+
+**Fix.** `viz.ground_track` passes `-theta_full`, with the reason in the module docstring. The guard
+is `tests/validation/test_viz.py`'s **signed** drift assertion: the unwrapped longitude over one
+period must advance `2 pi - omega_E T`, not just change by `omega_E T` in magnitude. Two negative
+controls confirm it discriminates — dropping the rotation (`theta = 0`) fails 2 of the 18 viz tests,
+and flipping the sign fails 3 (the extra one being the `theta0` rigid-offset test). Every other viz
+test passes under both mutations, which is the point: only the signed drift assertions see it.
+
+**Lesson.** Where a transform's name does not say active or passive, verify the sign against a
+hand-computed case before building on it, and pin it with an assertion whose sign matters. A
+shape-only check — latitude bounded by inclination, altitude constant, track periodic — passes
+happily on a frame rotating the wrong way.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
