@@ -46,6 +46,19 @@ descends, which alone raises the mean rate 3.1% above the initial tangent -0.177
 control holds altitude to 1e-04 km. Both run Cowell; the drag one falls to the NumPy path, because
 the fused compiled twin carries only point-mass gravity and J2.
 
+**5. `atmosphere.png` - caption.** The two density laws `drag.py` can be configured with, drawn
+against altitude on a log density axis, with their ratio below. The single band is matched to the
+table at 355 km with H = 60 km - the "one number for LEO" choice a user actually makes. Below the
+match the table is denser and increasingly so (1.07x at 320 km, 5.2x at 165 km), because every one of
+its scale heights down there is under 60 km. Above the match the relationship *reverses and then
+reverses again*: the table is thinner at 480 km (its H is still 58-61 km) and 2.9x denser by 830 km
+(its H has grown to 125 km), crossing back through 1 between 600 and 700 km. No single exponential
+reproduces that shape at any choice of H, which is the whole argument for the table. The shaded band
+marks the altitudes the decay comparison in `tests/validation/test_atmosphere.py` traverses: over 3
+days from 355 km at B = 0.4 m^2/kg the table predicts 116.25 km of decay against the single band's
+89.20 km, a difference of 27.06 km, or 30 % more. The 28 band boundaries are the ticks on the ratio
+panel - the kinks in the curve are real and are what `np.searchsorted` is selecting between.
+
 **4. `hierarchy.png` - caption.** `sun_earth_moon` over 60 days, drawn in the frame that makes the
 hierarchy visible: relative to the Earth-Moon barycentre. Neither body's `parent_indices` parent is
 the other - both are measured about the barycentre, which is itself the body carrying the
@@ -73,6 +86,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from orbital_engine import scenarios, viz
+from orbital_engine.atmosphere import (
+    BASE_ALTITUDE_KM, DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, layered_density,
+)
 from orbital_engine.custom_types import PropagatorType
 from orbital_engine.database import Base
 from orbital_engine.drag import DRAG_MODEL, EARTH_OMEGA
@@ -532,12 +548,92 @@ def figure_hierarchy() -> None:
 
 
 # ==================================================================================================
+# 5. atmosphere.png
+# ==================================================================================================
+
+# The decay comparison's scenario, mirrored from `tests/validation/test_atmosphere.py` so the figure
+# and the test describe the same choice. Nothing here re-derives physics; the test owns that.
+ATM_MATCH_KM = 355.0
+ATM_SINGLE_H_KM = 60.0
+ATM_DECAY_LOW_KM = 238.75     # where the layered satellite ends after 3 days
+ATM_DECAY_LAYERED_KM = -116.25
+ATM_DECAY_SINGLE_KM = -89.20
+
+
+def figure_atmosphere() -> None:
+    # From 100 km up: below that the two laws differ by factors of 1e9, which would flatten the
+    # ratio panel into a straight line, and nothing orbits there anyway.
+    altitude = np.arange(100.0, 1000.01, 0.5)
+    table = layered_density(altitude)
+    rho_match = float(layered_density(np.array([ATM_MATCH_KM]))[0])
+    single: ArrF = rho_match * np.exp(-(altitude - ATM_MATCH_KM) / ATM_SINGLE_H_KM)
+    ratio = table / single
+
+    # Two crossings: the match itself, and the one above it where the table overtakes the single
+    # band again as its scale heights grow past 60 km. The second is the interesting one.
+    crossings = altitude[np.flatnonzero(np.diff(np.signbit(ratio - 1.0)))]
+    reversal = float(crossings[-1])
+    print(f"  matched at {ATM_MATCH_KM:.0f} km: rho = {rho_match:.4e} kg/m^3, "
+          f"agreement {abs(ratio[np.argmin(abs(altitude - ATM_MATCH_KM))] - 1.0):.2e}")
+    print(f"  ratio crossings through 1: {np.round(crossings, 1).tolist()} km")
+    print(f"  ratio at 165 / 320 / 480 / 830 km: "
+          f"{[round(float(ratio[np.argmin(abs(altitude - h))]), 3) for h in (165, 320, 480, 830)]}")
+
+    fig, (ax, ax_r) = plt.subplots(
+        2, 1, figsize=(9.0, 7.4), sharex=True, gridspec_kw={"height_ratios": [2.4, 1.0]})
+
+    for axis in (ax, ax_r):
+        axis.axvspan(ATM_DECAY_LOW_KM, ATM_MATCH_KM, color="0.85", zorder=0)
+    ax.semilogy(altitude, table, lw=1.5, color="tab:blue",
+                label="layered: Vallado Table 8-4, 28 bands")
+    ax.semilogy(altitude, single, lw=1.5, color="tab:red", ls="--",
+                label=f"single band, matched at {ATM_MATCH_KM:.0f} km, H = {ATM_SINGLE_H_KM:.0f} km")
+    ax.scatter([ATM_MATCH_KM], [rho_match], s=45, zorder=4, color="k", label="the matched altitude")
+    ax.set_ylabel("density (kg/m$^3$)")
+    ax.set_title("Two density laws the `drag` model can be configured with")
+    ax.grid(True, ls=":", alpha=0.5, which="both")
+    ax.legend(loc="upper right", fontsize=9)
+
+    ax_r.plot(altitude, ratio, lw=1.5, color="tab:purple")
+    ax_r.axhline(1.0, lw=1.0, color="0.4", ls="--")
+    ax_r.scatter(crossings, np.ones_like(crossings), s=35, zorder=4, color="tab:purple")
+    for base in BASE_ALTITUDE_KM[BASE_ALTITUDE_KM <= 1000.0]:
+        ax_r.axvline(float(base), lw=0.6, color="0.75", zorder=0)
+    ax_r.set_yscale("log")
+    ax_r.set_xlabel("altitude above 6378.137 km (km)")
+    ax_r.set_ylabel("layered / single band")
+    ax_r.set_xlim(100.0, 1000.0)
+    ax_r.set_ylim(0.5, 20.0)
+    ax_r.grid(True, ls=":", alpha=0.5, which="both")
+
+    fig.text(
+        0.01, 0.005,
+        f"Shaded: the altitudes the 3-day decay comparison in "
+        f"tests/validation/test_atmosphere.py traverses.\n"
+        f"It measures what the choice costs: "
+        f"{ATM_DECAY_LAYERED_KM:.2f} km of decay under the table\n"
+        f"against {ATM_DECAY_SINGLE_KM:.2f} km under the single band, a difference of "
+        f"{ATM_DECAY_LAYERED_KM - ATM_DECAY_SINGLE_KM:.2f} km "
+        f"({100 * (ATM_DECAY_LAYERED_KM / ATM_DECAY_SINGLE_KM - 1):.0f} % more). Thin vertical lines "
+        f"are the 28 band boundaries.\n"
+        f"Above the match the ratio crosses 1 again at {reversal:.0f} km: below the match every "
+        f"table scale height is under 60 km,\n"
+        f"above it they grow past 60 km - so a single band is wrong in both directions, and in "
+        f"opposite senses.",
+        fontsize=8, va="bottom",
+    )
+    fig.tight_layout(rect=(0, 0.085, 1, 1.0))
+    _save(fig, "atmosphere.png")
+
+
+# ==================================================================================================
 
 FIGURES: Dict[str, Callable[[], None]] = {
     "ground": figure_ground_tracks,
     "error": figure_error_growth,
     "drag": figure_drag_decay,
     "hierarchy": figure_hierarchy,
+    "atmosphere": figure_atmosphere,
 }
 
 

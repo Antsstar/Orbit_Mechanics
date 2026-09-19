@@ -943,6 +943,70 @@ rather than widen the tolerance.
 
 ---
 
+## A validation check can be blind to the mutant it was written to catch
+
+**Symptom.** A negative control on `atmosphere.py` - `np.searchsorted(...) - 1` changed to `- 2`, a
+textbook off-by-one band index - was caught by six tests but *not* by
+`test_the_two_laws_agree_where_matched_and_diverge_away_from_it`, which compares the layered density
+law against a matched single exponential at 300, 250, 200 and 150 km.
+
+**Cause.** Those are all band *base* altitudes, and the table is continuous. Reading the band below
+and extrapolating it up to the next band's base altitude reproduces that band's density exactly - that
+is what continuity *means*. So at every altitude the test sampled, the off-by-one was invisible by
+construction.
+
+**Fix.** Sample 320/275/225/165 km and 480/650/830 km instead, deliberately off every boundary. The
+mutant then fails it.
+
+**How to avoid.** When a piecewise function is continuous, its *knots* are the worst places to test
+the knot-finding logic. Sample between them. More generally: run the negative control before trusting
+a test's description of what it catches - this test's docstring claimed to catch the off-by-one and
+the docstring was wrong, which code review would not have found.
+
+---
+
+## A derivation wrong four times in one test module, each caught by an assertion
+
+**Symptom.** The first run of `tests/validation/test_atmosphere.py` failed four tests. None was a
+kernel bug; all four were errors in the *expected* values written before measuring.
+
+**Cause and fix**, one at a time, because the failure modes are all different:
+
+1. *Wrong sign in a closed form.* `Delta a = H ln(1 - k t / H)` was written as `-H ln(...)`. Since
+   `k t < H` the logarithm is already negative, so the extra minus made a decay read as a climb.
+2. *An incomplete physical argument.* "The table is thinner than a 60 km single band above the match"
+   is true at 450 km and false at 800 km: the table's scale heights start below 60 and grow past it,
+   so the ratio dips under 1 and crosses back. The real behaviour is more interesting than the
+   assumption and is now what the test asserts.
+3. *Overstated discriminating power.* The comment claimed reading the wrong band changes density by
+   "1.4x or more". Because the table is continuous, it is 1.9 % to 3.3 % locally, and at most ~25 %
+   anywhere. Still caught at a 1e-13 tolerance, but the claim was false.
+4. *Hand arithmetic.* Two constants computed by hand - a co-rotation factor and a density ratio - were
+   simply wrong in the third digit.
+
+**How to avoid.** This is item 5 of the per-feature contract working exactly as intended: every one of
+these would have shipped silently as a plausible number if the expected magnitude had not been written
+down first. The discipline that matters is *writing the derivation into the assertion*, not getting
+the derivation right the first time. When derivation and measurement disagree, fix whichever is wrong
+- three of these four were the derivation.
+
+---
+
+## A shared scratchpad is not private to your session
+
+**Symptom.** A helper script at `<scratchpad>/run.py`, holding the worktree's absolute path for the
+`PYTHONPATH` trick, was silently overwritten mid-session with a different worktree's path by a
+concurrent agent. Running it would have imported and tested *another agent's* source tree while
+reporting success.
+
+**Cause.** The per-session scratchpad directory is shared between concurrently running agents on this
+project, despite being described as session-specific.
+
+**Fix.** Name helper scripts with the worktree's own suffix - `run_a921732a.py` - so two sessions
+cannot collide, and re-check `orbital_engine.__file__` after any surprise.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

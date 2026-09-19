@@ -34,7 +34,8 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `geopotential.py` | `j2`: the J2 zonal perturbation only, composable with `point_mass_gravity` | **new** |
 | `thirdbody.py` | `third_body`: one named perturber's point-mass pull, direct minus indirect, relative to the parent | **new** |
 | `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
-| `drag.py` | `drag`: atmospheric drag in a co-rotating, single-exponential atmosphere, composable with `point_mass_gravity` and `j2` | **new** |
+| `drag.py` | `drag`: atmospheric drag in a co-rotating atmosphere, composable with `point_mass_gravity` and `j2`. The density law is a per-body coefficient, not a hard-coded formula | **new** |
+| `atmosphere.py` | The density laws `drag` chooses between: one exponential band, or Vallado Table 8-4's 28-band piecewise-exponential profile | **new** |
 | `viz.py` | Plot-*data* preparation: trajectory sampling over a time grid, ground tracks via `frames`' body-fixed transforms, altitude series, and error curves against a `reference.py` truth. No matplotlib import, so the library stays installable without it — `benchmarks/figures.py` is the consumer that draws | **new** |
 
 ---
@@ -451,10 +452,70 @@ atmosphere. The reasons are the same: one setter, and per-body sweeps in a singl
 `VesselORM.drag_area` and `dry_mass` could supply `B` at ingest, but a drag coefficient `C_d` is not
 stored, so `B` is an explicit coefficient for now.
 
-**What it does not do.** There is one exponential band, a spherical altitude `|r| - r_ref`, no solar or
-geomagnetic activity, and no diurnal bulge. A decaying orbit that crosses several scale heights needs
-a piecewise table or `pymsis`. The fused compiled Cowell twin does not include drag, so enabling it
-on any Cowell body sends the whole Cowell set down the NumPy path.
+**What it does not do.** Spherical altitude `|r| - r_ref`, no solar or geomagnetic activity, and no
+diurnal bulge. The fused compiled Cowell twin does not include drag, so enabling it on any Cowell body
+sends the whole Cowell set down the NumPy path.
+
+---
+
+## The atmosphere: making a model *choice* into data
+
+`atmosphere.py` exists because this repo is a model-fidelity comparison engine, and "which atmosphere"
+is exactly the kind of axis it should be able to sweep. Drag previously had one density law welded into
+its kernel. Now it has two, and the choice is a number on a body's row.
+
+**Why a coefficient and not a second registered force model.** `"drag_layered"` as its own registered
+model would have been the obvious move and is the wrong one. It would consume a second of the 64 mask
+bits for physics that is the *same* force; it would let a body carry both laws at once, silently
+double-counting drag with no validation able to see it; and it would need `_refresh_cowell_plan`'s
+foreign-bit set updated, coupling a density table to the compiled dispatch plan. A `density_model`
+column costs no bit, is mutually exclusive by construction, and rides through
+`sweep.ForceModelSpec(...).coefficients` with no new machinery at all:
+
+    ForceModelSpec("drag", {"ballistic_coeff": B, "r_ref": EARTH_R_EQ, "omega": EARTH_OMEGA,
+                            "density_model": DENSITY_MODEL_LAYERED})
+
+**Why `0.0` is the old law.** `force_model_params` rows are zero-filled on allocation, so a
+configuration written before the layered law existed selects the single exponential without being
+touched, and `test_drag.py` still passes unchanged. That is a deliberate convention, not a
+coincidence: any future selector column added to any model should be numbered so that zero means "what
+this model did before".
+
+**Why the kernel evaluates both laws and masks, rather than branching.** A `Simulation` can hold bodies
+on different laws at once, so a branch would have to be per body. Two masked NumPy expressions summed
+(the masks partition the rows, so exactly one term is non-zero each) keeps the kernel branch-free and
+avoids `CLAUDE.md`'s warning against `if np.any(mask):` guards on arena-sized arrays. The band lookup
+is one `np.searchsorted` over the whole set.
+
+**How much the table can be trusted.** It was transcribed from memory, like every other citation in
+this repo that is marked unverified, so it carries an internal check instead of an appeal to
+authority: a piecewise-exponential *fit* is continuous, and 27 interior boundaries close to better
+than 1e-4 - three independently remembered numbers per band cannot satisfy 27 constraints by accident.
+One boundary does not: 0-25 km closes to 1.4e-3 against a 7.7e-4 rounding bound, and it is asserted as
+a named anomaly rather than folded into the tolerance. Nothing orbits at 25 km, and the check that
+matters for orbits is that every boundary from 30 km up is inside 1e-4.
+
+**What the choice costs, which is the point.** Two identical satellites, 3 days from 355 km at
+`B = 0.4 m^2/kg`, one on the table and one on a single band matched to the table at 355 km with
+`H = 60 km`: the table predicts **116.25 km** of decay against the single band's **89.20 km**, a
+difference of **27.06 km**, or 30 % more decay. The sign is derivable before it is measured - every
+table scale height between 355 and 239 km is under 60 km, so the table is denser all the way down -
+and the size is bracketed by the closed form `Delta a = H ln(1 - k t / H)`, which gives -89.7 km at
+`H = 60` and -110.2 km at the starting band's `H = 53.3`. Each satellite also matches its *own*
+orbit-averaged mean ODE to 1.9e-4 against a derived 8e-4 budget, so the comparison is between two
+validated models rather than between a model and a bug. This is a **comparison**, in the sense of the
+Validation layers section: the divergence is the result.
+
+Above the match the relationship reverses and then reverses again - the table is thinner at 480 km
+(its `H` there is still under 60) and 2.9x denser by 830 km (its `H` is 125 km by then). A single band
+cannot reproduce that shape at any choice of `H`, which is the whole argument for the table. The first
+draft of the test asserted a monotone divergence in both directions and was wrong.
+
+**Still not modelled**, by either law: solar and geomagnetic activity, the diurnal bulge, winds,
+seasonal and latitudinal variation. Real density at 400 km swings by more than an order of magnitude
+over a solar cycle, which is larger than the gap between the two laws offered here. `pymsis`
+(NRLMSISE-00) is the right dependency for that and `CLAUDE.md` forbids reimplementing it. No compiled
+twin: drag is not in the fused plan, so a compiled density law would have nothing to plug into.
 
 ---
 

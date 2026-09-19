@@ -69,14 +69,14 @@ rounding at `h0` and nowhere else. This is a **comparison** in `CLAUDE.md`'s sen
 the result, not a bug.
 
 *Below the match* the direction is unambiguous: every table scale height between 355 km and the ground
-is smaller than 60 km, so the table is denser, increasingly so with depth - 1.12x at 300 km, rising to
-3.6x at 150 km.
+is smaller than 60 km, so the table is denser, increasingly so with depth - 1.07x at 320 km, rising to
+5.2x at 165 km.
 
 *Above the match it reverses, and then reverses again*, which the first draft of this module got
 wrong. The table's scale heights just above 355 km are 53.3 and 58.5 km, still under 60, so the table
-is initially **thinner** - 0.89x at 450 km. But they keep growing (63.8 km at 500, 88.7 at 700, 181 at
+is initially **thinner** - 0.90x at 480 km. But they keep growing (63.8 km at 500, 88.7 at 700, 181 at
 900), and once the table's accumulated `integral dh/H` falls below `h/60` the ratio crosses back
-through 1, somewhere between 600 and 800 km, reaching 2.2x at 800 km. A single exponential band cannot
+through 1, once, between 600 and 700 km, reaching 2.9x at 830 km. A single exponential band cannot
 reproduce that shape at all, which is the whole argument for the table.
 
 4. What the choice of density law costs in predicted decay
@@ -133,18 +133,32 @@ with the endpoint landing at a favourable phase rather than the worst one.
 
 Negative controls
 -----------------
-Each mutation below was applied to `src/orbital_engine/atmosphere.py`, the suite run, and the file
-restored from git:
+Each mutation below was applied to the real `src/orbital_engine/atmosphere.py`, this module and
+`test_drag.py` were run, and the file was restored from git.
 
-- *off-by-one band index* (`searchsorted(...) - 1` -> `- 2`): fails
-  `test_vectorised_band_lookup_matches_an_independent_scalar_reference`,
-  `test_the_two_laws_agree_where_matched_and_diverge_away_from_it`,
-  `test_density_at_a_band_base_altitude_is_that_bands_tabulated_value` and the decay comparison.
-- *sign flip in the band exponent* (`np.exp(-exponent)` -> `np.exp(exponent)`): fails the scalar
-  reference, the monotonicity check, the matched-law check and the decay comparison.
+- *off-by-one band index* (`searchsorted(..., side="right") - 1` -> `- 2`) - **7 failures**: the
+  scalar-reference lookup, the base-altitude values, monotonicity, the masked-row check, the
+  matched-single-band comparison, the hand-computed closed form, and the decay comparison.
+- *sign flip in the band exponent* (`np.exp(-exponent)` -> `np.exp(exponent)`) - **6 failures**: the
+  scalar-reference lookup, monotonicity, the matched-single-band comparison, the closed form, and
+  both decay tests (the orbit reaches `exp` overflow and the state goes non-finite).
 
-Neither mutant is caught by the continuity check, which reads the table arrays directly and never
-touches the lookup - the two halves of this module test genuinely different things.
+Three things that did *not* fail are worth recording, because they say what each check is for:
+
+- **All ten of `test_drag.py`'s tests pass under both mutants.** The single-exponential path shares no
+  code with the layered one, which is the backwards-compatibility claim, demonstrated rather than
+  asserted.
+- **The continuity check survives both.** It reads `BASE_*` directly and never calls the lookup. It
+  tests the 28 transcribed rows; the scalar reference tests the lookup. Two different bugs.
+- **`test_the_two_laws_agree_where_matched_and_diverge_away_from_it` survived the off-by-one in its
+  first draft**, because it sampled 300/250/200/150 km - all *base* altitudes, where the table's own
+  continuity makes reading one band away give exactly the right answer. It now samples 320/275/225/165
+  and 480/650/830 km instead, and fails. That near miss is the reason the grid check exists at all.
+- `test_decay_under_each_density_law_matches_its_own_orbit_averaged_rate` does not fail under the
+  off-by-one, and cannot: its mean ODE calls `layered_density` too, so both sides move together. It
+  validates the *propagated* decay against the *orbit-averaged* decay for a given density law - it is
+  not, and is not meant to be, an independent check of the density law itself. That is what the
+  scalar reference and the hand-computed closed form are for.
 """
 from __future__ import annotations
 
@@ -446,26 +460,29 @@ def test_the_two_laws_agree_where_matched_and_diverge_away_from_it() -> None:
     matched = float(layered_density(np.array([H_START_KM]))[0])
     assert matched == pytest.approx(_single_band_density(H_START_KM), rel=1e-15)
 
-    below = np.array([300.0, 250.0, 200.0, 150.0])
+    # Deliberately *off* the band base altitudes. At a base altitude the table is continuous, so
+    # reading one band away reproduces exactly the right density and an off-by-one lookup is
+    # invisible - the first draft sampled 300/250/200/150 and the off-by-one mutant sailed through.
+    below = np.array([320.0, 275.0, 225.0, 165.0])
     ratio_below = layered_density(below) / np.array([_single_band_density(float(h)) for h in below])
     assert np.all(ratio_below > 1.0) and np.all(np.diff(ratio_below) > 0.0), (
         f"the table must be denser below the match, increasingly so: {ratio_below}")
     # Size of the divergence, so the test fails if the two laws quietly become the same law.
-    assert ratio_below[0] == pytest.approx(1.116, abs=0.005), "1.116x at 300 km"
-    assert ratio_below[-1] > 3.0, f"at 150 km the laws differ by only {ratio_below[-1]:.2f}x"
+    assert ratio_below[0] == pytest.approx(1.0724, abs=0.002), "1.072x at 320 km"
+    assert ratio_below[-1] == pytest.approx(5.17, abs=0.05), "5.2x at 165 km"
 
-    above = np.array([450.0, 600.0, 800.0])
+    above = np.array([480.0, 650.0, 830.0])
     ratio_above = layered_density(above) / np.array([_single_band_density(float(h)) for h in above])
-    assert ratio_above[0] < 1.0 and ratio_above[1] < 1.0, (
-        f"just above the match the table is thinner (H = 53.3, 58.5 km < 60): {ratio_above}")
-    assert ratio_above[2] > 2.0, (
-        f"by 800 km the table's 89-125 km scale heights make it far denser: {ratio_above}")
-    # The crossing is between 600 and 800 km, and it is a crossing, not a tangency.
-    fine = np.arange(400.0, 1000.0, 1.0)
+    assert ratio_above[0] == pytest.approx(0.897, abs=0.004), (
+        f"just above the match the table is thinner (H = 58.5, 60.8 km < 60): {ratio_above}")
+    assert ratio_above[2] == pytest.approx(2.91, abs=0.03), (
+        f"by 830 km the table's 89-125 km scale heights make it far denser: {ratio_above}")
+    # The crossing is between 600 and 700 km, and it is a crossing, not a tangency.
+    fine = np.arange(400.5, 1000.0, 1.0)
     ratio_fine = layered_density(fine) / np.array([_single_band_density(float(h)) for h in fine])
     crossings = np.flatnonzero(np.diff(np.signbit(ratio_fine - 1.0)))
-    assert crossings.size == 1 and 600.0 < fine[crossings[0]] < 800.0, (
-        f"expected exactly one crossing between 600 and 800 km, got {fine[crossings].tolist()}")
+    assert crossings.size == 1 and 600.0 < fine[crossings[0]] < 700.0, (
+        f"expected exactly one crossing between 600 and 700 km, got {fine[crossings].tolist()}")
 
 
 # Closed form for the layered law inside the kernel, hand-computed in SI and sharing no line of code
