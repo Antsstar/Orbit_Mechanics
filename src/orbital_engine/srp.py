@@ -277,14 +277,14 @@ def shadow_factor(
     (a body sitting on its own parent, or on the Sun), a coincident source and occulter, and - for
     the conical law only - a source of zero radius, whose apparent disc has no area to occult.
     """
-    d_source = np.sqrt(np.einsum("ij,ij->i", to_source, to_source))
-    d_occ = np.sqrt(np.einsum("ij,ij->i", to_occulter, to_occulter))
+    d_source: ArrayFloat = np.sqrt(np.einsum("ij,ij->i", to_source, to_source))
+    d_occ: ArrayFloat = np.sqrt(np.einsum("ij,ij->i", to_occulter, to_occulter))
 
     axis = to_source - to_occulter                       # occulter -> source
-    d_axis = np.sqrt(np.einsum("ij,ij->i", axis, axis))
+    d_axis: ArrayFloat = np.sqrt(np.einsum("ij,ij->i", axis, axis))
 
     active = (occulter_radius_km > 0.0) & (d_source > 0.0) & (d_occ > 0.0) & (d_axis > 0.0)
-    nu = np.ones_like(d_source)
+    nu: ArrayFloat = np.ones_like(d_source)
 
     # --- cylindrical umbra -------------------------------------------------------------------
     # The occulter-centred position of the body is `-to_occulter`. Resolve it along the exact
