@@ -32,7 +32,9 @@ __all__ = [
     "MU_SUN", "MU_EARTH", "MU_MOON",
     "EARTH_P", "EARTH_E", "MOON_P", "MOON_E",
     "VESSEL_DRY_MASS", "VESSEL_FUEL_MASS",
+    "STATION_LATITUDE_DEG", "STATION_LONGITUDE_DEG", "STATION_ALTITUDE_KM",
     "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
+    "ground_station_pass",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -440,3 +442,94 @@ def hohmann_pair(
     sim.set_propagator(cowell, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, cowell)
     return sim
+
+
+# --------------------------------------------------------------------------------------------------
+# Observation geometry
+# --------------------------------------------------------------------------------------------------
+
+STATION_LATITUDE_DEG = 0.0      # geocentric, matching `geometry.py`'s spherical convention
+STATION_LONGITUDE_DEG = 0.0     # east-positive; the station is on +x at prime-meridian angle 0
+STATION_ALTITUDE_KM = 0.0       # on the sphere of radius EARTH_RADIUS
+
+
+def ground_station_pass(
+    session: Session,
+    *,
+    n_sats: int = 1,
+    altitude_km: float = 550.0,
+    inclination_deg: float = 0.0,
+    raan_deg: float = 0.0,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    One Earth and `n_sats` massless vessels on a circular orbit, seeded for the **ground-station
+    pass** geometry `tests/validation/test_geometry.py` checks against closed forms.
+
+    The station itself is not a body - it is fixed to the rotating central body, so it lives in
+    `geometry.py`'s arguments rather than in the arena. `STATION_LATITUDE_DEG`,
+    `STATION_LONGITUDE_DEG` and `STATION_ALTITUDE_KM` above are the companion constants: the
+    equatorial site on the prime meridian, which at prime-meridian angle `theta = 0` sits on the
+    inertial `+x` axis.
+
+    **Why the default is equatorial and phased to 180 deg.** With `inclination_deg = 0` the station
+    lies exactly in the orbital plane, which is the only geometry whose pass has a closed form
+    simple enough to be an *exact* expectation rather than a numerical one: the satellite reaches
+    exactly 90 deg elevation, the horizon crossings sit at central angle `acos(R / r)` from the
+    station, and the pass length is that angle over the **station-relative** angular rate `n - omega`
+    - the body's own rotation subtracts, and forgetting it shortens the pass by 6.7 % at 550 km
+    (784.2 s becomes 732.1 s), silently and plausibly. The vessel is
+    seeded at true anomaly 180 deg so that the overhead moment, `pi / (n - omega)`, falls in the
+    interior of a grid starting at zero rather than on its edge, which is what lets a window have
+    two interpolated ends.
+
+    That symmetry is also a hazard, as `docs/engineering-log.md` records for `hohmann_pair`: an
+    equatorial station watching an equatorial orbit has an identically zero SEZ *south* component,
+    so it cannot discriminate a transposed south/east axis. `inclination_deg` is therefore a
+    parameter, and the test suite runs a second, inclined case against the general central-angle
+    relation for exactly that reason.
+
+    Vessels are massless, so the system barycentre sits on Earth and `global_states` are
+    Earth-relative to machine precision; they keep the default Keplerian propagator, so the
+    trajectory carries no integration error to confuse a geometry tolerance.
+    """
+    if n_sats < 1:
+        raise ValueError(f"n_sats must be at least 1, got {n_sats}")
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    radius = EARTH_RADIUS + altitude_km
+    names: List[str] = ["Earth"]
+    for k in range(n_sats):
+        name = f"PASS-SAT-{k:02d}"
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+            p=radius, e=0.0, i=math.radians(inclination_deg),      # circular, so p == a == r
+            raan=math.radians(raan_deg), arg_pe=0.0,
+            theta=math.pi + 2.0 * math.pi * k / n_sats,
+        ))
+        names.append(name)
+
+    session.commit()
+
+    return Simulation(
+        body_names=names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
