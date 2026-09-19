@@ -1017,6 +1017,11 @@ class Simulation:
         `body_sys_map` - the same re-basing pattern Cowell uses above, for the same reason (the two
         parent graphs diverge; see `docs/architecture.md`), just without a `parent_state_at_start` to
         subtract first, since nothing here was integrated relative to a snapshot.
+
+        Finally, any body carrying the `"thrust"` force model burns propellant - `thrust.deplete_mass`
+        on the cached `_thrust_idx`, *after* the propagation, so all four RK4 stages of this step read
+        the mass the step began with. See `thrust.py` for why the mass lives in that model's parameter
+        array and what freezing it across a step costs.
         """
         cowell_idx = self._cowell_idx
         if cowell_idx.size > 0:
