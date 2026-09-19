@@ -155,7 +155,8 @@ def layered_density(
     band = np.clip(np.searchsorted(BASE_ALTITUDE_KM, h, side="right") - 1, 0, _N_BANDS - 1)
     exponent = (h - BASE_ALTITUDE_KM[band]) / SCALE_HEIGHT_KM[band]
     if valid is None:
-        return BASE_DENSITY_KG_M3[band] * np.exp(-exponent)
+        unmasked: ArrayFloat = BASE_DENSITY_KG_M3[band] * np.exp(-exponent)
+        return unmasked
     factor = np.exp(-exponent, out=np.zeros_like(exponent), where=valid)
     out: ArrayFloat = BASE_DENSITY_KG_M3[band] * factor
     return out
@@ -179,7 +180,8 @@ def exponential_density(
     """
     h = np.asarray(altitude_km, dtype=np.float64)
     if valid is None:
-        return rho0 * np.exp(-(h - h0) / scale_height_km)
+        unmasked: ArrayFloat = rho0 * np.exp(-(h - h0) / scale_height_km)
+        return unmasked
     exponent = np.divide(h - h0, scale_height_km, out=np.zeros_like(h), where=valid)
     factor = np.exp(-exponent, out=np.zeros_like(h), where=valid)
     out: ArrayFloat = rho0 * factor
