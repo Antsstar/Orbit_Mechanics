@@ -35,6 +35,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `thirdbody.py` | `third_body`: one named perturber's point-mass pull, direct minus indirect, relative to the parent | **new** |
 | `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
 | `drag.py` | `drag`: atmospheric drag in a co-rotating, single-exponential atmosphere, composable with `point_mass_gravity` and `j2` | **new** |
+| `viz.py` | Plot-*data* preparation: trajectory sampling over a time grid, ground tracks via `frames`' body-fixed transforms, altitude series, and error curves against a `reference.py` truth. No matplotlib import, so the library stays installable without it — `benchmarks/figures.py` is the consumer that draws | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
