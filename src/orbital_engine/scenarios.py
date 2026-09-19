@@ -32,7 +32,7 @@ __all__ = [
     "MU_SUN", "MU_EARTH", "MU_MOON",
     "EARTH_P", "EARTH_E", "MOON_P", "MOON_E",
     "VESSEL_DRY_MASS", "VESSEL_FUEL_MASS",
-    "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel",
+    "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -354,4 +354,89 @@ def powered_vessel(
             mass_kg=dry_mass + fuel_mass, dry_mass_kg=dry_mass,
             dir_r=direction[0], dir_s=direction[1], dir_w=direction[2],
         )
+    return sim
+
+
+# --------------------------------------------------------------------------------------------------
+# Impulsive manoeuvres
+# --------------------------------------------------------------------------------------------------
+
+def hohmann_pair(
+    session: Session,
+    *,
+    r1_km: float = 7000.0,
+    inclination_deg: float = 28.5,
+    raan_deg: float = 40.0,
+    arg_pe_deg: float = 0.0,
+    theta_deg: float = 0.0,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    One Earth and four co-located massless vessels on the same circular orbit of radius `r1_km`, two
+    propagated analytically and two by Cowell under `point_mass_gravity`.
+
+    Built for `tests/validation/test_manoeuvres.py`, whose headline case is a Hohmann transfer - the
+    manoeuvre with exact closed-form answers for both burns and for the transfer time. Carrying *four*
+    vessels in one arena gives that transfer two independent realisations and two controls in a single
+    run:
+
+    | name | propagator | role |
+    |---|---|---|
+    | `KEPLER-SAT`  | Keplerian | flies the transfer; its elements are re-derived at each impulse |
+    | `KEPLER-TWIN` | Keplerian | **control**: never manoeuvres. A split step must not move it |
+    | `COWELL-SAT`  | Cowell + `point_mass_gravity` | flies the same transfer numerically |
+    | `COWELL-TWIN` | Cowell + `point_mass_gravity` | **control**, the numerical counterpart |
+
+    The analytic pair answers "is the closed form reproduced", the numerical pair answers "does the
+    impulse mean the same thing to an integrator", their difference is bounded by RK4's own truncation,
+    and the twins measure what step splitting costs a body that is not manoeuvring - the same
+    co-located-twin idiom `powered_vessel` uses for continuous thrust, and for the same reason:
+    identical arena, identical step size, so a difference is the manoeuvre and nothing else.
+
+    The orbit is deliberately **inclined and rotated** (`inclination_deg`, `raan_deg` default to
+    non-zero). At `i = raan = arg_pe = theta = 0` the RSW basis coincides with the inertial axes, so a
+    Delta-v applied in the wrong frame would be numerically identical to one applied correctly and the
+    frame convention could not be validated at all. Hohmann's closed form is orientation-independent,
+    so tilting the orbit costs the test nothing.
+
+    `p == a == r1_km`, the seed orbit being circular. The vessels are massless, so co-location is
+    physical rather than a singularity and the system barycentre sits exactly on Earth.
+    """
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names = ["KEPLER-SAT", "KEPLER-TWIN", "COWELL-SAT", "COWELL-TWIN"]
+    for name in names:
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=VESSEL_FUEL_MASS, drag_area=4.0,
+            p=r1_km, e=0.0, i=math.radians(inclination_deg),
+            raan=math.radians(raan_deg), arg_pe=math.radians(arg_pe_deg),
+            theta=math.radians(theta_deg),
+        ))
+    session.commit()
+
+    sim = Simulation(
+        body_names=["Earth"] + names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+
+    cowell = np.array([sim.name_to_index[n] for n in ("COWELL-SAT", "COWELL-TWIN")], dtype=np.int64)
+    sim.set_propagator(cowell, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, cowell)
     return sim

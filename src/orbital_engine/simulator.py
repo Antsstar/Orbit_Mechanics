@@ -25,6 +25,7 @@ from . import forces
 from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a force model (gravity.py)
 from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
+from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
@@ -176,6 +177,13 @@ class Simulation:
         self._thrust_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
         self._thrust_params: NDArray[np.float64] = np.zeros(
             (1, len(thrust.THRUST_PARAM_NAMES)), dtype=np.float64)
+
+        # Scheduled impulsive manoeuvres, kept sorted by epoch (see `schedule_delta_v`). A plain list
+        # rather than a registry axis: an impulse is neither an acceleration nor a way of advancing
+        # time, so neither half of `registry.py` fits it - see `manoeuvres.py`'s module docstring.
+        # `step()` tests this list's truthiness once per step and does nothing else when it is empty,
+        # so an arena with no mission profile pays nothing.
+        self._manoeuvres: List[manoeuvres.Manoeuvre] = []
 
         # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
         # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
@@ -977,9 +985,14 @@ class Simulation:
         self.propagator_type[idx] = np.uint8(propagator_type)
         self._refresh_active_indices()
 
-    def step(self, dt: ScalarSeconds) -> None:
+    def _advance(self, dt: ScalarSeconds) -> None:
         """
-        Advance the arena by `dt`.
+        Advance the arena by `dt` and the clock with it. The whole of the physics of one step.
+
+        Split out of `step()` so a scheduled impulsive manoeuvre can cut a step in two at its exact
+        epoch (`step()` calls this once per sub-interval); `step()` owns the manoeuvre queue and the
+        history snapshot, and this owns everything else. It is not a public entry point: it records no
+        history, so calling it directly leaves a gap in `history()`.
 
         Keplerian siblings and heads propagate exactly as before - `_kepler_sib_idx` / `_head_idx`
         hold the same slots `_sib_idx` / `_head_idx` would if no Cowell body existed, so the two
@@ -1087,8 +1100,231 @@ class Simulation:
             thrust.deplete_mass(self._thrust_idx, self._thrust_params, dt)
 
         self.t += dt
+
+    def step(self, dt: ScalarSeconds) -> None:
+        """
+        Advance the arena by `dt`, applying any scheduled impulsive manoeuvre at its exact epoch, and
+        record one history snapshot.
+
+        With an empty manoeuvre queue this is `_advance(dt)` plus the snapshot - the behaviour every
+        existing caller already has, bit for bit.
+
+        **Step splitting.** A manoeuvre scheduled at an epoch inside `(t, t + dt]` does not wait for
+        the step boundary: the step is cut at that instant, so the timing of an impulse is exact rather
+        than quantised to `dt`, which is what lets a Hohmann second burn be placed at the transfer
+        apoapsis instead of at the nearest multiple of the step size. Several manoeuvres inside one
+        step are applied in epoch order, each with its own sub-step; one scheduled at or before `t`
+        (including at `t = 0`, before the first step) is applied immediately with no sub-step. `self.t`
+        is set to `t + dt` exactly at the end, so splitting cannot make the clock drift by the rounding
+        of the sub-intervals.
+
+        **What splitting costs a body that is not manoeuvring.** For an analytic body - Keplerian or
+        secular-J2 - nothing: propagating `h1` then `h2` is the same closed-form advance as propagating
+        `h1 + h2`, to the Kepler solver's convergence tolerance and rounding (~1e-10 km on a LEO orbit,
+        asserted in `tests/validation/test_manoeuvres.py`). For a **Cowell** body it is not exactly
+        nothing and cannot be: RK4 evaluates its stages at quadrature nodes fixed by the step size, so
+        cutting one step in two moves those nodes and changes that step's truncation error by an amount
+        of the order of the local truncation error itself, `~r (n h)^5 / 120`. That is far below the
+        integration error the body already carries, it is a one-off at the split rather than a per-step
+        bias, and it is asserted against that derived bound in the same test file rather than assumed
+        negligible.
+        """
+        if not self._manoeuvres:
+            self._advance(dt)
+            if self.record_history:
+                self._record_state()
+            return
+
+        t_end = float(self.t) + float(dt)
+        due = manoeuvres.due_before(self._manoeuvres, t_end)
+        for _ in range(due):
+            m = self._manoeuvres.pop(0)
+            sub = m.epoch_s - float(self.t)
+            if sub >= manoeuvres.MIN_SUBSTEP_S:
+                self._advance(sub)
+            self.apply_delta_v(m.bodies, m.dv_rsw)
+
+        remaining = t_end - float(self.t)
+        if remaining >= manoeuvres.MIN_SUBSTEP_S:
+            self._advance(remaining)
+
+        # The sub-intervals sum to `dt` only up to rounding; pin the clock so a long run with many
+        # split steps stays on the same time grid an unsplit run would.
+        self.t = t_end
         if self.record_history:
             self._record_state()
+
+    def schedule_delta_v(
+        self,
+        bodies: Union[int, Sequence[int], NDArray[np.integer[Any]]],
+        dv_rsw: Sequence[float] | NDArray[np.float64],
+        epoch_s: ScalarSeconds,
+        label: str = "",
+    ) -> manoeuvres.Manoeuvre:
+        """
+        Schedule an impulsive Delta-v (RSW, km/s) to be applied at simulation time `epoch_s` seconds.
+
+        `step()` cuts its step at that instant, so the impulse lands at the epoch asked for rather than
+        at the next step boundary - see `step()` for what that costs a body that is not manoeuvring,
+        and `manoeuvres.py` for the model, the frame convention (`(0, dv, 0)` is prograde) and the
+        per-propagator handling.
+
+        The bodies are validated **now**, not at the epoch, so a profile that names a head or a
+        barycentre fails at the point the mistake was made. `dv_rsw` is `(3,)` for one Delta-v shared by
+        every named body, or `(len(bodies), 3)` for one each.
+
+        An epoch at or before the current time is applied on the next `step()` with no sub-step - so
+        `schedule_delta_v(..., epoch_s=0.0)` on a fresh simulation burns before any propagation, which
+        is how a departure burn is expressed. Returns the queued `Manoeuvre` so a caller can hold onto
+        it (it is frozen plain data; a mission profile is a list of them).
+        """
+        idx = self._manoeuvre_slots(bodies)
+        m = manoeuvres.Manoeuvre(
+            epoch_s=float(epoch_s), bodies=idx, dv_rsw=self._manoeuvre_dv(dv_rsw, idx.size), label=label,
+        )
+        self._manoeuvres.append(m)
+
+        # Sorted on insert rather than searched on use: a mission profile is tens of entries, the sort
+        # is stable (so two manoeuvres at one epoch keep their scheduling order), and `step()` then
+        # only has to look at the front of the list.
+        self._manoeuvres.sort(key=lambda entry: entry.epoch_s)
+        return m
+
+    @property
+    def pending_manoeuvres(self) -> tuple[manoeuvres.Manoeuvre, ...]:
+        """Scheduled manoeuvres not yet applied, in epoch order. A tuple: the queue is `step()`'s."""
+        return tuple(self._manoeuvres)
+
+    def clear_manoeuvres(self) -> None:
+        """Drop every scheduled manoeuvre. Applied ones are already in the state and are unaffected."""
+        self._manoeuvres.clear()
+
+    def apply_delta_v(
+        self,
+        bodies: Union[int, Sequence[int], NDArray[np.integer[Any]]],
+        dv_rsw: Sequence[float] | NDArray[np.float64],
+    ) -> None:
+        """
+        Apply an impulsive Delta-v (RSW components, km/s) to `bodies` **now**, between steps.
+
+        `(0, dv, 0)` is a prograde (along-track) burn, `(dv, 0, 0)` radial-out, `(0, 0, dv)` normal -
+        the RSW frame of the body's state relative to its Keplerian parent, the same convention
+        `thrust.py`'s direction law uses. `dv_rsw` is `(3,)` for one Delta-v shared by every named
+        body, or `(len(bodies), 3)` for one each.
+
+        What changes depends on the body's propagator, and getting that wrong is the whole difficulty
+        of this operation (see `manoeuvres.py`):
+
+        - **Keplerian**: the Cartesian state *and* `coe_states`, re-derived from the post-burn
+          `(r, v)`. The elements are this propagator's state of record - `KeplerianPropagator` rewrites
+          `local_states` from them every step - so an impulse that only touched the Cartesian state
+          would be silently erased by the next `step()`.
+        - **Secular J2**: as Keplerian, plus `self._secular_j2_rates`, recomputed here from the new
+          elements through `propagators.secular_j2_rates`. Those rates are cached at `set_propagator`
+          time and depend on `p`, `e` and `i`, every one of which an impulse changes; left stale, the
+          body would keep regressing its node at the *old* orbit's rate and nothing would raise.
+        - **Cowell**: the Cartesian state only. Its `coe_states` row is documented stale, and this
+          deliberately does not revive it.
+
+        Raises `ValueError`, before mutating anything, for an inactive slot, a system head, a
+        barycentre, a root, a body carrying mass (`mu != 0`), a body whose pre-burn RSW frame is
+        undefined, or an impulse that would leave a secular-J2 body on an open orbit. The restrictions
+        and their reasons are `manoeuvres.py`'s module docstring; they mirror `set_propagator`'s.
+        """
+        idx = self._manoeuvre_slots(bodies)
+        dv = self._manoeuvre_dv(dv_rsw, idx.size)
+
+        valid = manoeuvres.apply_delta_v(
+            idx, dv, self.global_states, self.local_states, self.coe_states,
+            self.mu_array, self.parent_indices, self.propagator_type,
+        )
+        if not bool(valid.all()):
+            raise ValueError(
+                f"impulsive Delta-v refused for slot(s) {idx[~valid].tolist()}: the pre-burn RSW frame "
+                f"is undefined (zero, rectilinear or non-finite state relative to the Keplerian "
+                f"parent), the post-burn orbit could not be classified, or a SECULAR_J2 body would be "
+                f"left on an open orbit. No body was modified. See manoeuvres.py."
+            )
+
+        # The secular-J2 rates are a *cache* of a function of (p, e, i), all three of which just
+        # changed. Recomputing them is the whole reason this method exists rather than a bare call to
+        # the kernel - see this method's docstring and `propagators.secular_j2_rates`.
+        secular = idx[self.propagator_type[idx] == np.uint8(PropagatorType.SECULAR_J2)]
+        if secular.size > 0:
+            j2_params = self.force_model_params.get(geopotential.J2_MODEL)
+            if j2_params is not None:
+                self._secular_j2_rates[secular] = secular_j2_rates(
+                    self.coe_states, self.mu_array, self.parent_indices, j2_params, secular,
+                )
+
+    def _manoeuvre_slots(
+        self, bodies: Union[int, Sequence[int], NDArray[np.integer[Any]]],
+    ) -> NDArray[np.int64]:
+        """
+        Normalise a manoeuvre's `bodies` argument to an integer slot array and enforce the restrictions
+        in `manoeuvres.py`'s module docstring.
+
+        **Caller order is preserved**, so row `k` of a per-body `(n, 3)` Delta-v belongs to body `k` as
+        written; sorting here would silently re-pair them. A repeated slot is rejected rather than
+        de-duplicated, because `manoeuvres.apply_delta_v` writes through fancy indexing: a slot named
+        twice would be a many-to-one scatter, and one of the two Delta-vs would vanish with no error at
+        all. Two impulses on one body are two calls, or two scheduled manoeuvres.
+        """
+        idx = np.atleast_1d(np.asarray(bodies, dtype=np.int64))
+
+        if idx.size == 0:
+            raise ValueError("an impulsive Delta-v needs at least one body.")
+        if np.unique(idx).size != idx.size:
+            raise ValueError(
+                f"an impulsive Delta-v names each body at most once; got {idx.tolist()}. Two impulses "
+                f"on one body are two calls - one fancy-indexed write cannot deliver both."
+            )
+        if bool(((idx < 0) | (idx >= self.max_capacity)).any()):
+            raise ValueError(f"slot(s) {idx.tolist()} are outside the arena (capacity {self.max_capacity}).")
+
+        disallowed = (
+            ~self.active_mask[idx] | self.is_head[idx] | self.is_system[idx] |
+            (self.body_sys_map[idx] == idx) | (self.parent_indices[idx] == idx)
+        )
+        if np.any(disallowed):
+            raise ValueError(
+                f"an impulsive Delta-v is restricted to active, non-head, non-barycentre bodies with a "
+                f"Keplerian parent and a system bubble of their own to sit in; slot(s) "
+                f"{idx[disallowed].tolist()} do not qualify. A head's motion is its bubble's reflex "
+                f"kick, recomputed every step, so an impulse on it would be silently overwritten; a "
+                f"barycentre is a mass-weighted mean, not an object; a root has no frame to burn "
+                f"relative to. See manoeuvres.py."
+            )
+
+        massive = idx[self.mu_array[idx] != 0.0]
+        if massive.size > 0:
+            raise ValueError(
+                f"an impulsive Delta-v requires mu == 0; slot(s) {massive.tolist()} carry mass, and "
+                f"their system barycentre's own orbit - a separate slot this call does not touch - "
+                f"would not see the momentum change, leaving the bubble inconsistent while looking "
+                f"entirely plausible. The same masslessness Cowell, secular-J2 and thrust require. "
+                f"See manoeuvres.py."
+            )
+        return idx
+
+    @staticmethod
+    def _manoeuvre_dv(
+        dv_rsw: Sequence[float] | NDArray[np.float64], n_bodies: int,
+    ) -> NDArray[np.float64]:
+        """
+        Validate a Delta-v argument and return it as float64, `(3,)` or `(n_bodies, 3)`.
+
+        Shape is checked here rather than left to broadcasting: a `(2, 3)` Delta-v against three bodies
+        would raise deep inside an einsum with a shape message that names neither, and a `(3, 3)`
+        against three bodies is ambiguous only if the check is absent - here it means one Delta-v each.
+        """
+        dv: NDArray[np.float64] = np.asarray(dv_rsw, dtype=np.float64)
+        if dv.shape != (3,) and dv.shape != (n_bodies, 3):
+            raise ValueError(
+                f"dv_rsw must be (3,) - one Delta-v for every named body - or ({n_bodies}, 3), one "
+                f"each, in RSW components and km/s; got shape {dv.shape} for {n_bodies} body(ies)."
+            )
+        return dv
 
     def _rebase(self, indices: NDArray[np.int64], rel: NDArray[np.float64]) -> None:
         """
