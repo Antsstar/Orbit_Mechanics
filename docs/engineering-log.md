@@ -904,6 +904,45 @@ happily on a frame rotating the wrong way.
 
 ---
 
+### A sign-flipped thrust kernel walked straight through the rocket-equation test
+
+**Symptom.** Mutating `thrust.py`'s accumulation from `+=` to `-=` — a burn pointing backwards —
+failed the closed-form and orbit-raising checks but **passed** the rocket-equation check, which is
+the one written specifically to validate the burn.
+
+**Cause.** The check separated the burn from the gravity turn by differencing a thrusting vessel
+against a co-located thrust-free twin, and then compared `|v_powered - v_coasting|` against
+`Isp g0 ln(m0/m1)`. A norm cannot see a sign. The engine's own conventions list already says
+"compare vectors, not magnitudes"; the twin-differencing trick makes it easy to forget, because the
+difference *is* the quantity of interest and reaching for its magnitude feels natural.
+
+**Fix.** Assert the projection of the twin difference onto the commanded direction (`S`, rebuilt from
+the coasting twin's state) before its magnitude. The rotation of `S` over the burn costs
+`cos(phi) - 1 = -1.1e-6`, so `abs=1e-5` on the projection is a derived, not a fitted, tolerance. All
+three mutants — dropped unit conversion, flipped sign, transposed R/S columns — now fail.
+
+**Lesson.** A negative control is not optional even when the positive tests agree with theory to
+5e-7. Run the mutant, and if a test that *should* catch it does not, that is a finding about the
+test, not a curiosity.
+
+---
+
+### The left-Riemann bias in the thrust mass update was predicted with the wrong sign
+
+**Symptom.** `test_thrust.py` predicted the delta-v excess from freezing mass across a step as
+`+(dt/2)(a_end - a_start)` = +2.72e-5 km/s and measured -2.74e-5 — right magnitude, wrong sign.
+
+**Cause.** Euler-Maclaurin applied carelessly. `T/m` *increases* through a burn, and a left-endpoint
+rule under-integrates an increasing function: every step is flown at the heavier start-of-step mass,
+so the scheme under-delivers delta-v. The magnitude was right to 0.55 %, which is exactly why a
+magnitude-only assertion would have hidden it.
+
+**Lesson.** Item 5 of the per-feature contract earning its keep in the intended way. The derivation
+and the measurement disagreed, the assertion caught it, and the resolution was to fix the derivation
+rather than widen the tolerance.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

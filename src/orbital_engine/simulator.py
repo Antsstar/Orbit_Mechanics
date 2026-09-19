@@ -24,6 +24,7 @@ from . import frames as fr
 from . import forces
 from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a force model (gravity.py)
 from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
+from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
@@ -164,6 +165,17 @@ class Simulation:
         # by registered-model count rather than by `max_capacity` - see forces.py.
         self._resolved_force_models: List[forces.ResolvedForceModel] = []
         self._force_dispatch_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+
+        # Thrust is the one force model whose coefficients are *state*: a burning vessel's mass falls,
+        # so `force_model_params["thrust"]`'s mass column has to be advanced once per step. These two
+        # are the cached handles `step()` needs to do that without searching the resolved list or
+        # reducing over the mask - same caching convention, and same obligation to rebuild on any
+        # configuration change, as `_force_dispatch_idx` above. A one-row dummy stands in until the
+        # model is resolved for the first time; `_thrust_idx` is empty until then, so it is never read.
+        # See thrust.py's module docstring for why the mass lives in the parameter array at all.
+        self._thrust_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._thrust_params: NDArray[np.float64] = np.zeros(
+            (1, len(thrust.THRUST_PARAM_NAMES)), dtype=np.float64)
 
         # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
         # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
@@ -365,6 +377,15 @@ class Simulation:
         # "Keplerian", the second configuration would silently still carry J2. This is O(capacity),
         # but it runs once per configuration change, never per step, so step cost is unaffected.
         self.accel_accum.fill(0.0)
+
+        # Bind the thrust set for `step()`'s per-step mass depletion. The loop is over resolved
+        # models (tens at most, see forces.py), runs only on a configuration change, and leaves
+        # `_thrust_idx` empty - so `step()` skips the depletion entirely - when nothing thrusts.
+        self._thrust_idx = np.empty(0, dtype=np.int64)
+        for rm in self._resolved_force_models:
+            if rm.name == thrust.THRUST_MODEL:
+                self._thrust_idx, self._thrust_params = rm.indices, rm.params
+
         self._refresh_cowell_plan()
 
     def _refresh_cowell_plan(self) -> None:
@@ -996,6 +1017,11 @@ class Simulation:
         `body_sys_map` - the same re-basing pattern Cowell uses above, for the same reason (the two
         parent graphs diverge; see `docs/architecture.md`), just without a `parent_state_at_start` to
         subtract first, since nothing here was integrated relative to a snapshot.
+
+        Finally, any body carrying the `"thrust"` force model burns propellant - `thrust.deplete_mass`
+        on the cached `_thrust_idx`, *after* the propagation, so all four RK4 stages of this step read
+        the mass the step began with. See `thrust.py` for why the mass lives in that model's parameter
+        array and what freezing it across a step costs.
         """
         cowell_idx = self._cowell_idx
         if cowell_idx.size > 0:
@@ -1052,6 +1078,13 @@ class Simulation:
             self._rebase(cowell_idx, self._cowell_rel)
         if self._secular_j2_idx.size > 0:
             self._rebase(self._secular_j2_idx, self._secular_j2_rel)
+
+        # Propellant burn, after the propagation: every RK4 stage of this step saw the mass the step
+        # began with, which is what makes the mass half of the scheme first-order while the position
+        # half stays fourth-order. See thrust.py's module docstring and the Delta-v bias asserted in
+        # `tests/validation/test_thrust.py`.
+        if self._thrust_idx.size > 0:
+            thrust.deplete_mass(self._thrust_idx, self._thrust_params, dt)
 
         self.t += dt
         if self.record_history:

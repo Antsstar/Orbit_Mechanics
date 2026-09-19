@@ -18,15 +18,21 @@ from __future__ import annotations
 import math
 from typing import List, Optional
 
+import numpy as np
+
 from sqlalchemy.orm import Session
 
+from .custom_types import PropagatorType
 from .database import CelestialBodyORM, SystemORM, VesselORM, VirtualBodyORM
+from .gravity import POINT_MASS_MODEL
 from .simulator import Simulation
+from .thrust import THRUST_MODEL
 
 __all__ = [
     "MU_SUN", "MU_EARTH", "MU_MOON",
     "EARTH_P", "EARTH_E", "MOON_P", "MOON_E",
-    "two_body", "sun_earth_moon", "earth_constellation",
+    "VESSEL_DRY_MASS", "VESSEL_FUEL_MASS",
+    "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -245,3 +251,107 @@ def earth_constellation(
         session=session,
         max_capacity=capacity if capacity is not None else len(names) + 8,
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# Powered flight
+# --------------------------------------------------------------------------------------------------
+
+VESSEL_DRY_MASS = 260.0      # kg, matching the constellation's vessels
+VESSEL_FUEL_MASS = 40.0      # kg
+
+
+def powered_vessel(
+    session: Session,
+    *,
+    n_vessels: int = 2,
+    n_powered: int = 1,
+    p_km: float = EARTH_RADIUS + 550.0,
+    e: float = 0.0,
+    inclination_deg: float = 0.0,
+    raan_deg: float = 0.0,
+    arg_pe_deg: float = 0.0,
+    theta_deg: float = 0.0,
+    dry_mass: float = VESSEL_DRY_MASS,
+    fuel_mass: float = VESSEL_FUEL_MASS,
+    thrust_n: float = 0.0,
+    isp_s: float = 300.0,
+    direction: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    One Earth and `n_vessels` co-located, identical, massless vessels, all integrated with Cowell
+    under `point_mass_gravity`; the first `n_powered` of them also carry the `"thrust"` force model.
+
+    The remainder are **thrust-free twins**: same arena, same initial state, same integrator, same
+    step size, so differencing a powered vessel against one isolates the thrust term from everything
+    else including RK4's own drift. That is what `tests/validation/test_thrust.py` uses to separate a
+    burn's `Delta v` from the gravity turn, and what `test_drag.py` uses a drag-free control for.
+
+    Vessels are named `THRUSTER-00`, `THRUSTER-01`, ...; `Earth` heads the system. They are massless
+    (`mu = 0`), so co-location is physical rather than a singularity: they neither attract each other
+    nor perturb Earth, and `"thrust"` requires masslessness anyway (see `thrust.py`).
+
+    `p_km` is the semi-latus rectum, matching the engine's COE column 0 - for the default `e = 0` it
+    is the circular radius. Raising it is how a test gets a long orbital period, which is how the
+    geometric contamination of a short burn (the thrust direction turning with the orbit, and the
+    gravity gradient across the twins' separation) is driven down: both scale as `(n tau)^2`.
+
+    `mass_kg` is seeded from the vessel's own `dry_mass + fuel_mass`, so the propellant budget is a
+    property of the seeded vessel, not of the force-model call. Nothing reads the ORM again after
+    build; the mass afterwards lives in `force_model_params["thrust"]` and is advanced by
+    `Simulation.step` (see `thrust.py`'s "Where the mass lives").
+    """
+    if n_vessels < 1:
+        raise ValueError(f"n_vessels must be at least 1, got {n_vessels}")
+    if not 0 <= n_powered <= n_vessels:
+        raise ValueError(f"n_powered must be in [0, {n_vessels}], got {n_powered}")
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names: List[str] = ["Earth"]
+    for k in range(n_vessels):
+        name = f"THRUSTER-{k:02d}"
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=dry_mass, fuel_mass=fuel_mass, drag_area=4.0,
+            p=p_km, e=e, i=math.radians(inclination_deg),
+            raan=math.radians(raan_deg), arg_pe=math.radians(arg_pe_deg),
+            theta=math.radians(theta_deg),
+        ))
+        names.append(name)
+
+    session.commit()
+
+    sim = Simulation(
+        body_names=names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+
+    slots = np.array([sim.name_to_index[n] for n in names[1:]], dtype=np.int64)
+    sim.set_propagator(slots, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, slots)
+    if n_powered > 0:
+        sim.enable_force_model(
+            THRUST_MODEL, slots[:n_powered],
+            thrust_n=thrust_n, isp_s=isp_s,
+            mass_kg=dry_mass + fuel_mass, dry_mass_kg=dry_mass,
+            dir_r=direction[0], dir_s=direction[1], dir_w=direction[2],
+        )
+    return sim

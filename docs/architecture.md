@@ -37,6 +37,10 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `drag.py` | `drag`: atmospheric drag in a co-rotating, single-exponential atmosphere, composable with `point_mass_gravity` and `j2` | **new** |
 | `viz.py` | Plot-*data* preparation: trajectory sampling over a time grid, ground tracks via `frames`' body-fixed transforms, altitude series, and error curves against a `reference.py` truth. No matplotlib import, so the library stays installable without it — `benchmarks/figures.py` is the consumer that draws | **new** |
 
+---
+
+| `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
+
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
 
@@ -484,6 +488,55 @@ coefficient is unmeasured.
 
 **Composition.** Its bit is foreign to `_refresh_cowell_plan`, so any Cowell set that includes a
 `third_body` body runs on the NumPy path. There is no compiled twin.
+
+---
+
+## Thrust: the first model whose coefficients are state
+
+`thrust.py` registers `thrust`: `a = (T/m)(d_R R + d_S S + d_W W)`, with `m_dot = T/(Isp g0)` and the
+direction law given per body as an RSW vector. `(0, 1, 0)` is a prograde burn. The rotation is
+`frames.ReferenceFrames.RSW_to_cart`, which exists for exactly this; nothing is re-derived here.
+
+**Where the mass lives, and why it is not an arena array.** A burning vessel's mass falls, so somebody
+has to own a mutable per-body kilogram figure. It sits in column 2 of
+`force_model_params["thrust"]`, and `Simulation.step` advances it once per step through
+`thrust.deplete_mass`, clamped at the dry mass. The reason is the `ForceKernel` contract: a kernel's
+only per-body data channel is `params`. Mass held in an arena array would have to be copied into
+`params` before every evaluation, or the shared signature would have to grow a column no other model
+needs — drag already folds `1/m` into its ballistic coefficient, and `mu_array` is *gravitational*
+mass, which a massless thrusting body does not have. `validate_bodies` refuses `mu != 0` precisely so
+that the two never need reconciling; the day a massive thrusting body is wanted is the day mass gets
+promoted to the arena, and the promotion is mechanical. `VesselORM.dry_mass`/`fuel_mass` seed the
+column at build (`scenarios.powered_vessel`) and are never read again inside a step.
+
+The price is that this one coefficient array is not idempotent across runs: re-running a scenario
+means re-seeding `mass_kg`, exactly as it means re-seeding an initial state.
+
+**Frozen mass makes the scheme first order in the mass, fourth order in position.** All four RK4
+stages see the step's starting mass, so the integrated `Delta v` is a *left* Riemann sum of `T/m(t)`,
+which rises through a burn — the burn is therefore flown slightly too heavy and under-delivers by
+`(dt/2)(a_end - a_start)`. It is the same trade `third_body` makes with its frozen perturber, and it
+is a prediction, not slack: measured -8.84e-5 of `Delta v` against a derived -8.79e-5, and halving
+the step halves it. The direction law carries no such penalty, because the RSW basis is rebuilt from
+each stage's own candidate state.
+
+**How the rocket equation is tested at all.** A powered orbit's speed is not `v0 + Delta v`; the orbit
+turns. `scenarios.powered_vessel` therefore builds co-located, identical, massless twins in one arena,
+one thrusting, and the burn is differenced between them. Their difference obeys
+`d(delta_v)/dt = a_T + G delta_r`, so the contamination is the gravity gradient across their
+separation, `~(n tau)^2`. Placing the burn on a 400 000 km orbit drives that to 1e-6, and the twin
+difference then reproduces the discrete delta-v to 4.9e-7. Orbit raising is checked separately
+against the energy-derived `da/dt = 2 f/n` (7.1e-6 relative over five orbits, of which 6.8e-6 is the
+integrator drift the thrust-free twin measures), with a radial burn as the axis control: it must
+raise `a` only at `O(e)`, and transposing R and S in the kernel is what that test exists to catch.
+
+**Composition.** The bit is foreign to `_refresh_cowell_plan`, so any Cowell set containing a
+thrusting body runs on the NumPy path. There is deliberately no compiled twin.
+
+**What it does not do.** No attitude or slew rate, no throttle- or pressure-dependent `Isp`, and no
+coupling into drag's ballistic coefficient. Burn duration is quantised to `dt`: fuel that would run
+out mid-step is spent over the whole step, so no propellant is invented but the final step's impulse
+can exceed the physical one by up to `T dt`.
 
 ---
 
