@@ -218,6 +218,47 @@ def test_sample_states_relative_to_differences_against_that_slot(
     )
 
 
+def test_propagated_ground_track_regresses_at_the_earth_rotation_rate(
+    db_session_factory: Callable[[], Session]
+) -> None:
+    """
+    End to end through the engine, and the second half of the negative control's target.
+
+    A Keplerian satellite's orbit plane is inertially fixed, so its ascending node crosses the
+    equator at a longitude exactly `omega_earth * T` further west each revolution - no J2 nodal
+    regression, no draconitic-period correction, nothing else in the number. Measured by linear
+    interpolation between the two samples bracketing each northbound crossing, which at a 10 s step
+    is good to well under the 1e-3 deg asserted here; the engine gives -23.9409 deg against the
+    predicted -23.9409 deg. `benchmarks/figures.py` annotates the same quantity on the ground-track
+    figure, where J2 is on and the measured shift is 0.25 deg larger.
+    """
+    sim = _constellation(db_session_factory(), n_sats=1)
+    slots = _sat_slots(sim)
+    earth = sim.name_to_index["Earth"]
+    a_km = scenarios.EARTH_RADIUS + 550.0
+    period = 2.0 * math.pi * math.sqrt(a_km ** 3 / MU)
+
+    times = np.arange(0.0, 3.0 * period, 10.0)
+    states = viz.sample_states(sim, slots, times, relative_to=earth, max_dt=10.0)
+    track = viz.ground_track(
+        states[..., :3], times, omega=EARTH_OMEGA, body_radius_km=EARTH_R_EQ
+    )
+
+    lat, lon = track.latitude_deg[:, 0], track.longitude_deg[:, 0]
+    rising = np.flatnonzero((lat[:-1] < 0.0) & (lat[1:] >= 0.0))
+    nodes = []
+    for k in rising:
+        if abs(lon[k + 1] - lon[k]) > 180.0:
+            continue
+        frac = -lat[k] / (lat[k + 1] - lat[k])
+        nodes.append(lon[k] + frac * (lon[k + 1] - lon[k]))
+
+    assert len(nodes) >= 2
+    expected = -math.degrees(EARTH_OMEGA * period)
+    assert nodes[1] - nodes[0] == pytest.approx(expected, abs=1e-3)
+    assert np.max(np.abs(lat)) <= 53.0 + 1e-6
+
+
 def test_sample_states_refuses_to_run_backwards(db_session_factory: Callable[[], Session]) -> None:
     sim = _constellation(db_session_factory())
     sim.step(100.0)
