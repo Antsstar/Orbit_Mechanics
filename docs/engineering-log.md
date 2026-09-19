@@ -1057,6 +1057,62 @@ cannot collide, and re-check `orbital_engine.__file__` after any surprise.
 
 ---
 
+## A rotation epoch referenced to the first sample moved every pass time
+
+**Symptom.** Building `geometry.py`, the first interpolation-convergence run gave rise-time errors of
+-2.20 s, -0.24 s and -0.36 s at `h = 30, 15, 7.5 s` on grids constructed so the error *had* to fall
+as `h^2`. The derived bias was -0.23 s at `h = 30`, so the coarsest case was ten times too large and
+the sequence did not converge at all.
+
+**Cause.** Not the interpolation. `elevation_azimuth` had copied `viz.ground_track`'s convention,
+`theta(t) = theta0 + omega (t - times_s[0])`, and the phase-locked grids start at whatever offset puts
+the crossing 30 % into an interval - 28.07 s, 13.07 s, 5.57 s for the three spacings. Each grid
+therefore placed the station at a *different* longitude for the same absolute time, by
+`omega * times_s[0]`, which in pass time is `omega t_0 / (n - omega)`: 2.00 s, 0.93 s, 0.40 s. Those
+offsets are the entire discrepancy. Two of the three "errors" were dominated by a grid artefact, and
+the h = 15 case happened to land near the true answer by cancellation.
+
+**Fix.** An explicit `epoch_s` argument, defaulting to `0.0`, so `theta` is a function of absolute
+simulation time and the station's position does not depend on where the sample grid starts.
+`ground_track` keeps its own convention - a ground track is a shape, and rotating the whole figure
+leaves it valid - and the divergence between the two is documented in both module docstrings, with
+`test_the_rotation_epoch_is_absolute_not_grid_relative` pinning it.
+
+**Lesson.** A convention that is harmless in one module is not automatically harmless in the next.
+`ground_track` returns a curve whose *shape* is the deliverable; `access_windows` returns
+**timestamps**, and a frame convention anchored to an arbitrary array index quietly becomes part of
+the answer. Also: the derived expectation is what found this. A test written against the measured
+-2.20 s would have frozen a grid artefact into the suite as the interpolation's error.
+
+---
+
+### Negative controls for the observation-geometry suite
+
+Four mutants, one change each in `src/orbital_engine/geometry.py`, restored with `git checkout --`.
+
+**A - drop the body's rotation** (`omega` forced to 0.0 in the `theta` expression). 6 of 18 fail: the
+exact-instant pass check, both mask cases of the duration check, the mask-shortening check, the
+convergence check and the inclined triangle. The pass shortens from 784.2 s to 732.1 s, 6.7 %, and
+looks entirely normal on a plot.
+
+**B - `+theta` instead of `-theta`** into `inertia_to_fixed`. 7 fail, including
+`test_zenith_at_a_rotated_epoch`, the assertion written for it. The 90 deg epoch is deliberate: at a
+small epoch the station is only slightly misplaced and every check degrades gracefully, at 90 deg the
+station is on the opposite side of the body and the mutant cannot hide.
+
+**C - unclamped segment parameter** in `line_of_sight`. Exactly 1 fails,
+`test_the_segment_clamp_keeps_a_station_link_visible`, which is the only case where the minimiser
+falls outside `[0, 1]`. The boundary test on two co-orbital satellites passes under this mutant and
+always would - its minimiser is interior - which is why the clamp needed a case of its own.
+
+**D - transpose the SEZ south and east components.** 2 fail, both azimuth assertions; every elevation
+and range assertion passes, correctly, because `hypot(S, E)` is symmetric. That is the shape of the
+symmetry trap `hohmann_pair` records: an equatorial station watching an equatorial orbit has `S = 0`
+identically, so without the "rises in the west, sets in the east" check and the hand-computed
+four-point azimuth check the transposition would have been invisible.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

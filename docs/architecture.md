@@ -42,6 +42,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 
 | `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
 | `manoeuvres.py` | Impulsive Delta-v in RSW, applied now or scheduled at an epoch `step()` splits for. The first physics that is neither a force model nor a propagator, and the first that every propagator can use | **new** |
+| `geometry.py` | Observation geometry: ground-station look angles, interpolated access windows, and the spherical line-of-sight test. Pure functions of position arrays, like `viz.py`'s transforms — the primitive layer under a future access-based error metric | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -656,6 +657,66 @@ because the rocket equation needs an `Isp` belonging to the stage rather than to
 policy for an impulse the tanks cannot deliver — guessing either was worse than leaving it out. RSW is
 the only input frame, and there is no finite-burn correction; `thrust.py` is the model for when burn
 duration matters.
+
+---
+
+## Observation geometry: reporting in the units of a decision
+
+`geometry.py` answers "when can this station talk to that satellite", which is the question a
+constellation or network study actually asks. The engine's existing output is a position error in
+kilometres, and no one procures on kilometres; they procure on contact minutes per day, on gap
+length, on whether a marginal pass clears the mask. This module is the primitive layer that a later
+sweep-level metric needs, and it is deliberately *only* that layer.
+
+**Three functions, no state.** `elevation_azimuth` (look angles from a station fixed to the rotating
+central body), `access_windows` (rise/set intervals above a mask angle), `line_of_sight` (two points
+past a sphere). Each is a pure function of arrays, in the same spirit as `viz.py`'s transforms and
+for the same reason its docstring gives: a function that takes no `Simulation` can be validated
+against closed-form geometry with no propagation in the loop, so a failure is unambiguously the
+transform's. Nothing is registered in `registry.py` — there is no acceleration to compose and no
+state to advance, the same argument `manoeuvres.py` makes for itself one axis over.
+
+**Spherical, and said so.** Latitude is geocentric, altitude is above a sphere of `body_radius_km`.
+The engine carries no reference ellipsoid: its J2 is a gravity coefficient with no flattening
+attached, and `viz.GroundTrack` already reports spherical latitude. Adopting a geodetic station
+without an ellipsoidal gravity field would be internally inconsistent in a more expensive way than
+being uniformly spherical is.
+
+**The rotation epoch is absolute, unlike `viz.ground_track`'s.** `theta(t) = theta0 + omega (t -
+epoch_s)` with `epoch_s = 0.0` by default, where `ground_track` references `theta0` to `times_s[0]`.
+That divergence is deliberate and was bought with a bug: a ground track is a shape, and rotating the
+whole figure leaves it valid, but a *pass time* referenced to the first sample moves when the grid
+does. Sampling one 550 km pass on a grid starting at `t = 28 s` instead of `t = 0` displaced every
+rise and set by 2.0 s — ten times the interpolation error the edges are refined to, and completely
+silent. See `docs/engineering-log.md`.
+
+**Interpolated edges, and why that is the whole point.** Snapping a crossing to the nearest sample
+quantises the reported duration by up to one sample interval — on a 60 s sweep grid, 7 % of an 800 s
+LEO pass, and a *biased* 7 %, not noise. Linear inverse interpolation on the elevation series makes
+the edge `O(h^2)`, with the error term written out in `access_windows`' docstring. The sign matters
+and the tests assert it: the elevation curve is **convex at the horizon** (it leaves at rate `n -
+omega` and reaches far more than that by mid-pass), so rises come out early, sets late, and durations
+are systematically long — the opposite of the intuitive "concave, so short" reading. At 550 km the
+coefficient is `Omega cot(lambda_0)/2 = 1.21e-3` per second, giving 0.23 s of edge error at `h = 30 s`
+against a 784 s window, and a measured convergence ratio of 4.03 under halving.
+
+**What is validated, and against what.** The coplanar circular pass has exact answers throughout:
+horizon half-angle `acos(R/r)`, mask half-angle `acos((R/r) cos e) - e`, horizon range
+`sqrt(r^2 - R^2)`, duration `2 lambda / (n - omega)`. `scenarios.ground_station_pass` seeds exactly
+that geometry, and `tests/validation/test_geometry.py` measures 90 deg overhead to 8e-15 rad, 0 deg at
+the horizon to 7e-16 rad, and durations matching the closed form plus the derived interpolation bias
+to within 0.5 % of that bias. The inclined case is checked against the general
+station–satellite–centre triangle with the station's inertial position written out independently,
+because the equatorial case has an identically zero SEZ *south* component and cannot discriminate a
+transposed south/east axis — the same symmetry trap `hohmann_pair` documents.
+
+**Deliberately not built.** No range rate (so no Doppler, and no link budget), no refraction or
+terrain horizon, no multi-station scheduling or conjunction search, and no sweep-level aggregation:
+contact minutes per day, maximum gap and pass-count statistics are the metric layer that consumes
+this one, and building them before there is a sweep to attach them to would be guessing at the
+reduction. `AccessWindow.peak_elevation_rad` is the one field that is *sampled* rather than refined,
+`O(h)` for an overhead pass because the elevation has a corner at the zenith, and it is labelled as a
+lower bound rather than quietly parabola-fitted.
 
 ---
 
