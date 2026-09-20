@@ -26,6 +26,7 @@ from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a
 from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
+from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
@@ -184,6 +185,29 @@ class Simulation:
         # `step()` tests this list's truthiness once per step and does nothing else when it is empty,
         # so an arena with no mission profile pays nothing.
         self._manoeuvres: List[manoeuvres.Manoeuvre] = []
+
+        # Event-driven step splitting (`events.py`). Same shape as the manoeuvre queue above and for
+        # the same reason: an event is neither an acceleration nor a way of advancing time, so
+        # neither half of `registry.py` fits it. `step()` tests this list's truthiness once per step
+        # and does nothing else when it is empty, so an arena with no events is bit-identical - and
+        # the snapshot buffers below stay unallocated until `add_event` is called.
+        self._events: List[events.Event] = []
+        self._event_directions: NDArray[np.float64] = np.empty(0, dtype=np.float64)
+        self._event_tolerances: NDArray[np.float64] = np.empty(0, dtype=np.float64)
+        self.max_event_splits: int = events.MAX_SPLITS_PER_STEP
+        self._event_splits: int = 0
+        self._event_evaluations: int = 0
+        # Snapshot of everything `_advance` mutates, so a trial propagation can be undone exactly.
+        # `accel_accum`, `_kick`, `_accum`, `_cowell_rel` and `_secular_j2_rel` are deliberately
+        # absent: every one of them is fully rewritten at its dispatch rows before being read
+        # (`forces.compose_accelerations` zeroes `out[dispatch_idx]` first), so restoring them would
+        # be copying scratch that has no readable state to restore.
+        self._event_snap_t: ScalarSeconds = 0.0
+        self._event_snap_global: NDArray[np.float64] = np.empty((0, 6), dtype=np.float64)
+        self._event_snap_local: NDArray[np.float64] = np.empty((0, 6), dtype=np.float64)
+        self._event_snap_coe: NDArray[np.float64] = np.empty((0, 6), dtype=np.float64)
+        self._event_snap_thrust: NDArray[np.float64] = np.empty(
+            (0, len(thrust.THRUST_PARAM_NAMES)), dtype=np.float64)
 
         # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
         # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
@@ -1106,8 +1130,16 @@ class Simulation:
         Advance the arena by `dt`, applying any scheduled impulsive manoeuvre at its exact epoch, and
         record one history snapshot.
 
-        With an empty manoeuvre queue this is `_advance(dt)` plus the snapshot - the behaviour every
-        existing caller already has, bit for bit.
+        With an empty manoeuvre queue **and** no registered events this is `_advance(dt)` plus the
+        snapshot - the behaviour every existing caller already has, bit for bit.
+
+        **Event splitting.** Registered events (`add_event`, `events.py`) cut the step wherever a
+        continuous event function changes sign - the same cut this method already makes at a scheduled
+        impulse's epoch, but at an epoch that has to be *found* rather than read off a queue. The
+        search is per sub-interval, so events and manoeuvres compose: each manoeuvre sub-step is
+        itself scanned for crossings. A sub-interval with no crossing is advanced exactly as it is
+        today, bit for bit - the detection is two pure reads of the arena around the same single
+        `_advance` call. See `_advance_with_events`.
 
         **Step splitting.** A manoeuvre scheduled at an epoch inside `(t, t + dt]` does not wait for
         the step boundary: the step is cut at that instant, so the timing of an impulse is exact rather
@@ -1129,7 +1161,7 @@ class Simulation:
         bias, and it is asserted against that derived bound in the same test file rather than assumed
         negligible.
         """
-        if not self._manoeuvres:
+        if not self._manoeuvres and not self._events:
             self._advance(dt)
             if self.record_history:
                 self._record_state()
@@ -1141,12 +1173,12 @@ class Simulation:
             m = self._manoeuvres.pop(0)
             sub = m.epoch_s - float(self.t)
             if sub >= manoeuvres.MIN_SUBSTEP_S:
-                self._advance(sub)
+                self._advance_with_events(sub)
             self.apply_delta_v(m.bodies, m.dv_rsw)
 
         remaining = t_end - float(self.t)
         if remaining >= manoeuvres.MIN_SUBSTEP_S:
-            self._advance(remaining)
+            self._advance_with_events(remaining)
 
         # The sub-intervals sum to `dt` only up to rounding; pin the clock so a long run with many
         # split steps stays on the same time grid an unsplit run would.
@@ -1198,6 +1230,280 @@ class Simulation:
     def clear_manoeuvres(self) -> None:
         """Drop every scheduled manoeuvre. Applied ones are already in the state and are unaffected."""
         self._manoeuvres.clear()
+
+    # ==============================================================================================
+    # Event-driven step splitting - see events.py
+    # ==============================================================================================
+
+    def add_event(self, event: events.Event) -> events.Event:
+        """
+        Register an `events.Event`, so `step()` cuts its step wherever that event's function changes
+        sign.
+
+        The canonical use is the cylindrical shadow terminator, which is a genuine discontinuity in
+        the acceleration and costs RK4 its convergence order when a step straddles it::
+
+            sim.enable_force_model("srp", sat, ..., shadow_model=SHADOW_MODEL_CYLINDRICAL)
+            sim.add_event(events.shadow_event(sim))
+
+        Events are **opt-in and cost nothing when none are registered**: `step()` tests the list once
+        and falls straight through to `_advance`. The first `add_event` allocates the snapshot buffers
+        the root find needs; they are sized to `max_capacity` and never re-allocated, like every other
+        piece of arena scratch.
+
+        Returns the event, so a caller can hold onto it. See `events.py` for the interface, for why
+        detection is per body while the split is per arena, and for what a crossing costs.
+        """
+        if event.bodies.size == 0:
+            raise ValueError(f"event {event.name!r} names no bodies; it could never fire.")
+        if bool(((event.bodies < 0) | (event.bodies >= self.max_capacity)).any()):
+            raise ValueError(
+                f"event {event.name!r} names slot(s) {event.bodies.tolist()} outside the arena "
+                f"(capacity {self.max_capacity})."
+            )
+        if event.direction not in (-1, 0, 1):
+            raise ValueError(
+                f"event {event.name!r}: direction={event.direction!r} must be -1 (positive to "
+                f"negative), +1 (negative to positive) or 0 (both)."
+            )
+        if not event.tol_s > 0.0:
+            raise ValueError(
+                f"event {event.name!r}: tol_s={event.tol_s!r} must be positive; it is the bracket "
+                f"width in seconds the crossing time is converged to "
+                f"(events.DEFAULT_EVENT_TOL_S is {events.DEFAULT_EVENT_TOL_S})."
+            )
+
+        if self._event_snap_global.size == 0:
+            self._event_snap_global = np.zeros((self.max_capacity, 6), dtype=np.float64)
+            self._event_snap_local = np.zeros((self.max_capacity, 6), dtype=np.float64)
+            self._event_snap_coe = np.zeros((self.max_capacity, 6), dtype=np.float64)
+            self._event_snap_thrust = np.zeros(
+                (self.max_capacity, len(thrust.THRUST_PARAM_NAMES)), dtype=np.float64)
+
+        self._events.append(event)
+        # One concatenated direction vector, in the same block order `_event_values` returns, cached
+        # here rather than rebuilt per step: the block lengths are fixed at construction.
+        self._event_directions = np.concatenate(
+            [np.full(e.bodies.size, float(e.direction), dtype=np.float64) for e in self._events])
+        self._event_tolerances = np.concatenate(
+            [np.full(e.bodies.size, float(e.tol_s), dtype=np.float64) for e in self._events])
+        return event
+
+    @property
+    def registered_events(self) -> tuple[events.Event, ...]:
+        """The registered events, in registration order. A tuple: the list is `step()`'s."""
+        return tuple(self._events)
+
+    def clear_events(self) -> None:
+        """Drop every registered event. Steps stop splitting; nothing already integrated changes."""
+        self._events.clear()
+        self._event_directions = np.empty(0, dtype=np.float64)
+        self._event_tolerances = np.empty(0, dtype=np.float64)
+
+    @property
+    def event_splits(self) -> int:
+        """How many times an event has cut a step since this simulation was built. A diagnostic."""
+        return self._event_splits
+
+    @property
+    def event_evaluations(self) -> int:
+        """
+        Trial propagations spent locating crossings since this simulation was built.
+
+        This is the cost of the feature: each one is a full `_advance` of the arena over a candidate
+        sub-interval, plus the snapshot restore. `event_evaluations / event_splits` is the mean
+        iteration count of the root find - about 10 to 12 at the default tolerance from a 10 s step.
+        """
+        return self._event_evaluations
+
+    def _event_values(self) -> NDArray[np.float64]:
+        """
+        Every registered event's function, evaluated on the current arena and concatenated.
+
+        One block per event, in registration order, matching `_event_directions`. A **pure read**:
+        this is called at trial times during a root find, and any mutation here would leak into the
+        restored state. Allocates one `(K,)` array per call, where `K` is the total event-body count
+        - not an arena-sized quantity, and not a per-step cost unless events are registered.
+        """
+        return np.concatenate([e.function(self, e.bodies) for e in self._events])
+
+    def _set_event_latches(self, clearance_sign: Optional[NDArray[np.float64]]) -> None:
+        """
+        Pin every latching event's model to the branch it starts the sub-interval on, or release.
+
+        `clearance_sign` is the concatenated `sign(g)` vector in `_event_values` order, sliced back
+        into each event's own block; `None` releases. Events with no `latch` are skipped - only a
+        model with a genuine discontinuity needs one. See `_advance_with_events` for why.
+        """
+        offset = 0
+        for e in self._events:
+            k = int(e.bodies.size)
+            if e.latch is not None:
+                e.latch(self, e.bodies,
+                        None if clearance_sign is None else clearance_sign[offset:offset + k])
+            offset += k
+
+    def _capture_event_state(self) -> None:
+        """
+        Snapshot everything `_advance` mutates, into the pre-allocated buffers, so a trial
+        propagation can be undone exactly.
+
+        `global_states`, `local_states` and `coe_states` are the arena's state of record; the clock is
+        the fourth; and `force_model_params["thrust"]`'s mass column is the fifth, because
+        `thrust.deplete_mass` is state mutated once per `_advance` (see `CLAUDE.md`). Scratch is not
+        captured - see the comment in `__init__` for which arrays and why.
+        """
+        np.copyto(self._event_snap_global, self.global_states)
+        np.copyto(self._event_snap_local, self.local_states)
+        np.copyto(self._event_snap_coe, self.coe_states)
+        self._event_snap_t = float(self.t)
+        n = self._thrust_idx.size
+        if n > 0:
+            np.take(self._thrust_params, self._thrust_idx, axis=0, out=self._event_snap_thrust[:n])
+
+    def _restore_event_state(self) -> None:
+        """Undo every `_advance` since the last `_capture_event_state`, exactly. The inverse of it."""
+        np.copyto(self.global_states, self._event_snap_global)
+        np.copyto(self.local_states, self._event_snap_local)
+        np.copyto(self.coe_states, self._event_snap_coe)
+        self.t = self._event_snap_t
+        n = self._thrust_idx.size
+        if n > 0:
+            self._thrust_params[self._thrust_idx] = self._event_snap_thrust[:n]
+
+    def _advance_with_events(self, dt: ScalarSeconds) -> None:
+        """
+        `_advance(dt)`, cut at every event crossing inside the interval.
+
+        With no registered events this **is** `_advance(dt)` - one branch, no snapshot, no evaluation.
+        With events registered but no crossing in this interval the arena still takes exactly one
+        `_advance(dt)`, bit for bit: the detection is `_event_values()` before and after, both pure
+        reads, and the speculative advance is *kept* rather than repeated. That is the property every
+        other test in the suite depends on, and it is asserted directly in
+        `tests/validation/test_events.py`.
+
+        When a crossing is found the speculative advance is rolled back and the crossing *bracket*
+        located by `events.locate_crossing` on the scalar reduction `events.reduce_to_scalar` - see
+        `events.py` for why one scalar suffices for any number of crossing bodies. The arena is then
+        advanced across that bracket in the three pieces described at the call site (the reason there
+        are three, and not two, is the load-bearing detail of this method), and the remainder is
+        re-scanned, so several crossings in one interval are all resolved.
+
+        Raises `ValueError` if the interval needs more than `max_event_splits` cuts. Silently dropping
+        the remaining crossings would reintroduce exactly the non-raising, plausible-looking error
+        this machinery exists to remove; the arena is left part-advanced, and the fix is a smaller
+        `dt` or a larger `max_event_splits`.
+        """
+        if not self._events:
+            self._advance(dt)
+            return
+
+        remaining = float(dt)
+        splits = 0
+        while remaining >= manoeuvres.MIN_SUBSTEP_S:
+            self._capture_event_state()
+            g0 = self._event_values()
+            self._advance(remaining)
+            crossed = events.crossing_indices(g0, self._event_values(), self._event_directions)
+            if crossed.size == 0:
+                return                      # the speculative advance is the real one: bit-identical
+
+            if splits >= self.max_event_splits:
+                raise ValueError(
+                    f"more than max_event_splits={self.max_event_splits} event crossings in one "
+                    f"step of {float(dt)} s (still {crossed.size} unresolved). Use a smaller dt, or "
+                    f"raise Simulation.max_event_splits. Dropping them would silently restore the "
+                    f"first-order error event splitting exists to remove - see events.py."
+                )
+
+            # H(tau) = max_j -sign(g_j(0)) g_j(tau): negative until the earliest crossing, positive
+            # after it. Evaluated by trial propagation from the snapshot, which `h_at` restores to.
+            start_sign = np.sign(g0[crossed])
+            h_lo = events.reduce_to_scalar(g0[crossed], start_sign)
+
+            def h_at(tau: float, _sign0: NDArray[np.float64] = start_sign,
+                     _crossed: NDArray[np.int64] = crossed) -> float:
+                self._restore_event_state()
+                self._advance(tau)
+                return events.reduce_to_scalar(self._event_values()[_crossed], _sign0)
+
+            h_hi = events.reduce_to_scalar(self._event_values()[crossed], start_sign)
+            self._restore_event_state()
+
+            # The tightest tolerance among the events that actually crossed - not among all of them,
+            # so a loose event elsewhere in the list never relaxes the crossing being located here.
+            tol_s = float(np.min(self._event_tolerances[crossed]))
+            tau_lo, tau_hi, n_evals = events.locate_crossing(
+                h_at, 0.0, remaining, h_lo, h_hi, tol_s)
+            self._event_evaluations += n_evals
+
+            # Splitting the step is necessary and *not sufficient*, and this is where the difference
+            # lives. RK4's stages sample points off the trajectory - stage 4 by `O(h^3 |da/dt|)` in
+            # position, which is 5.6e-4 km at h = 5 s in LEO. A sub-step that ends exactly at the
+            # terminator therefore evaluates its fourth stage on whichever side of the surface that
+            # off-trajectory point happens to fall, and when that is the far side the stage carries
+            # weight 1/6 of a full `Delta_a h`. The result is **still first order**: measured
+            # 3.38e-6 km against a derived `n Delta_a (h/6) T_rem` = 3.26e-6 km, which is *worse*
+            # than not splitting at all at h = 1.25 s. Two things fix it together:
+            #
+            #   1. The **latch**. For the duration of a sub-interval known to contain no crossing,
+            #      the event's model is pinned to the branch it starts on (`Event.latch`,
+            #      `srp.latch_shadow_branch`). The right-hand side is then genuinely smooth over
+            #      that interval - one branch, all four stages - which is the only condition under
+            #      which RK4's order theorem applies at all.
+            #   2. **Three advances, not two.** Up to `tau_lo` (latched to the pre-crossing branch,
+            #      exact); then one micro-step across the bracket itself, no wider than `tol_s`,
+            #      which is the only interval that straddles the jump and so contributes at most
+            #      `Delta_a tol_s`; and the arena is left at `tau_hi`, strictly past the crossing, so
+            #      the next advance's first stage reads the post-crossing branch unaided.
+            #
+            # The residual is then the *tolerance*, not the step - `n Delta_a tol_s T_rem` - which
+            # is what makes it vanish from the convergence ladder instead of dominating it.
+            sign0 = np.sign(g0)
+            self._set_event_latches(sign0)
+            try:
+                self._restore_event_state()
+                if tau_lo >= manoeuvres.MIN_SUBSTEP_S:
+                    self._advance(tau_lo)
+                if tau_hi > tau_lo:
+                    self._advance(tau_hi - tau_lo)
+
+                # Postcondition: the arena must now be strictly past the crossing, or the next
+                # sub-interval's first stage reads the pre-crossing branch and the whole exercise
+                # is undone. It is *checked*, because the bracket was measured on the root find's
+                # trial trajectory (one advance of `tau` from the interval start) and the split
+                # followed a different one (an advance to `tau_lo`, then the micro-step): within a
+                # tolerance of the surface those two can land on opposite sides. Nudging by one
+                # more tolerance costs `Delta_a tol_s` - the same order as the tolerance residual
+                # already accepted - and is measured at zero or one nudge per crossing.
+                #
+                # The test is `<= 0`, not `< 0`, and that is not a style choice. A converging root
+                # find lands *on* the root, and the event function quantises: `umbra_clearance` is
+                # `sqrt(...) - r_occ`, whose value rounds to **exactly 0.0** for every position
+                # within one ulp of 6378 km of the surface. `H` is then `-0.0`, and `-0.0 < 0.0` is
+                # false in IEEE 754, so a strict test declares the crossing resolved while the body
+                # sits exactly on a surface whose own membership test (`perp < r_occ`) is strict and
+                # reads *lit*. That is how the first-order error survived the split, undetected and
+                # unraised, until a full-precision trace of one crossing showed `g = +0.000000e+00`.
+                advanced = tau_hi
+                crossed_sign = sign0[crossed]
+                nudges = 0
+                while events.reduce_to_scalar(self._event_values()[crossed], crossed_sign) <= 0.0:
+                    if nudges >= events.MAX_CROSSING_NUDGES:
+                        raise ValueError(
+                            f"event crossing located at t={float(self.t)} s could not be stepped "
+                            f"past in {nudges} nudges of {tol_s} s. The event function is moving "
+                            f"faster than the tolerance resolves, or is not continuous. Loosen "
+                            f"tol_s, or check the event function. See events.py."
+                        )
+                    self._advance(tol_s)
+                    advanced += tol_s
+                    nudges += 1
+            finally:
+                self._set_event_latches(None)
+            self._event_splits += 1
+            splits += 1
+            remaining -= advanced
 
     def apply_delta_v(
         self,

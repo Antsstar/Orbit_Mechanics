@@ -34,7 +34,8 @@ __all__ = [
     "VESSEL_DRY_MASS", "VESSEL_FUEL_MASS",
     "STATION_LATITUDE_DEG", "STATION_LONGITUDE_DEG", "STATION_ALTITUDE_KM",
     "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
-    "ground_station_pass",
+    "ground_station_pass", "eclipsed_satellite",
+    "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -522,6 +523,108 @@ def ground_station_pass(
             p=radius, e=0.0, i=math.radians(inclination_deg),      # circular, so p == a == r
             raan=math.radians(raan_deg), arg_pe=0.0,
             theta=math.pi + 2.0 * math.pi * k / n_sats,
+        ))
+        names.append(name)
+
+    session.commit()
+
+    return Simulation(
+        body_names=names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+
+
+# --------------------------------------------------------------------------------------------------
+# Eclipse geometry, in an Earth-rooted arena
+# --------------------------------------------------------------------------------------------------
+
+#: Name of the massless, effectively static luminous marker `eclipsed_satellite` seeds as the SRP
+#: light source. It is deliberately not called "Sun": it carries `mu = 0`, so it is a *position* that
+#: light comes from and not a star. That is all `srp.py` ever asks of a source - the model reads the
+#: source's row of `global_states` and never its mass.
+LIGHT_SOURCE_NAME = "LIGHT"
+
+#: Distance of that marker from Earth, km. One astronomical unit, so `(AU/d)^2` in `srp.py`'s kernel
+#: is 1 to a part in 1e8 and the acceleration magnitude is the textbook `C_r P_srp (A/m)`.
+LIGHT_SOURCE_DISTANCE_KM = 1.495978707e8
+
+
+def eclipsed_satellite(
+    session: Session,
+    *,
+    n_sats: int = 1,
+    altitude_km: float = 550.0,
+    inclination_deg: float = 23.4,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth at the arena root, a distant massless light source, and `n_sats` satellites that pass
+    through Earth's umbra once per orbit.
+
+    **Why this exists rather than `sun_earth_moon(leo_satellite=True)`.** That scenario's arena is
+    heliocentric: a LEO satellite's `global_states` row is `~1.5e8 km`, and a Cowell body's
+    acceleration is computed by differencing it against its parent's, which throws away nine
+    significant digits. Over 1.5 LEO orbits that puts a **round-off floor of about `1e-5 km`** on the
+    integrated trajectory - measured, with the shadow and SRP switched off entirely - which is the
+    same size as RK4's own truncation at `h = 10 s`. RK4's fourth-order convergence is therefore not
+    observable at all in that arena, so neither is its *recovery* after a discontinuity is removed
+    (`events.py`). Here Earth heads its own system at the root, so a satellite's coordinates are
+    `~7000 km`, the floor drops by six orders, and a step-halving ladder reads a clean 16.
+
+    The light source is `LIGHT_SOURCE_NAME`: a massless vessel on a circular orbit at
+    `LIGHT_SOURCE_DISTANCE_KM`, which is 1 AU, where its period is `~1.8e10 s` and it moves under half
+    a kilometre over a 1.5-orbit run. It is a real Keplerian body rather than a frozen row, so the
+    scenario stays time-invariant and needs no special case anywhere.
+
+    Geometry: the source sits on `+x` at `t = 0`, so Earth's umbra trails along `-x`; the satellites
+    are circular at `raan = 0`, so their line of nodes runs along `+/-x` and every satellite passes
+    through the shadow axis at its descending node. `inclination_deg` defaults to a non-zero,
+    non-special value for the same reason `ground_station_pass`'s does - an equatorial orbit is
+    symmetric about the shadow axis and a transposed component could hide in it. Satellites start at
+    true anomaly 0 (on `+x`, full sun) and are phased evenly, so `n_sats > 1` gives an arena in which
+    some bodies are crossing the terminator while others are not - which is what makes the split per
+    arena rather than per body observable (`events.py`).
+
+    Nothing is configured: the caller sets the propagator and enables `"srp"`, because the shadow
+    model and its coefficients are the thing under test.
+    """
+    if n_sats < 1:
+        raise ValueError(f"n_sats must be at least 1, got {n_sats}")
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    session.add(VesselORM(
+        name=LIGHT_SOURCE_NAME, mu=0.0, system_id=system.id, parent_id=earth.id,
+        dry_mass=1.0, fuel_mass=0.0, drag_area=0.0,
+        p=LIGHT_SOURCE_DISTANCE_KM, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    ))
+
+    radius = EARTH_RADIUS + altitude_km
+    names: List[str] = ["Earth", LIGHT_SOURCE_NAME]
+    for k in range(n_sats):
+        name = f"ECLIPSE-SAT-{k:02d}"
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+            p=radius, e=0.0, i=math.radians(inclination_deg),      # circular, so p == a == r
+            raan=0.0, arg_pe=0.0,
+            theta=2.0 * math.pi * k / n_sats,
         ))
         names.append(name)
 

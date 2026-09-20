@@ -66,7 +66,10 @@ linearly in the remaining time. At `h = 60 s` that is `3.6e-9 km/s` per crossing
 the same orbit is far smaller, so eclipse crossings dominate the error budget of a shadowed run, and
 halving `h` only halves it. The conical model removes the discontinuity in `nu` itself (it is
 continuous, though its derivative is not), which is the real reason to prefer it over the extra
-fidelity of the penumbra.
+fidelity of the penumbra. The *general* fix is to stop the step at the terminator instead of smoothing
+it: `umbra_clearance` below is this surface written as a signed scalar, `events.shadow_event(sim)`
+wraps it, and `Simulation.add_event` turns the splitting on - which restores RK4's order rather than
+hiding the symptom. See `events.py`.
 
 The conical model computes the **occulted fraction of the source's disc** from three angles measured
 at the body: the apparent radius of the source `alpha = asin(r_source / d_source)`, the apparent
@@ -113,6 +116,7 @@ Coefficients
 | `r_occ` | 4 | km, occulting body (the Keplerian parent) radius; `<= 0` disables the shadow |
 | `r_source` | 5 | km, light source radius; read by the conical model only |
 | `shadow_model` | 6 | selector: 0.0 cylindrical, 1.0 conical |
+| `shadow_latch` | 7 | **engine-owned**: branch override written by `events.py`, never by a caller |
 
 `p_srp [N/m^2] * (A/m) [m^2/kg]` is m/s^2, and the engine wants km/s^2. **The only unit conversion is
 `_M_TO_KM = 1e-3`**, applied once. `AU / d` is a ratio of kilometres and needs none.
@@ -181,32 +185,37 @@ Limitations
   and Earth eclipses of a lunar orbiter (whose parent is the Moon), are not modelled.
 - Attitude, flat panels, thermal re-radiation, Earth albedo and infrared re-radiation: none modelled.
   Albedo is typically 10-30 % of direct SRP in LEO and is the largest of these omissions.
-- The cylindrical model's discontinuity degrades RK4 to first order on crossing steps. Neither model
-  does event detection, which is the actual fix and is out of scope here.
+- The cylindrical model's discontinuity degrades RK4 to first order on crossing steps **unless the
+  step is cut at the terminator**. That fix now exists and is opt-in: `umbra_clearance` below is the
+  signed event function, `events.shadow_event(sim)` wraps it, and `Simulation.add_event` turns it on.
+  Neither shadow model does event detection by itself - `nu` is still a plain function of the state.
 - `C_r` and `A/m` are constant: no articulated arrays, no mass coupling to `thrust.py`'s propellant.
 """
 from __future__ import annotations
 
-from typing import Final, Mapping, TYPE_CHECKING
+from typing import Final, Mapping, Optional, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .constants import AU2KM, C_SI
 from .custom_types import ArrayFloat, ScalarSeconds
-from .registry import register_force_model
+from .registry import mask_for, register_force_model
 
 if TYPE_CHECKING:
     from .simulator import Simulation
 
 __all__ = [
     "SRP_MODEL", "SRP_PARAM_NAMES", "srp_kernel", "shadow_factor",
+    "umbra_clearance", "shadow_clearance", "cylindrical_shadow_bodies", "latch_shadow_branch",
+    "LATCH_AUTO", "LATCH_LIT", "LATCH_DARK",
     "SOLAR_CONSTANT_1AU", "SOLAR_PRESSURE_1AU", "SUN_RADIUS",
     "SHADOW_MODEL_CYLINDRICAL", "SHADOW_MODEL_CONICAL",
 ]
 
 SRP_MODEL: Final[str] = "srp"
-SRP_PARAM_NAMES: Final = ("cr", "area_mass", "p_srp", "source", "r_occ", "r_source", "shadow_model")
+SRP_PARAM_NAMES: Final = (
+    "cr", "area_mass", "p_srp", "source", "r_occ", "r_source", "shadow_model", "shadow_latch")
 _CR_COL: Final[int] = 0
 _AREA_MASS_COL: Final[int] = 1
 _P_SRP_COL: Final[int] = 2
@@ -214,6 +223,16 @@ _SOURCE_COL: Final[int] = 3
 _R_OCC_COL: Final[int] = 4
 _R_SOURCE_COL: Final[int] = 5
 _SHADOW_MODEL_COL: Final[int] = 6
+_SHADOW_LATCH_COL: Final[int] = 7
+
+#: `shadow_latch` values. **Engine-owned state, not a configuration knob** - `_validate_srp` refuses
+#: a user-supplied one, and `enable_force_model` leaves the column at `LATCH_AUTO`. The only writer
+#: is `latch_shadow_branch`, called by `Simulation._advance_with_events` for the duration of the
+#: sub-step that runs up to a located terminator crossing. See that method, and `events.py`, for why
+#: a piecewise-smooth right-hand side has to be told which piece it is on.
+LATCH_AUTO: Final[float] = 0.0
+LATCH_LIT: Final[float] = 1.0
+LATCH_DARK: Final[float] = -1.0
 
 # p_srp [N/m^2] * (A/m) [m^2/kg] is m/s^2; the engine wants km/s^2. The model's only unit conversion.
 _M_TO_KM: Final[float] = 1.0e-3
@@ -253,6 +272,7 @@ def shadow_factor(
     source_radius_km: ArrayFloat,
     occulter_radius_km: ArrayFloat,
     conical: NDArray[np.bool_],
+    latch: Optional[ArrayFloat] = None,
 ) -> ArrayFloat:
     """
     The illuminated fraction `nu` in `[0, 1]` of the source's disc, per row.
@@ -268,6 +288,16 @@ def shadow_factor(
         `True` selects the apparent-disc overlap (umbra/penumbra/annular), `False` the cylindrical
         umbra. Both laws are evaluated for every row and masked, so a mixed arena costs no branch -
         the same branchless-select idiom `drag.py` uses for its two density laws.
+    latch : (k,) or None
+        Per-row branch override, `LATCH_AUTO` / `LATCH_LIT` / `LATCH_DARK`. `None` (and `LATCH_AUTO`)
+        evaluate the geometry, which is the only behaviour anything outside `events.py` ever sees.
+        A latched row returns exactly `1.0` or exactly `0.0` **regardless of where it is**, which is
+        what makes a sub-step that has been cut at a terminator integrate one, smooth branch of the
+        piecewise right-hand side at *all four* of its RK4 stages rather than whichever branch each
+        stage's off-trajectory sample point happens to fall in. Without it, the stage that lands on
+        the crossing carries weight 1/6 of a full `Delta_a h`, which is first order and is exactly
+        the error event splitting is supposed to remove - measured at `3.38e-6 km` against a derived
+        `3.26e-6 km` before the latch existed. See `Simulation._advance_with_events`.
 
     Returns exactly `0.0` or exactly `1.0` under the cylindrical law, and a continuous value under
     the conical one. See the module docstring for both derivations and for what the cylinder's
@@ -329,7 +359,136 @@ def shadow_factor(
     nu[total] = 0.0
     nu[annular] = 1.0 - ratio[annular] * ratio[annular]
     nu[partial] = np.clip(lit_partial[partial], 0.0, 1.0)
+
+    # The branch override, applied last so it wins over the geometry. `LATCH_AUTO` (and `None`)
+    # leave every row exactly as computed above, so this is a no-op for every caller but `events.py`.
+    if latch is not None:
+        nu[latch > 0.5] = 1.0
+        nu[latch < -0.5] = 0.0
     return nu
+
+
+# ==================================================================================================
+# The umbra boundary as an event function
+# ==================================================================================================
+
+def umbra_clearance(
+    to_source: ArrayFloat, to_occulter: ArrayFloat, occulter_radius_km: ArrayFloat,
+) -> ArrayFloat:
+    """
+    Signed clearance from the cylindrical umbra's surface, km: **negative inside the umbra**.
+
+    This is the event function `events.py` locates the root of, and it is the same geometry
+    `shadow_factor`'s cylindrical branch tests - written as a continuous signed scalar rather than as
+    a boolean, so that a root find can bracket it. The two are held consistent in
+    `tests/validation/test_events.py`.
+
+    Derivation. With `e` the unit vector along occulter -> source and `p = -to_occulter` the body's
+    position relative to the occulter, write `along = p . e` and `perp = |p - along e|`. The umbra is
+    the half-infinite cylinder `along < 0`, `perp < r_occ`. Define
+
+        g = hypot(perp, max(along, 0)) - r_occ
+
+    Behind the terminator plane (`along <= 0`) this is `perp - r_occ`, whose zero is exactly the
+    cylinder's side surface. Ahead of it (`along > 0`) it is `|p| - r_occ`, the clearance from the
+    occulter's own sphere. The two agree at `along = 0`, so `g` is continuous everywhere, and it is
+    negative exactly on the umbra for any body **outside the occulter** (`|p| > r_occ`) - which every
+    orbiting body is. Inside the occulter's sphere on the sunward side `g` also reads negative while
+    `shadow_factor` reads lit; that region is subsurface and unreachable for an orbit.
+
+    The cylinder's *end cap* - the terminator disc `along = 0`, `perp < r_occ` - is not a reachable
+    boundary either: `along = 0` and `perp < r_occ` together give `|p| = perp < r_occ`, again inside
+    the occulter. So the side surface is the whole of the crossing geometry.
+
+    Parameters
+    ----------
+    to_source, to_occulter : (k, 3)
+        Vectors **from the body** to the light source and to the occulting body, km - the same two
+        `shadow_factor` takes.
+    occulter_radius_km : (k,)
+        Occulter radius, km. `<= 0` means no occulter, and `g` is then `hypot(...) - r_occ >= 0`
+        everywhere by construction: no special case is needed and no crossing can ever be reported.
+
+    A degenerate row whose occulter sits exactly on the source (`|axis| = 0`) has no shadow axis; it
+    falls back to `|p| - r_occ`, which is the spherical clearance and is the continuous limit.
+    """
+    axis = to_source - to_occulter                       # occulter -> source
+    d_axis: ArrayFloat = np.sqrt(np.einsum("ij,ij->i", axis, axis))
+    p2: ArrayFloat = np.einsum("ij,ij->i", to_occulter, to_occulter)     # |p|^2, p = -to_occulter
+
+    inv_axis = np.divide(1.0, d_axis, out=np.zeros_like(d_axis), where=d_axis > 0.0)
+    along = -np.einsum("ij,ij->i", to_occulter, axis) * inv_axis
+    # A degenerate axis leaves `along` at 0, so the expression below reduces to |p| - r_occ.
+    sunward = np.maximum(along, 0.0)
+    perp2 = np.maximum(p2 - along * along, 0.0)
+
+    out: ArrayFloat = np.sqrt(perp2 + sunward * sunward) - occulter_radius_km
+    return out
+
+
+def cylindrical_shadow_bodies(sim: "Simulation") -> NDArray[np.int64]:
+    """
+    Arena slots whose SRP acceleration is **discontinuous**: `"srp"` enabled, `r_occ > 0`, cylinder.
+
+    A conical body is excluded because its `nu` is continuous - there is nothing to stop the step at
+    - and an `r_occ <= 0` body has no occulter at all. `events.shadow_event` uses this as its default
+    body list; it is separate from that factory so a caller can inspect or subset it.
+    """
+    params = sim.force_model_params.get(SRP_MODEL)
+    if params is None:
+        return np.empty(0, dtype=np.int64)
+    enabled = (sim.force_model_mask & mask_for((SRP_MODEL,))) != np.uint64(0)
+    shadowed = enabled & (params[:, _R_OCC_COL] > 0.0) & (params[:, _SHADOW_MODEL_COL] < 0.5)
+    out: NDArray[np.int64] = np.flatnonzero(shadowed & sim.active_mask).astype(np.int64)
+    return out
+
+
+def shadow_clearance(sim: "Simulation", bodies: NDArray[np.int64]) -> ArrayFloat:
+    """
+    `events.EventFunction` adapter for `umbra_clearance`: `(sim, bodies) -> (k,)`, km.
+
+    A pure read of `sim.global_states`, `sim.parent_indices` and `sim.force_model_params["srp"]` -
+    `events.py` evaluates it at trial times inside a step and relies on it leaving no trace. The
+    occulter is the Keplerian parent and the source is the `source` coefficient, exactly as in
+    `srp_kernel`, so the sign of this function and the value of `nu` inside that kernel are the same
+    geometry read twice.
+    """
+    params = sim.force_model_params[SRP_MODEL]
+    sources = params[bodies, _SOURCE_COL].astype(np.int64)
+    occulters = sim.parent_indices[bodies]
+    state = sim.global_states
+    return umbra_clearance(
+        state[sources, :3] - state[bodies, :3],
+        state[occulters, :3] - state[bodies, :3],
+        params[bodies, _R_OCC_COL],
+    )
+
+
+def latch_shadow_branch(
+    sim: "Simulation", bodies: NDArray[np.int64], clearance_sign: Optional[ArrayFloat],
+) -> None:
+    """
+    `events.LatchFunction` for the shadow event: pin `bodies` to one branch of the shadow, or release.
+
+    `clearance_sign` is the sign of `shadow_clearance` at the start of a sub-interval that is known
+    to contain no crossing: positive is outside the umbra (lit), negative inside (dark). That is
+    `umbra_clearance`'s own convention, which is why this translation lives here and not in
+    `events.py` - the event layer knows only that the function changed sign, never what the sign
+    *means*. `None` releases every row back to `LATCH_AUTO`, which is the geometry.
+
+    Writing `force_model_params` outside `enable_force_model` is deliberate and has precedent:
+    `thrust.deplete_mass` does the same to its mass column once per step. Unlike that one, this is
+    not physical state - it is a statement about which branch of a piecewise right-hand side the
+    current sub-step belongs to, and it is always released before `Simulation.step` returns.
+    """
+    params = sim.force_model_params.get(SRP_MODEL)
+    if params is None:
+        return
+    if clearance_sign is None:
+        params[bodies, _SHADOW_LATCH_COL] = LATCH_AUTO
+        return
+    params[bodies, _SHADOW_LATCH_COL] = np.where(
+        clearance_sign > 0.0, LATCH_LIT, np.where(clearance_sign < 0.0, LATCH_DARK, LATCH_AUTO))
 
 
 # ==================================================================================================
@@ -485,6 +644,7 @@ def srp_kernel(
         to_source, to_occulter,
         coeff[:, _R_SOURCE_COL], coeff[:, _R_OCC_COL],
         coeff[:, _SHADOW_MODEL_COL] >= 0.5,
+        coeff[:, _SHADOW_LATCH_COL],
     )
 
     # cr * p_srp [N/m^2] * (A/m) [m^2/kg] is m/s^2; (AU/d)^2 is dimensionless; 1e-3 gives km/s^2.
