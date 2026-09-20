@@ -96,16 +96,32 @@ That is the *same order* as the quantity being measured - the most accurate tier
 not tolerated.
 
 **It is dealt with by using one grid for both sides.** Truth windows and model windows are computed
-on the *same* time samples, so the bias is common-mode and cancels to first order in the difference.
-What survives is `C * Delta * |b - a| <= C * Delta * h`, where `Delta` is the shift itself:
+on the *same* time samples, so the bias is common-mode and cancels in the difference. Writing the
+bias as `beta(a) = C a (h - a)` for a crossing `a` into its bracket, the model's crossing sits at
+`a + Delta` and the residual is
 
+    beta(a + Delta) - beta(a) = C Delta (h - 2a - Delta),      |residual| <= C Delta h
+
+and - this is the part worth checking rather than assuming - the bound survives the case where the
+two crossings fall in *different* brackets. There `a ~ h` and `a + Delta - h ~ 0`, so **both** biases
+are near zero (`beta` vanishes at both ends of a bracket); the difference is again `O(C Delta h)`.
+There is no regime in which the cancellation fails:
+
+    h = 60 s, Delta = 0.27 s  ->  residual <= 2.0e-2 s   (7.2 % of the signal)
     h = 30 s, Delta = 0.27 s  ->  residual <= 9.8e-3 s   (3.6 % of the signal)
     h = 10 s, Delta = 0.27 s  ->  residual <= 3.3e-3 s   (1.2 % of the signal)
 
-`DEFAULT_SAMPLE_DT_S = 10.0` is that second line. (When the two crossings fall in *different* grid
-intervals - probability `Delta / h`, about 3 % at `h = 10 s` - the cancellation is incomplete and the
-residual reverts to the raw `C h^2 / 4 = 0.030 s`. Still an order below the signal.) A tier whose
-window shifts are below ~0.03 s cannot be resolved on this grid, and no tier in this engine is.
+`DEFAULT_SAMPLE_DT_S = 60.0` is the first line, and it is chosen there rather than lower because of
+a constraint from the other direction: **the propagation step must divide the sample spacing.**
+`viz.sample_states` splits each sample interval into sub-steps of *at most* `max_dt`, so asking for
+a 10 s grid from a `dt = 60 s` configuration would silently propagate it at 10 s and report a
+different model from the one the sweep timed and scored. `sweep.access_metrics_for` raises rather
+than let that happen, so `sample_dt_s` must be an integer multiple of every configuration's `dt`,
+and 60 s is the engine's habitual Cowell step. A finer grid is strictly better wherever the
+configurations allow it.
+
+A tier whose window shifts are below ~0.02 s cannot be resolved on the default grid, and no tier in
+this engine is.
 
 `peak_elevation_rad` is sampled rather than refined (`geometry.AccessWindow`), so it is a lower
 bound and is **not** differenced here. It is used only to *choose* a mask angle in the tests.
@@ -137,9 +153,10 @@ __all__ = [
     "match_windows", "summarise_matches", "compare_windows",
 ]
 
-# See "Sampling step" in the module docstring: derived from the requirement that the residual
-# edge-interpolation bias stay ~1 % of the smallest window shift any tier in this engine produces.
-DEFAULT_SAMPLE_DT_S = 10.0
+# See "Sampling step" in the module docstring: the residual edge-interpolation bias is C*Delta*h,
+# which at 60 s is 7 % of the smallest window shift any tier in this engine produces - and 60 s is
+# the coarsest step the propagation-divides-the-grid constraint leaves room for.
+DEFAULT_SAMPLE_DT_S = 60.0
 
 
 # --------------------------------------------------------------------------------------------------
@@ -176,10 +193,11 @@ class AccessSpec:
     in particular `theta0` is referenced to `epoch_s` (default 0.0 = absolute simulation time), *not*
     to the first sample, so a sweep's windows do not move when the grid moves.
 
-    `sample_dt_s` defaults to `DEFAULT_SAMPLE_DT_S`; the module docstring derives why. It is the
-    **metric's** grid, independent of any `ModelConfig.dt` - a config with `dt = 60 s` is still
-    sub-stepped to each sample at its own 60 s (`viz.sample_states(max_dt=config.dt)`), so the
-    trajectory compared is step-for-step the one the sweep propagated.
+    `sample_dt_s` defaults to `DEFAULT_SAMPLE_DT_S`; the module docstring derives why. It must be an
+    integer multiple of every configuration's `dt`, because `viz.sample_states` sub-divides a sample
+    interval into steps of *at most* `max_dt` - a 10 s grid asked of a `dt = 60 s` configuration
+    would quietly propagate it at 10 s and score a model the sweep never ran.
+    `sweep.access_metrics_for` raises on that rather than reporting it.
 
     `bodies`, when given, names the subset of bodies to report access for; the default is whatever
     body set the configuration itself governed, so the access metrics and the position-error

@@ -258,14 +258,30 @@ def access_metrics_for(
     that run steps straight to the horizon and keeps no history. The trajectory is nonetheless the
     same one: `viz.sample_states(max_dt=config.dt)` sub-steps each sample interval at the
     configuration's own step size.
+
+    That last sentence is only true when `config.dt` **divides** the sample spacing, because
+    `sample_states` splits an interval into sub-steps of *at most* `max_dt`: a 10 s grid asked of a
+    `dt = 60 s` configuration would take one 10 s step per sample and score a sixfold finer model
+    than the one `run_sweep` timed and reported an error for. That is a silent, entirely plausible
+    wrong answer, so it raises `ValueError` instead.
     """
+    grid = access_grid(horizon_s, spec.sample_dt_s)
+    spacing = float(grid[1] - grid[0])
+    steps_per_sample = spacing / config.dt
+    if abs(steps_per_sample - round(steps_per_sample)) > 1e-9 or round(steps_per_sample) < 1:
+        raise ValueError(
+            f"config '{config.name}': dt={config.dt} s does not divide the access sample spacing "
+            f"{spacing} s (horizon {horizon_s} s at sample_dt_s={spec.sample_dt_s} s). The access "
+            f"metric would then propagate this configuration at a step it was never run with. "
+            f"Raise AccessSpec.sample_dt_s to a multiple of every config's dt."
+        )
+
     sim = build_scenario()
     sim.record_history = False
     idx = apply_config(sim, config)
     names, slots = _access_body_names(sim, idx, spec)
 
-    times = access_grid(horizon_s, spec.sample_dt_s)
-    model = windows_from_simulation(sim, slots, times, spec, max_dt=config.dt)
+    model = windows_from_simulation(sim, slots, grid, spec, max_dt=config.dt)
     truth = windows_from_truth(access_truth, names, spec)
     return compare_windows(truth, model)
 

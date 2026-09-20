@@ -26,7 +26,7 @@ it was measured** (`CLAUDE.md`'s item 5):
 `geometry.py`'s documented limits are handled rather than ignored: window edges carry an `O(h^2)`
 convex-horizon **bias** (durations read long), so truth and model are always sampled on the *same*
 grid and the bias cancels to first order - see `access.py`'s "Sampling step", which derives the
-residual `C * Delta * h` and the `h = 10 s` default from it. `peak_elevation_rad` is sampled rather
+residual `C * Delta * h` and the 60 s default from it. `peak_elevation_rad` is sampled rather
 than refined, so it is used here only to *choose* a mask angle, never differenced.
 """
 from __future__ import annotations
@@ -247,7 +247,7 @@ def test_access_metrics_do_not_disturb_the_position_error_statistics(
     and without `access=`, since neither the propagation nor the truth they are computed from is
     touched by the new keyword."""
     build = _constellation_builder(db_session_factory)
-    config = sweep.ModelConfig(name="kepler", propagator=PropagatorType.KEPLERIAN, dt=120.0)
+    config = sweep.ModelConfig(name="kepler", propagator=PropagatorType.KEPLERIAN, dt=60.0)
     horizon = 3600.0
 
     [plain] = sweep.run_sweep(build, [config], horizon, timing_batches=1, timing_warmup=0)
@@ -284,9 +284,9 @@ def test_truth_is_integrated_once_more_for_access_and_not_once_per_config(
     monkeypatch.setattr(sweep, "reference_for", counting)
 
     configs = [
-        sweep.ModelConfig(name="a", propagator=PropagatorType.KEPLERIAN, dt=120.0),
-        sweep.ModelConfig(name="b", propagator=PropagatorType.KEPLERIAN, dt=60.0),
-        sweep.ModelConfig(name="c", propagator=PropagatorType.KEPLERIAN, dt=30.0),
+        sweep.ModelConfig(name="a", propagator=PropagatorType.KEPLERIAN, dt=60.0),
+        sweep.ModelConfig(name="b", propagator=PropagatorType.KEPLERIAN, dt=30.0),
+        sweep.ModelConfig(name="c", propagator=PropagatorType.KEPLERIAN, dt=20.0),
     ]
     results = sweep.run_sweep(
         build, configs, 3600.0, timing_batches=1, timing_warmup=0, access=_spec(sample_dt_s=60.0),
@@ -294,6 +294,32 @@ def test_truth_is_integrated_once_more_for_access_and_not_once_per_config(
 
     assert calls["n"] == 2, "endpoint truth plus access-grid truth, once each for the whole sweep"
     assert all(r.access is not None for r in results)
+
+
+def test_a_step_that_does_not_divide_the_sample_grid_raises(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """The silent-misrepresentation guard. `viz.sample_states` sub-divides a sample interval into
+    steps of *at most* `max_dt`, so a 60 s grid asked of a `dt = 90 s` configuration would propagate
+    it at 30 s - a different, more accurate model than the one `run_sweep` scored. It must raise."""
+    build = _constellation_builder(db_session_factory)
+    config = sweep.ModelConfig(name="odd-dt", propagator=PropagatorType.KEPLERIAN, dt=90.0)
+    with pytest.raises(ValueError, match="does not divide the access sample spacing"):
+        sweep.run_sweep(
+            build, [config], 3600.0, timing_batches=1, timing_warmup=0,
+            access=_spec(sample_dt_s=60.0),
+        )
+
+
+def test_default_sample_step_is_the_derived_one() -> None:
+    """`DEFAULT_SAMPLE_DT_S` is derived in `access.py`'s "Sampling step", not chosen by taste; if it
+    moves, that derivation moved with it."""
+    assert access.DEFAULT_SAMPLE_DT_S == 60.0
+    assert access.AccessSpec(
+        stations=[STATION], central_body="Earth", omega=EARTH_OMEGA,
+        body_radius_km=scenarios.EARTH_RADIUS,
+    ).sample_dt_s == access.DEFAULT_SAMPLE_DT_S
+
 
 
 # ==================================================================================================
