@@ -59,6 +59,38 @@ days from 355 km at B = 0.4 m^2/kg the table predicts 116.25 km of decay against
 89.20 km, a difference of 27.06 km, or 30 % more. The 28 band boundaries are the ticks on the ratio
 panel - the kinks in the curve are real and are what `np.searchsorted` is selecting between.
 
+**6. `access_windows.png` - caption.** The same 12-satellite constellation and the same four tiers as
+`error_growth.png`, but the error is in **contact windows** rather than kilometres: rise-time shift
+against a DOP853 + J2 truth for every pass over three stations (Kiruna, Wallops, Santiago) at a 5 deg
+mask over 24 h - 189 true passes. Svalbard is deliberately absent: a 53 deg orbit at 550 km has a
+23.0 deg horizon half-angle and a sub-point bounded by +/-53 deg, so a site above ~76 deg never sees
+it at all. Both panels report the *rise* shift; set and duration behave the same way and are in
+`access.AccessMetrics`.
+
+Mean |rise shift| / max |rise shift| / lost / gained: Kepler 31.65 s / 154.21 s / 5 / 4; secular J2
+osculating-seeded 30.82 s / 115.82 s / 1 / 2; secular J2 mean-seeded 1.60 s / 8.10 s / 1 / 0;
+Cowell + j2 at 60 s **0.063 s / 0.223 s / 0 / 0**. Against a 1 s threshold - roughly the acquisition
+pad a real schedule already carries - **Cowell + J2 is the first tier that clears it**, and the only
+one that neither invents nor loses a pass.
+
+Three things the kilometre metric cannot say. First, the **discrete failures**: Kepler does not merely
+mistime its passes, it deletes five that happen and predicts four that do not, and those nine are
+scheduling decisions rather than error bars. Second, **ranking changes**: mean-seeded secular J2 is
+100x better than Kepler in kilometres (4.04 km against 607.61 km in `error_growth.png`) but only 20x
+better in mean window shift, and it still drops a marginal pass - an averaged theory reproduces the
+along-track position far better than it reproduces the *elevation profile* near the horizon, which is
+where a marginal pass lives. Third, **the two secular-J2 seedings are indistinguishable in the scatter
+above ~10 s** while being two orders of magnitude apart at the horizon: the osculating-seeded tier's
+shift is a coherent drift, and the top panel shows it growing from seconds to a minute over the day
+whereas the mean-seeded tier's is a bounded short-period wobble that never trends.
+
+Cowell's 0.223 s maximum is the sanity check on the whole measurement. Its position error after 24 h
+is 1.88 km (`error_growth.png`), and a 1.88 km along-track displacement moves a pass by
+`(1.88 / 6921) / Omega = 0.265 s` at `Omega = n - omega = 1.024e-3 rad/s`. Measured 0.223 s, i.e.
+the along-track share of a 1.88 km error, as it should be. The residual edge-interpolation bias at
+this 60 s grid is bounded by `C Delta h = 1.6e-2 s` (`access.py`), so the number is signal, not
+sampling.
+
 **4. `hierarchy.png` - caption.** `sun_earth_moon` over 60 days, drawn in the frame that makes the
 hierarchy visible: relative to the Earth-Moon barycentre. Neither body's `parent_indices` parent is
 the other - both are measured about the barycentre, which is itself the body carrying the
@@ -85,7 +117,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from orbital_engine import scenarios, viz
+from orbital_engine import access, scenarios, sweep, viz
 from orbital_engine.atmosphere import (
     BASE_ALTITUDE_KM, DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, layered_density,
 )
@@ -626,6 +658,132 @@ def figure_atmosphere() -> None:
     _save(fig, "atmosphere.png")
 
 
+
+# ==================================================================================================
+# 6. Access-window error by model tier
+# ==================================================================================================
+
+ACCESS_HORIZON_S = 86400.0
+ACCESS_SAMPLE_DT_S = 60.0             # must be a multiple of every tier's dt - see access.py
+ACCESS_DT_S = 60.0                    # the same step for every tier, so the constraint holds for all
+ACCESS_MASK_DEG = 5.0
+
+# Three sites a 53 deg orbit actually reaches. A 550 km satellite's horizon half-angle is 23.0 deg
+# and its sub-point never leaves +/-53 deg, so a station north of about 76 deg would see nothing at
+# all - Svalbard is the wrong site for this constellation and is deliberately not in the list.
+ACCESS_STATIONS = [
+    access.GroundStation("Kiruna", math.radians(67.86), math.radians(20.96), 0.40),
+    access.GroundStation("Wallops", math.radians(37.94), math.radians(-75.46), 0.01),
+    access.GroundStation("Santiago", math.radians(-33.15), math.radians(-70.67), 0.73),
+]
+
+# The threshold the headline is stated against. A ground-station schedule already carries a few
+# seconds of acquisition pad, so a model whose windows land within ~1 s of truth changes no
+# decision; one out by tens of seconds eats the pad, and one that loses a pass changes the plan.
+ACCESS_THRESHOLD_S = 1.0
+
+
+def _access_configs() -> Dict[str, sweep.ModelConfig]:
+    j2 = {"j2": EARTH_J2, "r_eq": EARTH_R_EQ}
+    return {
+        "Kepler": sweep.ModelConfig(
+            name="Kepler", propagator=PropagatorType.KEPLERIAN, dt=ACCESS_DT_S),
+        "Secular J2 (osculating-seeded)": sweep.ModelConfig(
+            name="Secular J2 (osculating-seeded)", propagator=PropagatorType.SECULAR_J2,
+            dt=ACCESS_DT_S, propagator_coefficients=j2),
+        "Secular J2 (mean-seeded)": sweep.ModelConfig(
+            name="Secular J2 (mean-seeded)", propagator=PropagatorType.SECULAR_J2,
+            dt=ACCESS_DT_S, mean_seed=True, propagator_coefficients=j2),
+        "Cowell + j2 (dt=60 s)": sweep.ModelConfig(
+            name="Cowell + j2 (dt=60 s)", propagator=PropagatorType.COWELL, dt=ACCESS_DT_S,
+            force_models=(sweep.ForceModelSpec(POINT_MASS_MODEL),
+                          sweep.ForceModelSpec(J2_MODEL, j2))),
+    }
+
+
+def figure_access_windows() -> None:
+    spec = access.AccessSpec(
+        stations=ACCESS_STATIONS,
+        central_body="Earth",
+        omega=EARTH_OMEGA,
+        body_radius_km=scenarios.EARTH_RADIUS,
+        mask_angle_rad=math.radians(ACCESS_MASK_DEG),
+        sample_dt_s=ACCESS_SAMPLE_DT_S,
+    )
+    grid = access.access_grid(ACCESS_HORIZON_S, spec.sample_dt_s)
+    truth = reference_for(
+        _error_scenario(), grid, rtol=TRUTH_RTOL, atol=TRUTH_ATOL,
+        oblateness={"Earth": (EARTH_J2, EARTH_R_EQ)},
+    )
+
+    metrics: Dict[str, access.AccessMetrics] = {}
+    for name, config in _access_configs().items():
+        metrics[name] = sweep.access_metrics_for(
+            _error_scenario, config, ACCESS_HORIZON_S, spec, truth
+        )
+        print("  " + access.format_metrics(name, metrics[name]))
+
+    fig, (ax_scatter, ax_bar) = plt.subplots(
+        2, 1, figsize=(10.0, 8.5), gridspec_kw={"height_ratios": [2.0, 1.0]}
+    )
+
+    for name, m in metrics.items():
+        times_h = [pair.truth.rise_s / 3600.0 for pair in m.matches
+                   if pair.rise_shift_s is not None and pair.truth is not None]
+        shifts = [pair.rise_shift_s for pair in m.matches if pair.rise_shift_s is not None]
+        ax_scatter.scatter(times_h, shifts, s=9, alpha=0.55, color=TIER_COLOURS[name], label=name)
+    ax_scatter.axhspan(-ACCESS_THRESHOLD_S, ACCESS_THRESHOLD_S, color="0.85", zorder=0)
+    ax_scatter.axhline(0.0, color="0.4", lw=0.8)
+    ax_scatter.set_yscale("symlog", linthresh=1.0)
+    ax_scatter.set_xlim(0.0, ACCESS_HORIZON_S / 3600.0)
+    ax_scatter.set_xlabel("time of the true rise (h)")
+    ax_scatter.set_ylabel("rise-time shift vs truth (s)\npositive = model rises late")
+    ax_scatter.set_title(
+        f"Contact-window error by model tier: {ERROR_N_SATS} sats at 550 km / 53 deg, "
+        f"{len(ACCESS_STATIONS)} stations, {ACCESS_MASK_DEG:.0f} deg mask, 24 h\n"
+        f"shaded band = +/-{ACCESS_THRESHOLD_S:.0f} s, the acquisition pad a schedule already carries"
+    )
+    ax_scatter.grid(True, which="both", ls=":", alpha=0.5)
+    ax_scatter.legend(loc="upper left", fontsize=8, markerscale=1.8)
+
+    names = list(metrics)
+    y = np.arange(len(names), dtype=np.float64)
+    mean_abs = np.array([metrics[n].rise.mean_abs_s for n in names])
+    max_abs = np.array([metrics[n].rise.max_abs_s for n in names])
+    ax_bar.barh(y, max_abs, height=0.62, color=[TIER_COLOURS[n] for n in names], alpha=0.30,
+                label="max |rise shift|")
+    ax_bar.barh(y, mean_abs, height=0.62, color=[TIER_COLOURS[n] for n in names],
+                label="mean |rise shift|")
+    ax_bar.axvline(ACCESS_THRESHOLD_S, color="k", ls="--", lw=1.2)
+    ax_bar.set_xscale("log")
+    # Room on the right for the per-tier annotations, which are the discrete half of the story.
+    ax_bar.set_xlim(0.5 * float(mean_abs.min()), 60.0 * float(max_abs.max()))
+    ax_bar.set_yticks(y)
+    ax_bar.set_yticklabels(names, fontsize=9)
+    ax_bar.invert_yaxis()
+    ax_bar.set_xlabel("|rise-time shift| (s, log scale)  -  dashed line is the 1 s threshold")
+    ax_bar.grid(True, axis="x", which="both", ls=":", alpha=0.5)
+    ax_bar.legend(loc="lower right", fontsize=8)
+    for k, n in enumerate(names):
+        m = metrics[n]
+        ax_bar.text(
+            max_abs[k] * 1.3, y[k],
+            f"lost {m.passes_lost} / gained {m.passes_gained},  "
+            f"contact {m.total_contact_error_s:+.0f} s of {m.total_contact_truth_s:.0f} s",
+            va="center", fontsize=8,
+        )
+
+    fig.text(
+        0.01, 0.005,
+        "Windows are matched to truth's by time overlap; one with no overlapping counterpart is "
+        "counted lost or gained, never given a shift.\nTruth and model share a single 60 s grid, so "
+        "the convex-horizon interpolation bias is common-mode and cancels (access.py).",
+        fontsize=8, va="bottom",
+    )
+    fig.tight_layout(rect=(0, 0.045, 1, 1))
+    _save(fig, "access_windows.png")
+
+
 # ==================================================================================================
 
 FIGURES: Dict[str, Callable[[], None]] = {
@@ -634,6 +792,7 @@ FIGURES: Dict[str, Callable[[], None]] = {
     "drag": figure_drag_decay,
     "hierarchy": figure_hierarchy,
     "atmosphere": figure_atmosphere,
+    "access": figure_access_windows,
 }
 
 

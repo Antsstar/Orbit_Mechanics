@@ -563,7 +563,8 @@ def format_metrics(name: str, metrics: AccessMetrics) -> str:
     return (
         f"{name:<34} windows {metrics.n_model_windows:>3}/{metrics.n_truth_windows:<3} "
         f"lost {metrics.passes_lost:>2} gained {metrics.passes_gained:>2}  "
-        f"rise {metrics.rise.mean_s:>+9.3f}s (|.| max {metrics.rise.max_abs_s:>8.3f}s)  "
+        f"rise {metrics.rise.mean_s:>+9.3f}s (|.| mean {metrics.rise.mean_abs_s:>8.3f}s "
+        f"max {metrics.rise.max_abs_s:>8.3f}s)  "
         f"dur {metrics.duration.mean_s:>+8.3f}s  "
         f"contact {metrics.total_contact_error_s:>+9.2f}s"
     )
