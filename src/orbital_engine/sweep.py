@@ -35,6 +35,13 @@ which model is more accurate. Wall time is minimum-of-batches (`benchmark.measur
 step loop to the horizon - truth generation and `Simulation` construction are excluded, both here and
 in each batch's `setup`.
 
+**Contact windows, optionally.** Position error in km is not the unit anyone's decision is in. Pass
+`access=AccessSpec(...)` and every `SweepResult` additionally carries `access.AccessMetrics`: rise
+and set shifts against truth, duration and total-contact error, and passes gained or lost. It is
+strictly additive - the error statistics and the timing are computed by exactly the code path they
+were before, and `access is None` (the default) does not build a grid, a station or a second truth.
+See `access.py` for the metric definitions and the matching rule.
+
 **No plotting dependency.** This module never imports `matplotlib`; `benchmarks/frontier_plot.py`
 does that.
 """
@@ -46,6 +53,10 @@ from typing import Callable, List, Mapping, Optional, Sequence, Tuple, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from .access import (
+    AccessMetrics, AccessSpec, access_grid, compare_windows, windows_from_simulation,
+    windows_from_truth,
+)
 from .custom_types import PropagatorType
 from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, reference_for
 from .benchmark import measure
@@ -53,7 +64,7 @@ from .simulator import Simulation
 
 __all__ = [
     "ForceModelSpec", "ModelConfig", "ErrorStats", "SweepResult",
-    "eligible_bodies", "apply_config", "run_sweep",
+    "eligible_bodies", "apply_config", "run_sweep", "access_metrics_for",
 ]
 
 
@@ -104,11 +115,16 @@ class ErrorStats:
 @dataclass(frozen=True)
 class SweepResult:
     """One configuration's outcome: its name, error statistics, minimum-of-batches wall time (us) for
-    the propagation alone, and how many bodies the statistics were taken over."""
+    the propagation alone, and how many bodies the statistics were taken over.
+
+    `access` is `None` unless `run_sweep` was given an `AccessSpec`; it never affects the four fields
+    above, which are computed by the same code either way.
+    """
     config_name: str
     error: ErrorStats
     wall_time_us: float
     n_bodies: int
+    access: Optional[AccessMetrics] = None
 
 
 def eligible_bodies(sim: Simulation) -> NDArray[np.int64]:
@@ -204,6 +220,72 @@ def _error_stats(errors_km: NDArray[np.float64]) -> ErrorStats:
     )
 
 
+def _access_body_names(
+    sim: Simulation, idx: NDArray[np.int64], spec: AccessSpec,
+) -> Tuple[List[str], List[int]]:
+    """
+    The body names and slots the access metrics are reported for, in a single fixed order.
+
+    Default is the configuration's own target set, so the window metrics and the position-error
+    statistics describe the same satellites; `AccessSpec.bodies` narrows it by name. The order is
+    what `geometry.AccessWindow.body_index` refers to, and it is the *same* list for truth and for
+    the model - which is what makes a `body_index` comparable across the two.
+    """
+    slot_to_name = {slot: name for name, slot in sim.name_to_index.items()}
+    if spec.bodies is None:
+        slots = [int(s) for s in idx]
+        return [slot_to_name[s] for s in slots], slots
+    slots = [sim.name_to_index[name] for name in spec.bodies]
+    return list(spec.bodies), slots
+
+
+def access_metrics_for(
+    build_scenario: Callable[[], Simulation],
+    config: ModelConfig,
+    horizon_s: float,
+    spec: AccessSpec,
+    access_truth: ReferenceTrajectory,
+) -> AccessMetrics:
+    """
+    Contact-window error for one configuration against an already-integrated truth trajectory.
+
+    `access_truth` must have been sampled on `access_grid(horizon_s, spec.sample_dt_s)` - the same
+    grid this function propagates the model onto. Sharing the grid is not an optimisation: the
+    linear edge interpolation in `geometry.access_windows` has an `O(h^2)` *bias*, and it only
+    cancels out of a difference if both sides carry it (see `access.py`'s "Sampling step").
+
+    A fresh scenario is built and propagated here rather than reusing `run_sweep`'s own run, because
+    that run steps straight to the horizon and keeps no history. The trajectory is nonetheless the
+    same one: `viz.sample_states(max_dt=config.dt)` sub-steps each sample interval at the
+    configuration's own step size.
+
+    That last sentence is only true when `config.dt` **divides** the sample spacing, because
+    `sample_states` splits an interval into sub-steps of *at most* `max_dt`: a 10 s grid asked of a
+    `dt = 60 s` configuration would take one 10 s step per sample and score a sixfold finer model
+    than the one `run_sweep` timed and reported an error for. That is a silent, entirely plausible
+    wrong answer, so it raises `ValueError` instead.
+    """
+    grid = access_grid(horizon_s, spec.sample_dt_s)
+    spacing = float(grid[1] - grid[0])
+    steps_per_sample = spacing / config.dt
+    if abs(steps_per_sample - round(steps_per_sample)) > 1e-9 or round(steps_per_sample) < 1:
+        raise ValueError(
+            f"config '{config.name}': dt={config.dt} s does not divide the access sample spacing "
+            f"{spacing} s (horizon {horizon_s} s at sample_dt_s={spec.sample_dt_s} s). The access "
+            f"metric would then propagate this configuration at a step it was never run with. "
+            f"Raise AccessSpec.sample_dt_s to a multiple of every config's dt."
+        )
+
+    sim = build_scenario()
+    sim.record_history = False
+    idx = apply_config(sim, config)
+    names, slots = _access_body_names(sim, idx, spec)
+
+    model = windows_from_simulation(sim, slots, grid, spec, max_dt=config.dt)
+    truth = windows_from_truth(access_truth, names, spec)
+    return compare_windows(truth, model)
+
+
 def _time_propagation(
     build_scenario: Callable[[], Simulation],
     config: ModelConfig,
@@ -246,6 +328,7 @@ def run_sweep(
     oblateness: Optional[Mapping[str, Tuple[float, float]]] = None,
     timing_batches: int = 5,
     timing_warmup: int = 2,
+    access: Optional[AccessSpec] = None,
 ) -> List[SweepResult]:
     """
     Run every configuration in `configs` against one scenario and return one `SweepResult` each, in
@@ -261,12 +344,26 @@ def run_sweep(
     tier includes a J2 model, or the truth is point-mass and every J2 tier is being judged against the
     wrong reference (see `reference.py`'s module docstring on why this argument is never inferred from
     a `Simulation`'s own configuration).
+
+    `access`, when given, adds `SweepResult.access` - contact-window error against the same truth
+    model (see `access.py`). It costs **one** extra `reference_for` call for the whole sweep, on the
+    dense access grid, and one extra propagation per configuration. The endpoint truth above is left
+    alone rather than being read off the dense one: `solve_ivp`'s dense output at the horizon is not
+    bit-identical to a run that stops there, and the position-error statistics must not move because
+    an unrelated metric was switched on.
     """
     truth_sim = build_scenario()
     times = np.array([0.0, horizon_s], dtype=np.float64)
     truth = reference_for(
         truth_sim, times, rtol=truth_rtol, atol=truth_atol, oblateness=oblateness,
     )
+
+    access_truth: Optional[ReferenceTrajectory] = None
+    if access is not None:
+        access_truth = reference_for(
+            build_scenario(), access_grid(horizon_s, access.sample_dt_s),
+            rtol=truth_rtol, atol=truth_atol, oblateness=oblateness,
+        )
 
     results: List[SweepResult] = []
     for config in configs:
@@ -283,11 +380,18 @@ def run_sweep(
             build_scenario, config, n_steps, batches=timing_batches, warmup=timing_warmup,
         )
 
+        access_metrics: Optional[AccessMetrics] = None
+        if access is not None and access_truth is not None:
+            access_metrics = access_metrics_for(
+                build_scenario, config, horizon_s, access, access_truth,
+            )
+
         results.append(SweepResult(
             config_name=config.name,
             error=_error_stats(errors_km),
             wall_time_us=wall_time_us,
             n_bodies=int(idx.size),
+            access=access_metrics,
         ))
 
     return results

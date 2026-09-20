@@ -205,6 +205,38 @@ then execute the file.
 
 ---
 
+### `viz.sample_states(max_dt=)` silently refines a coarse-step model
+
+**Symptom.** Building the access-window metric, the natural choice was a 10 s sample grid (the
+edge-interpolation bias argument wants it as fine as possible) with the sweep's usual `dt = 60 s`
+Cowell tier. Nothing raised. The Cowell tier's window shifts came out implausibly small.
+
+**Cause.** `sample_states` divides each sample interval into equal sub-steps of *at most* `max_dt`:
+`n_steps = ceil(span / max_dt)`. With `span = 10 s` and `max_dt = 60 s` that is one step of **10 s**,
+not one step of 60 s. The access metric was therefore scoring a model six times finer than the one
+`run_sweep` timed and reported a position error for — in the same `SweepResult`. RK4 is fourth order,
+so `(10/60)^4 = 7.7e-4`: the tier would have looked about 1300x more accurate than it is.
+
+**Fix.** `sweep.access_metrics_for` raises unless `config.dt` divides the sample spacing, and
+`access.DEFAULT_SAMPLE_DT_S` is 60 s rather than the 10 s the bias derivation alone would choose. The
+error message says what to do (raise `sample_dt_s` to a multiple of every config's `dt`).
+
+**General lesson.** `max_dt` is an upper bound, not a step size, and the two differ exactly when the
+sample grid is finer than the model's step. Any code pairing a sampling grid with a model step should
+state which one is authoritative.
+
+### The convex-horizon edge bias cancels across bracket boundaries too
+
+While deriving the access grid, the first version of the argument claimed that when a model's horizon
+crossing and truth's fall in *different* sample intervals, the `O(h^2)` interpolation bias stops
+cancelling and the residual reverts to the raw `C h^2 / 4`. That is wrong, and pessimistic by a factor
+of `h / (4 Delta)`. The bias is `beta(a) = C a (h - a)` for a crossing `a` into its bracket, and
+`beta` **vanishes at both ends of a bracket** — so in the different-bracket case both crossings sit
+near a sample point and both biases are near zero. The bound `|residual| <= C Delta h` holds
+uniformly. Worth recording because the wrong version would have argued for a much finer grid than is
+needed, and the finer grid is the one that collides with the `max_dt` trap above.
+
+
 ### A paused agent's worktree can disappear, and `PYTHONPATH=... python` may be refused
 
 **Symptom.** An agent paused for a usage-limit reset. When it resumed, `cd` into its worktree failed.

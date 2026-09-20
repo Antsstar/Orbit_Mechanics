@@ -41,6 +41,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
 | `manoeuvres.py` | Impulsive Delta-v in RSW, applied now or scheduled at an epoch `step()` splits for. The first physics that is neither a force model nor a propagator, and the first that every propagator can use | **new** |
 | `geometry.py` | Observation geometry: ground-station look angles, interpolated access windows, and the spherical line-of-sight test. Pure functions of position arrays, like `viz.py`'s transforms — the primitive layer under a future access-based error metric | **new** |
+| `access.py` | The sweep-level access metric built on `geometry.py`: model contact windows matched to truth's by time overlap, then differenced into rise/set shift, duration error, total contact error and **passes gained or lost**. Consumed by `sweep.run_sweep(access=...)`, which gains one optional field and changes nothing else | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -774,12 +775,114 @@ because the equatorial case has an identically zero SEZ *south* component and ca
 transposed south/east axis — the same symmetry trap `hohmann_pair` documents.
 
 **Deliberately not built.** No range rate (so no Doppler, and no link budget), no refraction or
-terrain horizon, no multi-station scheduling or conjunction search, and no sweep-level aggregation:
-contact minutes per day, maximum gap and pass-count statistics are the metric layer that consumes
-this one, and building them before there is a sweep to attach them to would be guessing at the
-reduction. `AccessWindow.peak_elevation_rad` is the one field that is *sampled* rather than refined,
+terrain horizon, no multi-station scheduling or conjunction search, and no sweep-level aggregation *in this module*:
+contact totals and pass-count statistics are the metric layer that consumes this one, and they
+now live in `access.py` (next section) rather than here, so `geometry.py` stays free of
+`Simulation`. `AccessWindow.peak_elevation_rad` is the one field that is *sampled* rather than refined,
 `O(h)` for an overhead pass because the elevation has a corner at the zenith, and it is labelled as a
 lower bound rather than quietly parabola-fitted.
+
+---
+
+## Access metrics: the sweep's second currency
+
+`sweep.py` reports position error in kilometres. No decision is denominated in kilometres. A
+constellation or ground-station study decides on *contact*: when a pass opens, how long it lasts,
+whether a marginal pass exists at all. A model wrong by 500 km that moves every window by two seconds
+changes nothing; one wrong by 5 km that deletes a pass changes the plan. `access.py` is the layer that
+converts a sweep into those units, and `geometry.py` is the primitive layer under it.
+
+**Why a module of its own rather than more of `sweep.py`.** Three reasons, none stylistic. `sweep.py`
+imports `reference`, `benchmark` and `simulator`; the access metric additionally needs `viz`
+(sampling) and `geometry` (look angles), so folding it in would make the harness depend on the
+presentation stack. The interesting half of the feature — *matching* model windows to truth's — is
+pure interval arithmetic over `geometry.AccessWindow` records, and keeping it where no `Simulation`
+is in scope is what lets it be tested on hand-built window lists whose right answer is written down.
+And `run_sweep`'s existing contract is then unchanged *by construction* rather than by claim: it gains
+one optional keyword and one optional field, and the position-error path is untouched. The test that
+matters asserts the three `ErrorStats` fields are **bit-identical** with and without `access=`.
+
+Like `geometry.py` and `manoeuvres.py`, nothing here is registered in `registry.py`. There is no
+acceleration to compose and no state to advance; the registry's two dispatch mechanisms have no third
+slot for "a metric", and an `AccessSpec` is an argument to `run_sweep` in the same position
+`oblateness` already occupies.
+
+### Matching is the design decision
+
+Before anything can be differenced, each model window must be paired with the truth window it *is*.
+The rule is the strictest defensible one: **two windows may be paired only if they overlap in time**;
+among overlapping candidates, take the largest overlap first, remove both, repeat. Anything left over
+is an orphan — an unmatched truth window is a **lost pass**, an unmatched model window a **gained**
+one — and orphans contribute to the counts and to total contact time but never to a shift statistic.
+
+The alternative, nearest-midpoint pairing, needs a tolerance, and a tolerance here is a dial that
+converts "this model lost a pass" into "this model was late". That is exactly the distinction the
+metric exists to preserve. If a model's window does not overlap the real one at all, an operator who
+pointed an antenna at the prediction would have received nothing for the whole of the real pass and
+nothing for the whole of the predicted one: two failures, not one late pass, and a reported "900 s
+shift" would be a fiction. The price is that a badly phased tier reports `lost == gained == n` rather
+than one enormous shift, which is the honest summary of a model whose passes no longer correspond to
+reality.
+
+Greedy is unambiguous here because windows within one list are disjoint and ordered; ties break by
+earliest truth window then earliest model window, so the result does not depend on input order, which
+a test asserts by reversing both lists.
+
+### The sampling grid is derived, not chosen
+
+`geometry.access_windows` interpolates its edges linearly. That error is an `O(h^2)` **bias**, not
+scatter — rises early, sets late, by `C a b` with `C = Omega cot(lambda_0)/2 = 1.21e-3` per second at
+550 km. At `h = 30 s` that is 0.27 s, which is the *same order* as the quantity being measured: the
+best tier in this engine is 1.88 km out after 24 h, and `(1.88/6921)/Omega = 0.265 s`.
+
+The bias is dealt with by sampling truth and model on **one shared grid**, so it is common-mode.
+Writing it as `beta(a) = C a (h - a)`, the model's crossing sits at `a + Delta` and the residual is
+`C Delta (h - 2a - Delta)`, bounded by `C Delta h`. The bound survives the case where the two
+crossings land in different brackets, because `beta` vanishes at both ends of a bracket — worth
+checking rather than assuming, and the first draft of the derivation got it wrong in the pessimistic
+direction. At `h = 60 s` and `Delta = 0.27 s` the residual is 0.020 s, 7 % of the signal.
+
+**The grid also has a constraint from the other direction, and it is a trap.** `viz.sample_states`
+divides a sample interval into sub-steps of *at most* `max_dt`. Ask for a 10 s access grid from a
+`dt = 60 s` configuration and it will take one 10 s step per sample — propagating a sixfold finer
+model than the one the sweep timed and scored a position error for, silently and entirely plausibly.
+`sweep.access_metrics_for` raises unless `config.dt` divides the sample spacing, and
+`DEFAULT_SAMPLE_DT_S` is 60 s for that reason rather than the 10 s the bias argument alone would
+prefer.
+
+### What it measures, on the tiers that exist
+
+12 satellites at 550 km / 53 deg, three stations, 5 deg mask, 24 h, 189 true passes
+(`docs/figures/access_windows.png`). Mean and max |rise shift|, then passes lost / gained:
+
+| Tier | mean | max | lost | gained |
+|---|---|---|---|---|
+| Kepler | 31.65 s | 154.21 s | 5 | 4 |
+| Secular J2, osculating-seeded | 30.82 s | 115.82 s | 1 | 2 |
+| Secular J2, mean-seeded | 1.60 s | 8.10 s | 1 | 0 |
+| Cowell + j2, `dt = 60 s` | **0.063 s** | **0.223 s** | 0 | 0 |
+
+Against a 1 s threshold — roughly the acquisition pad a real schedule already carries — Cowell + J2 is
+the first tier that clears it and the only one that neither loses nor invents a pass. Two results the
+kilometre metric cannot produce. The **discrete** one: Kepler does not merely mistime passes, it
+deletes five that happen and predicts four that do not, and those nine are scheduling decisions rather
+than error bars. The **ranking** one: mean-seeded secular J2 is 100x better than Kepler in kilometres
+(4.04 km against 607.61 km) but only 20x better in mean window shift, and it still drops a marginal
+pass — an averaged theory reproduces along-track position far better than it reproduces the elevation
+profile near the horizon, which is where a marginal pass lives.
+
+Cowell's 0.223 s is the check on the measurement itself: its 1.88 km position error corresponds to a
+0.265 s pass shift at `Omega = 1.024e-3 rad/s`, so what is being reported is the along-track share of
+a known error and not the sampling grid.
+
+### Deliberately not built
+
+No scheduling or conflict resolution, no gap statistics (maximum outage is the obvious next
+reduction and needs a use case first), no range rate and so no Doppler, and no matching across
+stations or bodies — `station_index` and `body_index` partition the problem, and a pass one station
+saw is not a pass another saw however well the intervals line up. `peak_elevation_rad` is not
+differenced: `geometry.py` samples it rather than refining it, so it is a lower bound, and it appears
+here only where the *tests* choose a mask angle with it.
 
 ---
 
