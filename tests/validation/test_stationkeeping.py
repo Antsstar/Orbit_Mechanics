@@ -128,8 +128,17 @@ Zero burns and exactly zero Delta-v: its mean stays at 292.0 km.
 Negative controls
 -----------------
 Each mutation was applied to the real `src/orbital_engine/stationkeeping.py`, this module run, and the
-file restored with `git checkout --`; the results are in `docs/architecture.md`'s station-keeping
-section.
+file restored with `git checkout --`.
+
+- *Trigger on osculating altitude* (`estimate` -> `h` in `observe`) - **16 of 23 fail**: the drag-free
+  control burns, every rate, every burn-at-`L`, every band-held and every chatter test.
+- *Burn retrograde* (`_PROGRADE` -> `(0, -1, 0)`) - **14 fail**: rates, burn-at-`L`, band held, and
+  chatter at intervals of exactly 13 560 s - the re-observation lockout, as section 3 predicts.
+- *No lag correction* (`estimate = recent`) - **8 fail**: two rates, every burn-at-`L` (burns 0.18 km
+  late) and three band-held.
+- *Rectangle window of `round(T/dt)` samples* - **2 fail** (the layered rate; burn-at-`L` for the
+  single-impulse satellite). Caught, but thinly: at 30 s the 0.3-sample mismatch leaks only ~10 m;
+  `test_window_weights_...` is what pins the estimator directly.
 """
 from __future__ import annotations
 
