@@ -2,16 +2,21 @@
 [![Orbital Engine CI](https://github.com/Antsstar/Orbit_Mechanics/actions/workflows/ci.yml/badge.svg)](https://github.com/Antsstar/Orbit_Mechanics/actions/workflows/ci.yml)
 
 A hierarchical orbital mechanics engine for measuring what a modelling assumption costs. One scenario
-runs under many model configurations (analytic Kepler, secular J2, numerically integrated Cowell with
-composable force models), and each is scored against an independent high-accuracy reference for both
-position error and wall time.
+runs under many model configurations: analytic Kepler, secular J2, numerically integrated Cowell with
+composable force models, and SGP4 through its reference implementation. Each configuration is scored
+against an independent high-accuracy reference for wall time and for error. The error is reported in
+kilometres and also in the units of the decision the model feeds:
+
+- **seconds** of contact-window shift
+- **passes** gained or lost
+- **metres per second** of station-keeping Δv
 
 Most astrodynamics libraries treat *running a simulation* as the primary operation. Here the main loop
 is a **sweep**: model configurations are plain data, so the effect of an assumption on accuracy and
 runtime is a measured output rather than a footnote.
 
-Python 3.10+, NumPy and SQLAlchemy 2.0. Numba (compiled kernels) and SciPy (reference trajectories)
-are optional.
+Python 3.10+, NumPy and SQLAlchemy 2.0. Numba (compiled kernels), SciPy (reference trajectories) and
+`sgp4` (TLE ingest) are optional.
 
 ---
 
@@ -86,6 +91,34 @@ cannot show: **the mean-seeded curve is flat.** Its 4 km is a bounded short-peri
 an averaged theory cannot represent, not an error that accumulates. Kepler and the osculating-seeded
 tier grow without bound, and Cowell's curve is RK4 truncation.
 
+### Contact windows: the same error in the units of a schedule
+
+![Contact-window error](docs/figures/access_windows.png)
+
+The same constellation and the same four tiers, scored instead on every pass over three ground stations
+(Kiruna, Wallops, Santiago) at a 5° mask: 189 true passes in 24 hours. `run_sweep(..., access=spec)`
+matches each predicted window to truth's by time overlap alone. A window with no overlapping counterpart
+counts as a pass lost or gained and is never given a fictional shift.
+
+| Tier | Mean \|rise shift\| | Max \|rise shift\| | Passes lost / gained |
+|---|---|---|---|
+| Kepler | 31.65 s | 154.21 s | 5 / 4 |
+| Secular J2, osculating-seeded | 30.82 s | 115.82 s | 1 / 2 |
+| Secular J2, mean-seeded | 1.60 s | 8.10 s | 1 / 0 |
+| Cowell + J2, 60 s step | **0.063 s** | **0.223 s** | **0 / 0** |
+
+Against a 1 s threshold, roughly the acquisition pad a real schedule already carries, Cowell + J2 is
+the first tier that clears it, and the only one that neither invents nor loses a pass. The kilometre
+metric misses two things this one shows:
+
+- **Discrete failures.** Kepler does not just mistime its passes. It deletes five real ones and
+  predicts four that never happen, and each of those is a scheduling decision, not an error bar.
+- **Changed rankings.** Mean-seeded secular J2 is 150× better than Kepler in kilometres but only 20×
+  better in window shift, and it still drops a marginal pass.
+
+The Cowell figure checks itself. A 1.88 km along-track error moves a pass by `(1.88 / 6921) / (n − ω)`
+= 0.265 s, and the measured 0.223 s is the along-track share of that error.
+
 ### Drag decay
 
 ![Drag decay](docs/figures/drag_decay.png)
@@ -96,6 +129,40 @@ The measured drop is **3.6586 km against an orbit-averaged closed form of 3.6600
 plot exists to make visible: the prograde co-rotation factor *f* = 0.8714, and the density feedback
 as the orbit descends, which alone raises the mean rate 3.1% above the initial tangent. The control
 holds altitude to 1 × 10⁻⁴ km.
+
+### Two atmospheres, and what the choice costs in propellant
+
+![Density laws](docs/figures/atmosphere.png)
+
+`drag` takes its density from either a single exponential band or a 28-band piecewise table (Vallado
+4e Table 8-4). The choice is one coefficient per body, so it is a swept model axis like any other.
+
+Match the single band to the table at 355 km with H = 60 km, the usual one-number-for-LEO setup. Below
+that altitude the table is denser, because every one of its scale heights there is under 60 km. Above
+it the ratio first dips below 1 and then climbs back through it near 600 km, so no single exponential
+reproduces the table's shape at any H. Over three days from 355 km, the table predicts **27.1 km more
+decay**, 30 % more.
+
+![Station-keeping](docs/figures/station_keeping.png)
+
+`stationkeeping.py` converts that difference into propellant. The setup has four co-located 51.6°
+satellites held in a [291, 293.5] km band for 10 days with two-impulse raises. The four panels are
+identical except for the density law; the drag-free control never burns.
+
+| Density law | Δv per day | Raises | Total |
+|---|---|---|---|
+| Table | 3.436 m/s | 24 | 34.78 m/s |
+| Single band, matched at 355 km | 2.951 m/s (**14.1 % under-budgeted**) | 20 | 28.98 m/s |
+| Single band, matched at the band centre | 3.431 m/s (0.14 % off) | 24 | 34.78 m/s |
+
+**What costs propellant is where the simple model is anchored, not how many bands it has.**
+
+The controller keys on the one-period *mean* altitude, not the osculating one. Under J2 the osculating
+altitude swings 12 km peak to peak, the faint trace in the figure. A controller keyed to it would
+fire once an orbit while inside the band.
+
+The steady rates are validated against the orbit-averaged decay converted to Δv at `(n/2) Δa`, to
+4 × 10⁻⁴.
 
 ### The two parent graphs
 
@@ -128,16 +195,39 @@ model's defining invariant drawn rather than asserted.
 
 **Models, selected per body as data**
 
-- **Propagators** (`Simulation.set_propagator`): Keplerian; secular J2 (first-order drift of Ω, ω and
-  M, with optional mean seeding); and Cowell (fourth-order Runge-Kutta, integrated relative to the
-  body's parent so an accelerating parent is handled correctly).
-- **Force models** (`Simulation.enable_force_model`): `point_mass_gravity`, `j2`, `thrust`
-  (continuous burn in the RSW frame, with propellant depletion and a dry-mass floor), `drag` (exponential,
-  co-rotating atmosphere) and `third_body` (one named point-mass perturber), composed through a
-  per-body bitmask. Models can register configuration-time checks: `j2` and `drag` refuse bodies whose
-  parent is a barycentre, and `third_body` refuses invalid perturbers.
-- **Sweep** (`orbital_engine.sweep`): `ModelConfig` lists run against one scenario. It reports median,
-  RMS and max error over bodies, plus minimum-of-batches wall time.
+- **Propagators** (`Simulation.set_propagator`):
+  - **Keplerian.**
+  - **Secular J2**: first-order drift of Ω, ω and M, with optional mean seeding.
+  - **Cowell**: fourth-order Runge-Kutta, integrated relative to the body's parent so an accelerating
+    parent is handled correctly.
+- **Force models** (`Simulation.enable_force_model`), composed through a per-body bitmask:
+  - **`point_mass_gravity`** and **`j2`**.
+  - **`drag`**: a co-rotating atmosphere with an exponential or a 28-band piecewise density law.
+  - **`third_body`**: one named point-mass perturber.
+  - **`srp`**: cannonball solar radiation pressure, with a cylindrical or conical (umbra/penumbra)
+    shadow.
+  - **`thrust`**: a continuous burn in the RSW frame, with propellant depletion and a dry-mass floor.
+
+  Models register configuration-time checks. For example, `j2` and `drag` refuse bodies whose parent is
+  a barycentre, and `third_body` and `srp` refuse an invalid perturber or light source.
+- **Impulses and events.** Impulsive Δv works under *every* propagator. On an analytic body a burn
+  re-derives the elements, and secular J2 also rebuilds its cached drift rates. `step()` splits at a
+  scheduled burn epoch, and at any sign change of a registered event function, located by
+  Illinois false position. That second split is what restores RK4's order across the shadow terminator.
+- **Sweep** (`orbital_engine.sweep`): `ModelConfig` lists run against one scenario, reporting median,
+  RMS and maximum error over bodies, plus minimum-of-batches wall time.
+  - With `access=`, it also scores **contact windows**: rise and set shifts, contact time, and passes
+    lost or gained.
+  - With `external=`, it scores a propagator that runs outside the engine, such as SGP4, against the
+    same truth.
+- **Observation geometry** (`geometry.py`, `access.py`): elevation, azimuth, range and range rate from
+  a ground station; access windows; line of sight. The **contact dataset** of windows with rise, peak
+  and set samples is the export a downstream network model consumes.
+- **SGP4 bridge** (`sgp4_bridge.py`): wraps the `sgp4` package and never reimplements it. A TLE's mean
+  elements never reach the engine's element conversion: vessels are seeded from SGP4's own Cartesian
+  state.
+- **Station-keeping** (`stationkeeping.py`): a dead-band altitude controller that turns the atmosphere
+  choice into a Δv budget.
 - **Independent truth** (`reference.py`): Newtonian N-body integration with DOP853, optionally with J2,
   sharing no code with the engine.
 
@@ -180,10 +270,11 @@ that works without the editable checkout.
 
 | | |
 |---|---|
-| Tests | 410 passing |
-| Type checking | `mypy --strict`, clean across 24 source files |
+| Tests | 589 passing |
+| Type checking | `mypy --strict`, clean across 32 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
-| Coverage | 86%, measured with Numba disabled |
+| Coverage | 91%, measured with Numba disabled |
+| Published reference | Vallado et al. (2006) SGP4 verification vectors, all in-tolerance cases |
 
 > Measure coverage with Numba disabled. `coverage.py` traces bytecode, so a `@njit` function reads as
 > entirely unhit, and the compiled run reports a well-covered kernel module as mostly untested.
@@ -219,6 +310,16 @@ cleanly, plots plausibly and is wrong by a few percent. Some of what the suite p
 - **Barycentric mass moments.** `mu_Sun·r_Sun + mu_EMB·r_EMB = 0` is a definition, so it holds to
   floating-point noise, and any error in mass aggregation or the reflex kick shows as a drifting
   centre of mass.
+- **Published reference vectors.** The SGP4 bridge is checked against Vallado et al. (2006)'s
+  verification set, read from the installed `sgp4` package.
+  - All 31 in-tolerance cases (1788 components) agree to the file's print rounding: mean |Δr| is
+    2.5e-9 km, against a derived 2.5e-9.
+  - All seven published error outcomes are reproduced.
+  - Feeding the TLE's mean elements straight into the element conversion instead is **7.64 km** off at
+    epoch. That anti-pattern is refused by design.
+- **Order restored across a discontinuity.** Through a cylindrical shadow, Cowell's step-halving ratio
+  collapses from 16 to 1.46. With event splitting at the terminator it returns to 16–18, and the error
+  falls 177-fold.
 - **Negative controls and mutation checks.** Equivalence and reference suites each include a test that
   deliberately breaks the engine and asserts the comparison notices. New physics is also checked by
   mutating the real source, such as a flipped sign or a wrong coefficient, and confirming the suite
@@ -282,7 +383,7 @@ Orbit_Mechanics/
 ├── .github/workflows/       # Multi-version CI, plus a job without Numba
 ├── benchmarks/
 │   ├── bench_step.py        # Step-cost instrument: propagator comparison, scaling, breakdown
-│   ├── figures.py           # Ground tracks, error growth, drag decay, hierarchy
+│   ├── figures.py           # The gallery: tracks, error growth, drag, atmosphere, access, station-keeping
 │   └── frontier_plot.py     # Runs the sweep and writes docs/figures/frontier.png
 ├── docs/
 │   ├── architecture.md      # Why the engine is shaped this way
@@ -299,8 +400,18 @@ Orbit_Mechanics/
 │   ├── forces.py            # Force-model composition and the kernel contract
 │   ├── gravity.py           # point_mass_gravity
 │   ├── geopotential.py      # j2
+│   ├── drag.py, atmosphere.py  # drag and its two density laws
+│   ├── thirdbody.py         # third_body
+│   ├── srp.py               # Solar radiation pressure, cylindrical and conical shadow
+│   ├── thrust.py            # Continuous thrust with propellant depletion
+│   ├── manoeuvres.py        # Impulsive Δv under every propagator
+│   ├── events.py            # Event-driven step splitting
 │   ├── registry.py          # Force-model and propagator registration
 │   ├── sweep.py             # Model configurations as data; error and timing statistics
+│   ├── geometry.py          # Elevation, azimuth, range rate, access windows, line of sight
+│   ├── access.py            # Contact-window error metric and the contact dataset export
+│   ├── sgp4_bridge.py       # SGP4 wrapped: TLE ingest and an external sweep tier (sgp4, optional)
+│   ├── stationkeeping.py    # Dead-band altitude controller; atmosphere choice in Δv
 │   ├── viz.py               # Plot-data preparation: ground tracks, altitude, error curves
 │   ├── reference.py         # Independent DOP853 truth, optionally with J2 (SciPy, optional)
 │   ├── scenarios.py         # Scenario builders shared by tests and benchmarks
@@ -325,9 +436,14 @@ conda activate orbital_env
 pip install -e ".[dev,test]"
 ```
 
-`[test]` includes Numba and SciPy so the full suite runs; `[dev]` adds matplotlib for the plot. For a
-minimal install, `[perf]` adds Numba alone and `[reference]` adds SciPy alone. The engine itself runs
-on NumPy without either.
+`[test]` includes Numba, SciPy and `sgp4` so the full suite runs, and `[dev]` adds matplotlib for the
+figures. For a minimal install, each has its own extra:
+
+- `[perf]`: Numba
+- `[reference]`: SciPy
+- `[sgp4]`: `sgp4`
+
+The engine itself runs on NumPy without any of them.
 
 ```bash
 pytest                               # test suite
@@ -418,9 +534,15 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
 - **J2 assumes a fixed spin axis.** The parent's spin axis is taken as the frame's z-axis. That is
   exact for the Earth-centred scenarios and 23.4° off in the ecliptic Sun–Earth–Moon scenario.
 - **Secular J2 is first order.** Mean seeding corrects only the semi-major axis.
+- **TEME is treated as inertial.** SGP4's output frame drifts against a true inertial frame by about
+  0.31 arcsec per day, roughly 11 m per day in LEO. That is negligible over the day-scale horizons
+  here, but not for months-long runs or any comparison against GCRF data, which would need `pyerfa`.
 - **Some citations are unverified.** Several textbook equation numbers (Curtis, Vallado,
-  Kozai/Brouwer) were written from memory. They are marked unverified in the source, beside the
-  self-contained derivations that the tests check.
+  Kozai/Brouwer) and the 28-band atmosphere table were written from memory. They are marked unverified
+  in the source, beside the self-contained derivations that the tests check. The table's internal
+  continuity check passes at every band boundary but one, at 25 km, which is asserted as a named
+  anomaly. The SGP4 vectors are the exception: they are read from the published
+  file, not from memory.
 - **One known edge case.** When *every* input state is degenerate, `rv_to_coe` returns an array of the
   wrong shape. See `CLAUDE.md`.
 
@@ -434,17 +556,29 @@ Ordered so that each stage makes the next one safe rather than merely possible.
    reference. **Done.**
 2. ~~**Compiled kernels**~~: 185× on the hierarchical step, with step cost independent of arena
    capacity. **Done.**
-3. **Force-model interface and events.** Bitmask composition and per-body propagator selection are
-   **done**. Exact-time event handling for impulsive manoeuvres is not started.
-4. ~~**Benchmark harness**~~: the sweep and the frontier plot. **Done.**
-5. **Model library.** J2 (force model, secular propagator and reference), Cowell RK4 and point-mass
-   third-body perturbations, exponential-atmosphere drag and continuous thrust with propellant
-   depletion are **done**. Planned: perturbers
-   advanced per integrator stage, higher geopotential harmonics, tabulated and NRLMSISE atmospheres,
-   solar radiation pressure with shadow
-   geometry, Encke, symplectic integrators and an SGP4 bridge.
-6. **Constellation and inter-satellite link modelling**, the application this engine is being shaped
-   for.
+3. ~~**Force-model interface and events**~~: bitmask composition, per-body propagator selection,
+   exact-time impulsive manoeuvres and event-driven step splitting. **Done.**
+4. ~~**Benchmark harness**~~: the sweep, the frontier plot, and error in decision units (contact
+   windows, station-keeping Δv). **Done.**
+5. **Model library.**
+   - **Done:**
+     - J2 (force model, secular propagator and reference)
+     - Cowell RK4
+     - third-body perturbations
+     - drag with exponential and tabulated atmospheres
+     - solar radiation pressure with shadow geometry
+     - continuous and impulsive thrust
+     - the SGP4 bridge
+   - **Planned:**
+     - perturbers advanced per integrator stage
+     - higher geopotential harmonics
+     - NRLMSISE through `pymsis`
+     - Encke
+     - symplectic integrators
+     - SGP4 on the frontier plot
+6. **Constellation and inter-satellite link modelling.** This goes in a separate repository that
+   consumes this engine's contact dataset (see [Scope](#scope-where-this-project-stops)). Walker
+   generation and TLE ingest stay here.
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,
