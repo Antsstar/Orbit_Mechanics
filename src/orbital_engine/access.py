@@ -126,6 +126,37 @@ this engine is.
 `peak_elevation_rad` is sampled rather than refined (`geometry.AccessWindow`), so it is a lower
 bound and is **not** differenced here. It is used only to *choose* a mask angle in the tests.
 
+## The contact dataset: range and range rate on each window
+
+`AccessMetrics` answers "how wrong is this model's schedule". A downstream network or ISL study
+needs the other half - the *contents* of each contact, which for a link budget means **range** and
+**range rate**. `contact_windows` (and `contacts_from_simulation`, its propagating twin) return
+`ContactWindow` records: the `geometry.AccessWindow` unchanged, plus a `ContactSample`
+(`time_s`, `range_km`, `range_rate_km_s`) at **rise, peak elevation and set**.
+
+**Why those three instants.** They are the three the window already names, so the dataset needs no
+new time grid and no re-propagation, and together they bracket what a link budget asks: the two
+edges are the worst-case range and the *extremes* of range rate (for a coplanar circular pass the
+range rate is stationary at the horizon - `rho'' = 0` there exactly, since `r cos lambda_0 = R`
+makes the centripetal and the `rho_dot^2 / rho` terms cancel), and the peak is the closest approach,
+where the range rate passes through zero. A consumer that wants the whole series has it already:
+`geometry.elevation_azimuth(..., velocities_km_s=...)` returns it sample by sample, and
+`ContactWindow` is the per-contact reduction of exactly that.
+
+**Sign convention is `geometry.py`'s and is not re-stated by re-deriving it: positive = opening
+(receding).** Doppler shift, carrier frequency and link margin are not computed here or anywhere in
+this engine - they are properties of a radio, not of an orbit.
+
+**Accuracy of the three samples.** Rise and set are *interpolated* times, so the series are linearly
+interpolated onto them: `O(h^2)` with coefficient `|f''| h^2 / 8`. On the 550 km reference pass
+`rho'' = 0` at the horizon exactly, so the rise/set **range** carries almost no interpolation error
+of its own and is dominated by the edge-time bias itself (`rho_dot * 0.030 s = 0.20 km` at
+`h = 10 s`); the rise/set **range rate** carries `|rho_dot''| h^2 / 8 = 8.5e-5 km/s` at `h = 10 s`
+and `3.1e-3 km/s` at `h = 60 s`. The peak sample needs no interpolation - `peak_time_s` is a grid
+time - but it inherits `peak_elevation_rad`'s `O(h)` sampling offset, so its range rate is not zero
+but bounded by `rho'' h / 2` (0.42 km/s at `h = 10 s` on the reference pass, measured 0.18). Read
+the peak as "near closest approach", exactly as `peak_elevation_rad` reads as "at least this high".
+
 References
 ----------
 No physics is introduced by this module: `geometry.py` carries the Vallado citations for the
@@ -141,15 +172,17 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from .custom_types import ArrayFloat, ArraySeconds, ScalarFloat, ScalarSeconds
-from .geometry import AccessWindow, access_windows, elevation_azimuth
+from .geometry import AccessWindow, Topocentric, access_windows, elevation_azimuth
 from .reference import ReferenceTrajectory
 from .simulator import Simulation
 from .viz import sample_states
 
 __all__ = [
     "GroundStation", "AccessSpec", "WindowMatch", "ShiftStats", "AccessMetrics",
+    "ContactSample", "ContactWindow",
     "DEFAULT_SAMPLE_DT_S",
     "access_grid", "windows_from_positions", "windows_from_truth", "windows_from_simulation",
+    "contact_windows", "contacts_from_simulation",
     "match_windows", "summarise_matches", "compare_windows",
 ]
 
@@ -271,6 +304,64 @@ class WindowMatch:
 
 
 @dataclass(frozen=True)
+class ContactSample:
+    """
+    One instant inside a contact, with the two kinematic quantities a link budget needs.
+
+    `range_rate_km_s` is `geometry.py`'s convention - **positive = opening (receding)**, negative =
+    closing - and includes the station's own motion (the `omega x r_station` transport term). No
+    Doppler shift, carrier frequency or link margin is computed anywhere in this engine: those are
+    properties of a radio, and the boundary is drawn here deliberately.
+    """
+    time_s: float
+    range_km: float
+    range_rate_km_s: float
+
+
+@dataclass(frozen=True)
+class ContactWindow:
+    """
+    One access window plus range and range rate at its rise, peak-elevation and set instants.
+
+    `window` is the `geometry.AccessWindow` unchanged, so every caveat it carries still applies:
+    rise/set are interpolated (`O(h^2)`, a bias), `peak_elevation_rad` and `peak_time_s` are
+    *sampled*. The three `ContactSample`s inherit those caveats - see "The contact dataset" in the
+    module docstring for what each is worth numerically.
+
+    The delegating properties exist so a consumer can treat this as a window that happens to know
+    its ranges, rather than having to reach through `.window` for the identity of the contact.
+    """
+    window: AccessWindow
+    rise: ContactSample
+    peak: ContactSample
+    set: ContactSample
+
+    @property
+    def station_index(self) -> int:
+        return self.window.station_index
+
+    @property
+    def body_index(self) -> int:
+        return self.window.body_index
+
+    @property
+    def rise_s(self) -> float:
+        return self.window.rise_s
+
+    @property
+    def set_s(self) -> float:
+        return self.window.set_s
+
+    @property
+    def duration_s(self) -> float:
+        return self.window.duration_s
+
+    @property
+    def peak_elevation_rad(self) -> float:
+        return self.window.peak_elevation_rad
+
+
+@dataclass(frozen=True)
 class ShiftStats:
     """
     One differenced quantity summarised over every pair that contributed, in seconds.
@@ -351,23 +442,40 @@ def _station_arrays(spec: AccessSpec) -> Tuple[ArrayFloat, ArrayFloat, ArrayFloa
     return lat, lon, alt
 
 
+def _topocentric(
+    positions_km: ArrayFloat,
+    times_s: ArraySeconds,
+    spec: AccessSpec,
+    velocities_km_s: Optional[ArrayFloat] = None,
+) -> Topocentric:
+    """
+    The single place `geometry.elevation_azimuth` is called from this module.
+
+    Truth and model can then only ever differ in the trajectory handed in - never in the station
+    geometry, the rotation phase or the mask angle - and the range-rate path cannot drift out of
+    step with the look-angle path, since there is only one call.
+    """
+    lat, lon, alt = _station_arrays(spec)
+    return elevation_azimuth(
+        positions_km, times_s,
+        velocities_km_s=velocities_km_s,
+        latitude_rad=lat, longitude_rad=lon, altitude_km=alt,
+        omega=spec.omega, body_radius_km=spec.body_radius_km,
+        theta0=spec.theta0, epoch_s=spec.epoch_s,
+    )
+
+
 def windows_from_positions(
     positions_km: ArrayFloat, times_s: ArraySeconds, spec: AccessSpec,
 ) -> List[AccessWindow]:
     """
     Contact windows for `(n_times, n_bodies, 3)` **central-body-relative inertial** positions.
 
-    This is the single place `geometry.elevation_azimuth` and `geometry.access_windows` are called,
-    so truth and model can only ever differ in the trajectory handed in - never in the station
-    geometry, the rotation phase or the mask angle.
+    Positions only, so no range rate: this is the path `AccessMetrics` uses, and truth trajectories
+    from `reference.py` are differenced here by position. `contact_windows` is the velocity-carrying
+    counterpart.
     """
-    lat, lon, alt = _station_arrays(spec)
-    topo = elevation_azimuth(
-        positions_km, times_s,
-        latitude_rad=lat, longitude_rad=lon, altitude_km=alt,
-        omega=spec.omega, body_radius_km=spec.body_radius_km,
-        theta0=spec.theta0, epoch_s=spec.epoch_s,
-    )
+    topo = _topocentric(positions_km, times_s, spec)
     return access_windows(times_s, topo.elevation_rad, mask_angle_rad=spec.mask_angle_rad)
 
 
@@ -405,6 +513,94 @@ def windows_from_simulation(
     central = sim.name_to_index[spec.central_body]
     states = sample_states(sim, bodies, times_s, relative_to=central, max_dt=max_dt)
     return windows_from_positions(states[..., :3], times_s, spec)
+
+
+# --------------------------------------------------------------------------------------------------
+# The contact dataset: windows carrying range and range rate
+# --------------------------------------------------------------------------------------------------
+
+def _sample_at(
+    times: ArraySeconds, ranges: ArrayFloat, rates: ArrayFloat, t: float,
+) -> ContactSample:
+    """
+    Both series read at one instant, linearly interpolated between the bracketing samples.
+
+    `np.interp` is exact at a node, so a peak (a grid time) and a clipped edge (the first or last
+    grid time) are read rather than interpolated, and it clamps outside the grid, so no edge can
+    extrapolate a range that was never sampled.
+    """
+    return ContactSample(
+        time_s=float(t),
+        range_km=float(np.interp(t, times, ranges)),
+        range_rate_km_s=float(np.interp(t, times, rates)),
+    )
+
+
+def contact_windows(
+    positions_km: ArrayFloat,
+    velocities_km_s: ArrayFloat,
+    times_s: ArraySeconds,
+    spec: AccessSpec,
+) -> List[ContactWindow]:
+    """
+    Contact windows carrying range and range rate at rise, peak elevation and set.
+
+    `positions_km` and `velocities_km_s` are both `(n_times, n_bodies, 3)`,
+    **central-body-relative inertial** - columns `:3` and `3:` of
+    `viz.sample_states(..., relative_to=central)`, which is why that function already returns full
+    six-element states. The windows themselves are `windows_from_positions`' windows exactly: the
+    same look angles, the same mask, the same interpolated edges.
+
+    Rise and set fall *between* samples, so the range and range-rate series are linearly
+    interpolated onto them (`np.interp`, which is exact at a node and clamps outside the grid - a
+    clipped edge sits on the first or last sample and therefore reads that sample). The peak sample
+    is read directly at `AccessWindow.peak_time_s`, a grid time. The module docstring gives what
+    each of the three is worth numerically; the short version is that the rise/set range rate
+    carries `|rho_dot''| h^2 / 8` and the peak range rate is not zero but bounded by `rho'' h / 2`.
+
+    Sign: **positive range rate = opening (receding)**, `geometry.py`'s convention.
+    """
+    topo = _topocentric(positions_km, times_s, spec, velocities_km_s)
+    rate = topo.range_rate_km_s
+    if rate is None:  # pragma: no cover - `_topocentric` was given velocities, so this cannot fire
+        raise ValueError("range rate was not computed; velocities_km_s must be provided.")
+
+    times = np.asarray(times_s, dtype=np.float64)
+    windows = access_windows(times_s, topo.elevation_rad, mask_angle_rad=spec.mask_angle_rad)
+
+    contacts: List[ContactWindow] = []
+    for w in windows:
+        ranges = topo.range_km[:, w.station_index, w.body_index]
+        rates = rate[:, w.station_index, w.body_index]
+        contacts.append(ContactWindow(
+            window=w,
+            rise=_sample_at(times, ranges, rates, w.rise_s),
+            peak=_sample_at(times, ranges, rates, w.peak_time_s),
+            set=_sample_at(times, ranges, rates, w.set_s),
+        ))
+    return contacts
+
+
+def contacts_from_simulation(
+    sim: Simulation,
+    bodies: Sequence[int],
+    times_s: ArraySeconds,
+    spec: AccessSpec,
+    *,
+    max_dt: Optional[ScalarSeconds] = None,
+) -> List[ContactWindow]:
+    """
+    Propagate `sim` across `times_s` and return its contact dataset.
+
+    **This advances the simulation**, exactly as `windows_from_simulation` does and for the same
+    reason - `viz.sample_states` is what steps it. The only difference between the two is that this
+    one keeps the velocity columns instead of discarding them.
+    """
+    central = sim.name_to_index[spec.central_body]
+    states = sample_states(sim, bodies, times_s, relative_to=central, max_dt=max_dt)
+    return contact_windows(
+        np.ascontiguousarray(states[..., :3]), np.ascontiguousarray(states[..., 3:]), times_s, spec,
+    )
 
 
 # --------------------------------------------------------------------------------------------------

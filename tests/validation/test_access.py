@@ -22,6 +22,15 @@ it was measured** (`CLAUDE.md`'s item 5):
    by list index would produce the same *counts* while differencing passes an orbit apart.
 5. **The matcher alone**, on hand-built window records with no propagation at all, where the right
    answer is written down.
+6. **The contact dataset.** Each window's range and range rate at rise, peak and set, against the
+   closed-form coplanar pass evaluated *at the reported instants* - so what is measured is the
+   linear interpolation of the two series onto an interpolated edge, `|f''| h^2 / 8`, and not
+   `access_windows`' edge bias over again. Derived: 8.5e-5 km/s of range rate at `h = 10 s`
+   (measured 7.0e-5), a peak range rate bounded by `rho'' h / 2 = 0.42 km/s` because the peak is
+   *sampled* (measured 0.070), and the rise range 0.16 km beyond the horizon's 2703.81 km because
+   the reported rise time is biased early. The sign - negative at rise (closing), positive at set -
+   is asserted here as well as in `test_geometry.py`, because this is the field a downstream link
+   budget reads.
 
 `geometry.py`'s documented limits are handled rather than ignored: window edges carry an `O(h^2)`
 convex-horizon **bias** (durations read long), so truth and model are always sampled on the *same*
@@ -480,6 +489,149 @@ def test_empty_populations_are_reported_as_empty_not_as_zero_error() -> None:
     assert metrics.n_truth_windows == 0 and metrics.n_model_windows == 0
     assert metrics.rise.n == 0
     assert math.isnan(access.contact_fraction(metrics))
+
+
+# ==================================================================================================
+# 6. The contact dataset: range and range rate on each window
+# ==================================================================================================
+
+# Closed forms of the coplanar equatorial pass, written out here rather than imported from
+# `test_geometry.py`, so this file's expectations do not depend on that file staying put.
+LAMBDA_0 = math.acos(scenarios.EARTH_RADIUS / ORBIT_RADIUS_KM)
+RANGE_HORIZON_KM = math.sqrt(ORBIT_RADIUS_KM ** 2 - scenarios.EARTH_RADIUS ** 2)
+T_OVERHEAD_S = math.pi / STATION_RELATIVE_RATE
+RANGE_RATE_HORIZON = (
+    ORBIT_RADIUS_KM * scenarios.EARTH_RADIUS * math.sin(LAMBDA_0)
+    * STATION_RELATIVE_RATE / RANGE_HORIZON_KM
+)                                                                    # 6.5213 km/s
+RHO_DDOT_CLOSEST = (
+    ORBIT_RADIUS_KM * scenarios.EARTH_RADIUS * STATION_RELATIVE_RATE ** 2 / ALTITUDE_KM
+)                                                                    # 0.0840 km/s^2
+RHO_DOT_DDOT_HORIZON = 6.8327e-6                                     # km/s^3, from the closed form
+
+
+def _rho(t: float) -> float:
+    u = STATION_RELATIVE_RATE * (t - T_OVERHEAD_S)
+    return math.sqrt(
+        ORBIT_RADIUS_KM ** 2 + scenarios.EARTH_RADIUS ** 2
+        - 2.0 * ORBIT_RADIUS_KM * scenarios.EARTH_RADIUS * math.cos(u)
+    )
+
+
+def _rho_dot(t: float) -> float:
+    u = STATION_RELATIVE_RATE * (t - T_OVERHEAD_S)
+    return ORBIT_RADIUS_KM * scenarios.EARTH_RADIUS * math.sin(u) * STATION_RELATIVE_RATE / _rho(t)
+
+
+def _contacts(
+    session_factory: Callable[[], Session], times: np.ndarray, spec: access.AccessSpec,
+) -> List[access.ContactWindow]:
+    sim = scenarios.ground_station_pass(session_factory(), n_sats=1, altitude_km=ALTITUDE_KM)
+    sim.record_history = False
+    return access.contacts_from_simulation(
+        sim, [sim.name_to_index["PASS-SAT-00"]], times, spec,
+        max_dt=float(times[1] - times[0]),
+    )
+
+
+def test_contact_samples_match_the_closed_form_at_rise_peak_and_set(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    Each of the three samples against the closed-form pass, to its own derived tolerance.
+
+    The reported rise and set **times** are interpolated and carry the convex-horizon bias, so what
+    is asserted is that the reported range and range rate are the true series evaluated *at the
+    reported time* - anything else would be testing `access_windows`' edge bias a second time. The
+    errors that leaves are linear-interpolation errors, `|f''| h^2 / 8`:
+
+    * range: `rho'' = 0` exactly at the horizon (`r cos lambda_0 = R` cancels the two terms), so
+      the bound is a remainder rather than that expression - measured 1e-4 km at `h = 10 s`;
+    * range rate: `|rho_dot''| h^2 / 8 = 8.5e-5 km/s` at `h = 10 s`; measured 7.0e-5.
+
+    The peak sample is a grid time within `h / 2` of closest approach, so its range sits up to
+    `rho'' (h/2)^2 / 2 = 1.05 km` above the 550 km minimum and its rate is bounded by
+    `rho'' h / 2 = 0.42 km/s` - not zero, and documented as not zero.
+
+    Sign, asserted once more at this level because it is the field a downstream consumer actually
+    reads: **negative at rise (closing), positive at set (opening)**.
+    """
+    h = 10.0
+    spec = _spec(sample_dt_s=h)
+    times = access.access_grid(6000.0, h)
+    contacts = _contacts(db_session_factory, times, spec)
+    assert len(contacts) == 1
+    c = contacts[0]
+
+    rate_tolerance = 1.5 * RHO_DOT_DDOT_HORIZON * h ** 2 / 8.0          # 1.3e-4 km/s
+    for sample in (c.rise, c.set):
+        assert sample.range_km == pytest.approx(_rho(sample.time_s), abs=1e-2)
+        assert sample.range_rate_km_s == pytest.approx(_rho_dot(sample.time_s), abs=rate_tolerance)
+
+    assert c.rise.range_rate_km_s < 0.0 < c.set.range_rate_km_s
+    assert abs(c.rise.range_rate_km_s) == pytest.approx(RANGE_RATE_HORIZON, abs=1e-3)
+    assert abs(c.set.range_rate_km_s) == pytest.approx(RANGE_RATE_HORIZON, abs=1e-3)
+    assert c.rise.range_km == pytest.approx(RANGE_HORIZON_KM, abs=0.25)   # edge bias, ~0.16 km
+
+    sag = RHO_DDOT_CLOSEST * (h / 2.0) ** 2 / 2.0
+    assert ALTITUDE_KM <= c.peak.range_km <= ALTITUDE_KM + 1.05 * sag
+    assert abs(c.peak.range_rate_km_s) <= RHO_DDOT_CLOSEST * h / 2.0
+    assert c.rise_s < c.peak.time_s < c.set_s
+    assert float(np.min(np.abs(times - c.peak.time_s))) == 0.0, "the peak is a grid sample"
+
+
+def test_the_contact_dataset_only_adds_to_the_window(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    `contact_windows` must return `windows_from_positions`' windows unchanged.
+
+    The range-rate path shares `_topocentric` with the look-angle path, so a change to the station
+    geometry made for one would silently move the other's windows. Comparing the `AccessWindow`
+    records by value - they are frozen dataclasses - is what pins that they cannot diverge.
+    """
+    h = 30.0
+    spec = _spec(sample_dt_s=h)
+    times = access.access_grid(6000.0, h)
+
+    sim = scenarios.ground_station_pass(db_session_factory(), n_sats=1, altitude_km=ALTITUDE_KM)
+    sim.record_history = False
+    from orbital_engine.viz import sample_states
+
+    states = sample_states(
+        sim, [sim.name_to_index["PASS-SAT-00"]], times,
+        relative_to=sim.name_to_index["Earth"], max_dt=h,
+    )
+    positions = np.ascontiguousarray(states[..., :3])
+    velocities = np.ascontiguousarray(states[..., 3:])
+
+    plain = access.windows_from_positions(positions, times, spec)
+    rich = access.contact_windows(positions, velocities, times, spec)
+    assert [c.window for c in rich] == plain
+
+
+def test_a_clipped_edge_reads_the_endpoint_sample_rather_than_extrapolating(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    A window already open at the first sample has `rise_s == times[0]`, and `np.interp` clamps, so
+    its rise sample is the first *sampled* range and rate - never an extrapolation off the grid.
+    The flag is what tells a consumer the contact began earlier than the dataset can say.
+    """
+    h = 10.0
+    spec = _spec(sample_dt_s=h)
+    # Start the grid inside the pass: the satellite is already above the horizon at t = T_RISE + 100.
+    times = np.arange(2780.0, 3600.0, h)
+    sim = scenarios.ground_station_pass(db_session_factory(), n_sats=1, altitude_km=ALTITUDE_KM)
+    sim.record_history = False
+    contacts = access.contacts_from_simulation(
+        sim, [sim.name_to_index["PASS-SAT-00"]], times, spec, max_dt=h,
+    )
+    assert len(contacts) == 1
+    c = contacts[0]
+    assert c.window.rise_clipped and c.rise.time_s == float(times[0])
+    assert c.rise.range_km == pytest.approx(_rho(float(times[0])), abs=1e-6)
+    assert c.rise.range_rate_km_s == pytest.approx(_rho_dot(float(times[0])), abs=1e-6)
 
 
 # ==================================================================================================
