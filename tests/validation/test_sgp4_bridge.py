@@ -322,6 +322,45 @@ def test_sgp4_tier_is_scored_against_the_common_truth(db_session_factory: Callab
     assert results[0].error.median_km < 1e-5
 
 
+def test_seconds_api_matches_raw_sgp4_minutes() -> None:
+    """
+    `sgp4_states` takes *seconds* from a chosen epoch; raw SGP4 takes *minutes* from the TLE epoch.
+    The published-vector path converts minutes -> seconds -> days and back, so a slip in the one
+    shared constant cancels there (found by mutation: `SECONDS_PER_DAY = 1440` passes every
+    published case). This pins the seconds API directly against the package, including a scenario
+    epoch that is not the TLE's own. Agreement is to Julian-date round-off, ~1e-11 s * 7.7 km/s.
+    """
+    tle = sgp4_bridge.ISS_TLE
+    jd, fr = sgp4_bridge.tle_epoch(tle)
+    shifted = (jd, fr + 0.25)                       # a scenario epoch 6 h after the TLE's
+    times = np.array([0.0, 600.0, 5554.0, 86400.0])
+    sat = Satrec.twoline2rv(tle.line1, tle.line2)
+    for epoch, offset_min in (((jd, fr), 0.0), (shifted, 360.0)):
+        got = sgp4_bridge.sgp4_states([tle], epoch, times).states[:, 0, :3]
+        raw = np.array([sat.sgp4_tsince(offset_min + t / 60.0)[1] for t in times])
+        assert np.abs(got - raw).max() < 1e-9      # measured 4.3e-11 km
+
+
+def test_external_scoring_is_relative_to_the_central_body(db_session_factory: Callable[[], Session]) -> None:
+    """
+    Earth never moves in `tle_satellites` (every other body is massless), so a scorer that forgot
+    to subtract the central body would pass every other test here. Translating the whole truth by a
+    constant must leave the score unchanged to round-off.
+    """
+    from dataclasses import replace
+
+    from orbital_engine.sweep import score_external
+
+    tle = sgp4_bridge.ISS_TLE
+    tier = sgp4_bridge.sgp4_tier([tle], sgp4_bridge.tle_epoch(tle), dt=60.0)
+    truth = reference_for(scenarios.tle_satellites(db_session_factory()), np.array([0.0, 300.0]),
+                          rtol=TRUTH_RTOL, atol=TRUTH_ATOL, oblateness={"Earth": (EARTH_J2, EARTH_R_EQ)})
+    moved = replace(truth, positions=truth.positions + np.array([1.0e4, -2.0e4, 3.0e3]))
+    a = score_external(tier, 300.0, truth, timing_batches=1, timing_warmup=0).error.median_km
+    b = score_external(tier, 300.0, moved, timing_batches=1, timing_warmup=0).error.median_km
+    assert abs(a - b) < 1e-9 and 1e-3 < a < 1e-2
+
+
 def test_sgp4_tier_access_metrics_share_the_truth_grid(db_session_factory: Callable[[], Session]) -> None:
     """
     One orbit, one station under the ground track. SGP4 differs from J2 truth by ~0.1 km after an
