@@ -16,12 +16,13 @@ Units follow the engine convention throughout: km, km/s, radians, seconds, mu in
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 
 from sqlalchemy.orm import Session
 
+from . import sgp4_bridge  # no sgp4 import at module level; the extra is only needed to call it
 from .custom_types import PropagatorType
 from .database import CelestialBodyORM, SystemORM, VesselORM, VirtualBodyORM
 from .gravity import POINT_MASS_MODEL
@@ -36,6 +37,7 @@ __all__ = [
     "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
     "ground_station_pass", "eclipsed_satellite",
     "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
+    "tle_satellites",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -628,6 +630,65 @@ def eclipsed_satellite(
         ))
         names.append(name)
 
+    session.commit()
+
+    return Simulation(
+        body_names=names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+
+
+# --------------------------------------------------------------------------------------------------
+# Real satellites from two-line element sets
+# --------------------------------------------------------------------------------------------------
+
+def tle_satellites(
+    session: Session,
+    tles: Optional[Sequence[sgp4_bridge.TLE]] = None,
+    *,
+    epoch: Optional[sgp4_bridge.JulianDate] = None,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth at the arena root plus one massless vessel per TLE, each seeded from **SGP4's Cartesian
+    state** at `epoch` (default: the first TLE's epoch) - never from the TLE's mean elements. See
+    `sgp4_bridge.py`. Needs the `sgp4` extra; `tles` defaults to `sgp4_bridge.ISS_TLE`.
+
+    The vessels are named after `TLE.name`, which is what `sgp4_bridge.sgp4_tier` reports against, so
+    every engine tier and the SGP4 tier start from the same state at `t = 0`. The stored elements are
+    the osculating ones through that state under `MU_EARTH` (not SGP4's WGS-72 `mu`): the engine's
+    constants define the engine's tiers and the truth. The frame is TEME at `epoch`, taken as inertial
+    with +z the spin axis - the approximation and its size are in `sgp4_bridge.py`'s docstring.
+    """
+    chosen = list(tles) if tles is not None else [sgp4_bridge.ISS_TLE]
+    at = epoch if epoch is not None else sgp4_bridge.tle_epoch(chosen[0])
+    coes = sgp4_bridge.seed_elements(chosen, at, MU_EARTH)
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names: List[str] = ["Earth"]
+    for tle, coe in zip(chosen, coes):
+        session.add(VesselORM(
+            name=tle.name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+            p=float(coe[0]), e=float(coe[1]), i=float(coe[2]),
+            raan=float(coe[3]), arg_pe=float(coe[4]), theta=float(coe[5]),
+        ))
+        names.append(tle.name)
     session.commit()
 
     return Simulation(

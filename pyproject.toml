@@ -30,13 +30,19 @@ perf = [
 reference = [
     "scipy>=1.10"
 ]
+# SGP4 for TLE ingest and as a sweep tier (sgp4_bridge.py). Wrapped, never reimplemented; imported
+# lazily, so the engine imports and runs without it. 2.x is the array API (SatrecArray) used here.
+sgp4 = [
+    "sgp4>=2.20"
+]
 test = [
     "pytest",
     "pytest-cov",  # Helpful for seeing which lines of code aren't tested yet
     "mypy",
     "pandas-stubs",
     "numba>=0.60",  # Included so CI gates the compiled path, not only the fallback.
-    "scipy>=1.10"   # Needed by tests/validation/test_reference_agreement.py.
+    "scipy>=1.10",  # Needed by tests/validation/test_reference_agreement.py.
+    "sgp4>=2.20"    # Needed by tests/validation/test_sgp4_bridge.py (Vallado's published vectors).
 ]
 dev = [
     "ipykernel",
@@ -51,6 +57,12 @@ where = ["src"]
 # taking on a stub dependency that CI would then have to keep in step.
 [[tool.mypy.overrides]]
 module = ["scipy.*"]
+ignore_missing_imports = true
+
+# sgp4 ships no type information either; sgp4_bridge.py is the only module that imports it, lazily,
+# and treats its objects as `Any` at that one boundary.
+[[tool.mypy.overrides]]
+module = ["sgp4.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

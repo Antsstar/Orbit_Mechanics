@@ -1015,6 +1015,84 @@ here only where the *tests* choose a mask angle with it.
 
 ---
 
+## SGP4: an external tier, not a propagator
+
+`sgp4_bridge.py` puts the operational propagator on the frontier plot without reimplementing it and
+without letting TLE mean elements into the engine.
+
+**Why a sweep tier and not a `PropagatorType`.** A propagator is something `step()` advances. SGP4 is
+evaluated by `sgp4.api.Satrec` / `SatrecArray`, stateful C++ objects, and `CLAUDE.md` forbids stateful
+third-party objects inside a step. It also has nothing the arena could hold as state: its state of
+record is the TLE (mean elements plus `B*`), which the engine must never store as elements. And it
+does not need stepping - it is closed-form in time. So it is scored the way it is actually used: as a
+trajectory evaluated at the times asked for. `sweep.ExternalTier` is plain data (bodies by name, a
+central body, a pure `positions(times_s)`), and `run_sweep(..., external=[...])` scores it through
+`score_external` against the *same* truth, with the same statistics, the same minimum-of-batches
+timing (one state per `dt` to the horizon) and the same access grid. An engine configuration's path is
+untouched. `PropagatorType.SGP4` exists in `custom_types.py` and stays unimplemented deliberately.
+
+**Every tier starts from SGP4's Cartesian state.** `scenarios.tle_satellites` seeds each vessel from
+`sgp4_bridge.seed_elements`: SGP4's `(r, v)` at the scenario epoch, converted to the engine's
+*osculating* elements by `rv_to_coe` - a change of coordinates on one state, reproduced by the build
+to 9.1e-13 km. The TLE's elements are never read. Doing that instead (mean elements into
+`coe_to_rv`) misses SGP4's own epoch state by **7.64 km** for the ISS, against a first-order
+short-period scale `J2 R^2 / a` = 6.48 km; `test_sgp4_bridge.py` keeps it as a named anti-pattern.
+
+**Frame.** SGP4 outputs TEME of date. The engine's Earth-centred scenarios need one fixed inertial
+frame with +z on the spin axis, and the bridge identifies the two at the scenario epoch without a
+rotation. What that ignores is precession plus nutation of TEME-of-date away from TEME-of-epoch,
+bounded (IAU 1980 rates, from memory, unverified) at `TEME_DRIFT_RAD_PER_DAY` = 0.31 arcsec/day, about
+11 m/day at LEO radius: two orders below SGP4's disagreement with a J2 truth over a day, and far below
+SGP4's own error against real orbits. It stops being acceptable over months (precession alone is
+0.33 km per 100 days at LEO), for any comparison with externally referenced data (GCRF ephemerides,
+GPS truth - the TEME -> GCRF rotation belongs to `pyerfa`), and for station geometry below ~10 m,
+where polar motion also enters. The Earth-rotation phase for stations is `Satrec.gsto`
+(`greenwich_angle`).
+
+**Published verification.** Vallado, Crawford, Hujsak & Kelso, *Revisiting Spacetrack Report #3*
+(AIAA 2006-6753), publishes 33 verification TLEs and their C++ output. The `sgp4` package ships both
+(`SGP4-VER.TLE`, `tcppver.out`), and the test reads them from there. Through the bridge, all 31
+cases inside print precision agree to the file's rounding: max 5.00e-9 km, and a **mean |dr| of
+2.515e-9 km against the 2.5e-9 km that uniform rounding predicts**. The mean is asserted to within
+six standard errors, so a systematic error of 1e-10 km would fail. The last case, SL-12 at 3.5 years
+past epoch, differs by 1.17e-7 km. That comes from the package, not the bridge: `Satrec.sgp4_tsince`
+gives the same value. Before the bridge put whole days on the Julian date, this case measured
+1.59e-7 km. All seven published error outcomes are reproduced, and SGP4 returns a *finite* state
+with code 6, so the bridge NaN-fills every flagged row.
+
+**Interchange, and what SGP4 disagrees with.** Cowell + J2 seeded from SGP4's state differs from
+SGP4 by the difference between their local expansions. The first term is linear: SGP4 is first order
+in J2, so its velocity equals the derivative of its position only to O(J2^2 v). That was predicted at
+9e-6 km/s and measured at 1.06e-5 km/s, and it is not drag. The second term is quadratic: J3/J4 plus
+O(J2^2) in the acceleration, measured at 4.5e-8 km/s^2. The combined difference is 3.70e-3 km at
+300 s. The engine lands on the prediction with a cubic remainder. Over one day on the ISS against
+the J2 truth at 60 s:
+
+| Tier | Error after 1 day |
+|---|---:|
+| Kepler | 646 km |
+| Secular J2 (osculating seed) | 778 km |
+| Secular J2 (mean seed) | 2.95 km |
+| Cowell + J2, `dt = 60 s` | 2.22 km (0.079 at 30 s, 0.0031 at 15 s) |
+| **SGP4** | **0.98 km**, 0.10 km after one orbit |
+
+This is one satellite, so the sweep's statistics over bodies reduce to one value. The SGP4 row is a
+*comparison*, not a verification. Re-running the truth with SGP4's constants and zero `B*` splits
+its 0.966 km along-track error into three parts. +1.20 km comes from WGS-72 `mu` against `MU_EARTH`:
+seeding the same `(r, v)` under a different `mu` changes the mean motion by `2 dmu/mu`, which
+derives to 1.19 km. +0.95 km is drag; the TLE's `ndot/2` predicts 0.75 km, and the drag term is
+quadratic in time, 4.0x from 12 h to 24 h. -1.18 km is J3/J4 and SGP4's theory, which was not
+derived. At the ISS's 410 km altitude, the 60 s Cowell tier's *truncation* error (2.22 km) is larger
+than SGP4's *model* difference, so at that step the integrator, not the force model, sets the error.
+
+**Limitations.** No TEME -> GCRF rotation, no UT1/polar motion, and no ingest from files or the
+network (TLEs are strings). All satellites share one scenario epoch, and a TLE whose epoch is far
+from it is evaluated at a large `tsince`, which is legitimate but degrades SGP4. SGP4's mean-element
+state is not re-fitted from engine output, which would need a differential corrector. The external
+tier has no `ModelConfig` and cannot carry force models: it is whatever the external model is.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
