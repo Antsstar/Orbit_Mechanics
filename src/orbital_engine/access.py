@@ -338,7 +338,7 @@ def access_grid(horizon_s: ScalarSeconds, sample_dt_s: ScalarSeconds) -> ArraySe
     if step <= 0.0:
         raise ValueError(f"sample_dt_s must be positive, got {step}.")
     n_intervals = max(1, int(round(horizon / step)))
-    grid: ArraySeconds = np.linspace(0.0, horizon, n_intervals + 1)
+    grid: ArraySeconds = np.linspace(0.0, horizon, n_intervals + 1, dtype=np.float64)
     return grid
 
 
