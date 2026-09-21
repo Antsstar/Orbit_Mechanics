@@ -460,7 +460,17 @@ def run_sweep(
 
     results: List[SweepResult] = []
     for config in configs:
-        n_steps = max(1, int(round(horizon_s / config.dt)))
+        # The horizon must be a whole number of steps. Rounding it silently would score the config
+        # at n*dt rather than at horizon_s - against a truth sampled at horizon_s - so the error
+        # would include however far the body moves in the difference (199 km for a 5554 s horizon
+        # at dt = 60 s, which quietly runs to 5580 s). Refuse instead, as access_metrics_for does.
+        ratio = horizon_s / config.dt
+        n_steps = int(round(ratio))
+        if n_steps < 1 or abs(ratio - n_steps) > 1e-9 * max(1.0, ratio):
+            raise ValueError(
+                f"config {config.name!r}: horizon_s={horizon_s} is not a whole number of steps of "
+                f"dt={config.dt} (ratio {ratio:.6f}); the config would be scored at the wrong time."
+            )
 
         sim = build_scenario()
         sim.record_history = False

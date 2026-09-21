@@ -155,3 +155,14 @@ def test_truth_is_computed_once_across_multiple_configs(
     assert calls["n"] == 1, "reference_for must be called exactly once per sweep, not once per config"
     assert len(results) == 3
     assert [r.config_name for r in results] == ["kepler-a", "kepler-b", "kepler-c"]
+
+
+def test_a_horizon_that_is_not_a_whole_number_of_steps_is_refused(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """Rounding horizon/dt silently would score the config at n*dt, not at the horizon the truth is
+    sampled at, and report the gap as model error - 199 km for a 5554 s horizon at dt = 60 s."""
+    build = _two_body_builder(db_session_factory)
+    config = sweep.ModelConfig(name="kepler", propagator=PropagatorType.KEPLERIAN, dt=DT)
+    with pytest.raises(ValueError, match="whole number of steps"):
+        sweep.run_sweep(build, [config], HORIZON + 0.5 * DT, timing_batches=1, timing_warmup=0)
