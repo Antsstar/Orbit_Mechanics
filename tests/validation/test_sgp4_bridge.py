@@ -363,10 +363,11 @@ def test_external_scoring_is_relative_to_the_central_body(db_session_factory: Ca
 
 def test_sgp4_tier_access_metrics_share_the_truth_grid(db_session_factory: Callable[[], Session]) -> None:
     """
-    One orbit, one station under the ground track. SGP4 differs from J2 truth by ~0.1 km after an
-    orbit (measured 0.100 km, almost all along-track), i.e. ~0.1 / 7.66 = 0.013 s of timing, so the
-    windows must match one-for-one with sub-0.1 s shifts. A wrong central body, time origin or frame
-    handling in the external access path would move them by seconds to minutes or lose the pass.
+    One orbit, one station under the ground track 1200 s in. By then SGP4 and J2 truth differ by at
+    most the local expansion of the interchange test, `1.06e-5 * 1200 + 0.5 * 4.5e-8 * 1200^2 =
+    0.045 km`, i.e. at most 0.045 / 7.66 = 6 ms of timing - so the single pass must match one-for-one
+    with shifts under 0.01 s (measured 0.74 ms rise, 0.78 ms set). A wrong central body, time origin,
+    Earth-rotation phase or frame in the external access path moves them by seconds or loses the pass.
     """
     tle = sgp4_bridge.ISS_TLE
     epoch = sgp4_bridge.tle_epoch(tle)
@@ -392,7 +393,7 @@ def test_sgp4_tier_access_metrics_share_the_truth_grid(db_session_factory: Calla
     assert metrics.n_truth_windows >= 1
     assert metrics.n_matched == metrics.n_truth_windows == metrics.n_model_windows
     assert metrics.passes_lost == metrics.passes_gained == 0
-    assert metrics.rise.max_abs_s < 0.1 and metrics.set.max_abs_s < 0.1
+    assert metrics.rise.max_abs_s < 0.01 and metrics.set.max_abs_s < 0.01
     assert float(np.linalg.norm(r0)) > 6500.0
 
 
