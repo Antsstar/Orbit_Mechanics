@@ -42,6 +42,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `manoeuvres.py` | Impulsive Delta-v in RSW, applied now or scheduled at an epoch `step()` splits for. The first physics that is neither a force model nor a propagator, and the first that every propagator can use | **new** |
 | `geometry.py` | Observation geometry: ground-station look angles, interpolated access windows, and the spherical line-of-sight test. Pure functions of position arrays, like `viz.py`'s transforms — the primitive layer under a future access-based error metric | **new** |
 | `access.py` | The sweep-level access metric built on `geometry.py`: model contact windows matched to truth's by time overlap, then differenced into rise/set shift, duration error, total contact error and **passes gained or lost**. Consumed by `sweep.run_sweep(access=...)`, which gains one optional field and changes nothing else | **new** |
+| `events.py` | Event-driven step splitting: a step cut where a continuous function of the arena state changes sign, located by a bracketed root find over trial propagations. The second thing `step()` splits for, after a scheduled manoeuvre — and the first that has to *find* its own epoch | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -721,6 +722,96 @@ because the rocket equation needs an `Isp` belonging to the stage rather than to
 policy for an impulse the tanks cannot deliver — guessing either was worse than leaving it out. RSW is
 the only input frame, and there is no finite-burn correction; `thrust.py` is the model for when burn
 duration matters.
+
+---
+
+## Event-driven step splitting: finding the epoch instead of being told it
+
+`manoeuvres.py` established that `step()` can cut itself in two. It knows *where* to cut because a
+scheduled impulse carries its epoch. `events.py` is the same cut with the epoch defined implicitly —
+as the root of a continuous scalar function of the arena state — and so has to find it during the
+step. That is the whole of the new machinery; everything downstream (`_advance` runs, the clock is
+pinned to `t + dt`) is the manoeuvre path unchanged.
+
+**The problem is real and was already measured.** `srp.py`'s cylindrical shadow makes the
+acceleration discontinuous at the terminator. `test_srp.py` records what that costs RK4: step-halving
+error ratios of 4.23 then 1.96 where a smooth problem gives 16, and seven times the error of running
+with no shadow at all. The conical shadow makes the symptom go away by smoothing `nu`, which is a fine
+reason to prefer it and not a fix. The fix is to stop the step at the discontinuity so that no step
+ever integrates across it — which is what a Runge-Kutta method's order derivation assumes in the first
+place.
+
+**Detected per body, split per arena.** The event function returns one value per body and each body's
+sign change is tracked separately, so a constellation registers its satellites' crossings
+independently. But there is one clock: `_advance` moves the whole arena, because `calc_global` and the
+Cowell/secular-J2 re-base assume every row is at the same instant. Per-body step sizes would be a
+different engine. So when one body crosses and another does not, *everything* takes two sub-steps, and
+what that costs the passengers is exactly what manoeuvre splitting costs them — nothing for an
+analytic body (measured: a Keplerian body 1 AU out moves less than 1e-4 km under eight splits), and
+one extra local truncation error `r(nh)^5/120` for a Cowell one.
+
+**Locating the crossing.** The engine has no dense output, so there is no way to ask for the state at
+`t + tau` without advancing to it: the root find works by snapshot, `_advance(tau)`, evaluate,
+restore. Several bodies may cross in one interval and the split has to land on the *earliest*, so the
+vector is reduced to `H(tau) = max_j -sign(g_j(0)) g_j(tau)`, which is negative until any body has
+crossed and non-negative after — one scalar root find for any number of bodies. The method is false
+position with the Illinois modification, terminating on **bracket width** rather than on `|H|`,
+because the quantity that must be small is a time.
+
+**Splitting alone does not restore the order, and that is the part worth reading.** Two things got in
+the way, both found by measuring rather than by reading:
+
+- *RK4's stages are not on the trajectory.* Stage 4 samples `r + h v(k3)`, off the solution by
+  `O(h^3 |da/dt|)` — 5.6e-4 km at `h = 5 s` in LEO. A sub-step ending exactly at the terminator
+  evaluates that stage on whichever side of the surface an off-trajectory point falls, and a stage on
+  the wrong side carries weight 1/6 of a full `Delta_a h`. Measured 3.38e-6 km against a derived
+  `n Delta_a (h/6) T_rem` = 3.26e-6 km: still first order, and at `h = 1.25 s` *worse* than not
+  splitting. The remedy is a **branch latch** — for a sub-interval known to contain no crossing, the
+  model is pinned to the branch it starts on, so the right-hand side really is smooth over that
+  interval at all four stages. `srp.py` carries it as an engine-owned `shadow_latch` column, written
+  and released inside one step, with the same precedent as `thrust.py`'s mutated mass column.
+- *The event function quantises.* `umbra_clearance` is `sqrt(...) - r_occ`, which rounds to exactly
+  `0.0` within an ulp of the surface — and a converging root find lands there routinely. `H` is then
+  `-0.0`, and `-0.0 < 0.0` is false, so a strict "are we past it?" test declares the crossing resolved
+  while the body sits on a surface whose own membership test is strict and reads *lit*. The
+  postcondition is checked with `<= 0` and nudged by one tolerance until the sign has genuinely
+  flipped. This is precisely the class of bug this repo's item-5 rule exists for: it raised nothing,
+  crashed nothing, and cost a factor of 1000 in accuracy at the finest step.
+
+**What it delivers.** On `scenarios.eclipsed_satellite`, error against a fine reference at steps
+20/10/5/2.5/1.25 s:
+
+| | ratios | error at `h = 1.25 s` |
+|---|---|---|
+| no shadow (control) | 17.31 16.68 16.30 17.18 | 5.37e-9 km |
+| cylinder, no split | 16.99 6.40 2.57 1.46 | 9.18e-7 km |
+| cylinder, split | 17.28 16.66 16.23 17.83 | 5.19e-9 km |
+
+Fourth order, fully recovered, at the no-shadow control's own error. What is left is the crossing-time
+tolerance: `err / (Delta_a tol_s T_sum)` measured at 2.0–2.7 across three decades, which at the
+default `tol_s = 1e-6 s` is 7.4e-12 km — orders below RK4's own truncation, by design.
+
+**Why a new scenario.** None of the above is observable in `sun_earth_moon`. A Cowell body whose
+`global_states` row is heliocentric (`~1.5e8 km`) loses nine digits to cancellation against its
+parent, flooring the trajectory at `~1e-5 km` over 1.5 LEO orbits — the same size as RK4's truncation
+at `h = 10 s`. Fourth-order convergence cannot be measured there with or without a shadow.
+`eclipsed_satellite` puts Earth at the arena root and a massless luminous marker 1 AU out; the floor
+drops by six orders and the ladder reads 16. That is a fact about the *arena*, not about events, and
+it is worth knowing before anyone else tries to measure an integrator on a heliocentric scenario.
+
+**Cost.** A step with no crossing costs two evaluations of the event function and the snapshot copies
+— **no extra propagation**, which is what keeps it bit-identical to today. A crossing costs 6 to 12
+trial propagations plus three advances instead of one; over 1.5 orbits at `dt = 10 s` that is 23 trial
+propagations against 880 steps, under 3 % of the run.
+
+**What is not built.** No interior sampling, so a body crossing an even number of times inside one
+interval is invisible — the standard endpoint-detection blind spot, asserted as a test rather than
+left in prose, and defended by the fact that `dt` is seconds while an eclipse is thousands. No
+tangential events. No adaptive integrator: an adaptive method would want the event search folded into
+its own step-size controller (reject the trial step, retry ending at the crossing) rather than layered
+above it, and it would want the latch to survive a rejected step. `events.py` is deliberately written
+against the `Integrator` protocol's *caller*, not against RK4, so that change is confined to
+`_advance_with_events`.
 
 ---
 
