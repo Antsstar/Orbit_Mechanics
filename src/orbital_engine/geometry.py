@@ -379,7 +379,9 @@ def elevation_azimuth(
         )
         # omega x r_station, expressed in the body-fixed frame: rotation is about +z.
         station_vel = float(omega) * np.stack(
-            [-station_fixed[:, 1], station_fixed[:, 0], np.zeros(station_fixed.shape[0])], axis=-1
+            [-station_fixed[:, 1], station_fixed[:, 0],
+             np.zeros(station_fixed.shape[0], dtype=np.float64)],
+            axis=-1,
         )
         rho_dot = v_rot[..., 0][:, np.newaxis, :, :] - station_vel[np.newaxis, :, np.newaxis, :]
         # |rho| = 0 forces the numerator to 0 as well, so dividing by 1.0 there returns exactly 0.0.
