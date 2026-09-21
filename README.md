@@ -151,6 +151,31 @@ model's defining invariant drawn rather than asserted.
 
 ---
 
+## Scope: where this project stops
+
+This engine is a **bench for comparing models**, not an application. The line it draws is not by
+topic but by what a thing depends on:
+
+- **Here:** anything that is a property of *bodies and orbits*. Propagation, force models, the
+  reference truth, the sweep, and observation geometry — visibility, occultation, access windows,
+  range and range rate. Shadow geometry lives here for the same reason: `srp` and the access metric
+  share one line-of-sight test, because "is the satellite eclipsed" and "can the station see it" are
+  the same question asked of different bodies.
+- **Downstream:** anything that is a property of *hardware or of a graph*. Link budgets (transmit
+  power, antenna patterns, noise temperature, modulation), Doppler shift as a carrier offset,
+  contact-graph routing, handover policy, and constellation network emulation. None of it needs the
+  arena once the contacts exist.
+
+**The seam is the contact dataset**: access windows with range and range rate, per station and body.
+A downstream project consumes that and never imports `Simulation`. Keeping the seam there is what
+lets this repository stay a comparison instrument rather than growing into a network simulator with
+an orbit propagator inside it.
+
+This also sets what the engine owes a consumer: a stable exported dataset, a version, and an install
+that works without the editable checkout.
+
+---
+
 ## Verification
 
 | | |
