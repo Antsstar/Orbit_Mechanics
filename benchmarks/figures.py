@@ -91,6 +91,18 @@ the along-track share of a 1.88 km error, as it should be. The residual edge-int
 this 60 s grid is bounded by `C Delta h = 1.6e-2 s` (`access.py`), so the number is signal, not
 sampling.
 
+**7. `station_keeping.png` - caption.** One satellite, four atmospheres: four co-located 51.6 deg
+Cowell + J2 satellites (B = 0.05 m^2/kg) held in a [291.0, 293.5] km *mean*-altitude band for 10 days
+by `stationkeeping.py`'s dead-band controller at dt = 30 s, with two-impulse raises. The faint trace is
+the osculating altitude, swinging ~12 km peak to peak under J2 - the reason the controller keys on the
+one-period mean (solid), which is blank for ~2.5 orbits after each raise while it re-establishes it.
+Under the table: 24 raises every 10.1 h, 34.78 m/s, a steady 3.436 m/s/day. Under the single band
+matched at 355 km with H = 60 km (`atmosphere.png`'s): 20 raises every 11.8 h, 28.98 m/s, 2.951
+m/s/day - **14.1 % under-budgeted**, because at 292 km the table's scale height is 45.5 km. The same
+single band anchored at the band centre: 3.431 m/s/day, **0.14 %** off. The drag-free control never
+burns. The steady rates are validated in `tests/validation/test_stationkeeping.py` against the
+orbit-averaged decay converted at `(n/2) da`, to 4e-4.
+
 **4. `hierarchy.png` - caption.** `sun_earth_moon` over 60 days, drawn in the frame that makes the
 hierarchy visible: relative to the Earth-Moon barycentre. Neither body's `parent_indices` parent is
 the other - both are measured about the barycentre, which is itself the body carrying the
@@ -785,6 +797,104 @@ def figure_access_windows() -> None:
 
 
 # ==================================================================================================
+# 7. station_keeping.png - what the atmosphere model costs in Delta-v
+# ==================================================================================================
+
+# The satellite and band of `tests/validation/test_stationkeeping.py`, over a longer span. The test
+# owns the derivation and the budget; this script only runs it longer and draws it.
+SK_SEED_KM = 298.85                    # osculating; J2 puts the one-period mean at 292.0 km
+SK_INC_DEG = 51.6
+SK_B = 0.05                            # m^2/kg
+SK_LOWER_KM = 291.0
+SK_UPPER_KM = 293.5
+SK_DT_S = 30.0                         # 60 s leaves a drag-dependent RK4 bias of 3e-3; see the test
+SK_DAYS = 10.0
+SK_MATCH_KM = 355.0                    # `test_atmosphere.py`'s single band: matched at 355 km, H = 60
+SK_SINGLE_H_KM = 60.0
+SK_PANELS = [
+    ("layered: Vallado Table 8-4", "tab:blue"),
+    (f"single band matched at {SK_MATCH_KM:.0f} km, H = {SK_SINGLE_H_KM:.0f} km", "tab:red"),
+    (f"single band matched at the band centre, H = {SK_SINGLE_H_KM:.0f} km", "tab:orange"),
+    ("no drag (control)", "tab:green"),
+]
+
+
+def figure_station_keeping() -> None:
+    from orbital_engine.stationkeeping import StationKeepingSpec, run_station_keeping
+
+    sim = scenarios.station_keeping_satellites(
+        fresh_session(), n_sats=4, altitude_km=SK_SEED_KM, inclination_deg=SK_INC_DEG)
+    sim.record_history = False
+    slots = [sim.name_to_index[f"SK-SAT-{k:02d}"] for k in range(4)]
+    common = dict(ballistic_coeff=SK_B, r_ref=EARTH_R_EQ, omega=EARTH_OMEGA)
+    centre = 0.5 * (SK_LOWER_KM + SK_UPPER_KM)
+    rho = lambda h: float(layered_density(np.array([h]))[0])        # noqa: E731
+    sim.enable_force_model(DRAG_MODEL, slots[0], density_model=DENSITY_MODEL_LAYERED, **common)
+    sim.enable_force_model(DRAG_MODEL, slots[1], density_model=DENSITY_MODEL_EXPONENTIAL,
+                           rho0=rho(SK_MATCH_KM), h0=SK_MATCH_KM, scale_height=SK_SINGLE_H_KM, **common)
+    sim.enable_force_model(DRAG_MODEL, slots[2], density_model=DENSITY_MODEL_EXPONENTIAL,
+                           rho0=rho(centre), h0=centre, scale_height=SK_SINGLE_H_KM, **common)
+
+    spec = StationKeepingSpec(SK_LOWER_KM, SK_UPPER_KM)
+    out = run_station_keeping(sim, slots, spec, SK_DAYS * 86400.0, SK_DT_S)
+    days = out.times_s / 86400.0
+
+    lines = []
+    for k, s in enumerate(out.summary):
+        rate = float("nan")
+        mine = [b for b in out.burns if b.body == slots[k]]
+        if len(mine) >= 2:
+            rate = sum(b.dv_km_s for b in mine[1:]) / (mine[-1].epoch_s - mine[0].epoch_s)
+        lines.append((s.total_dv_km_s * 1e3, s.n_burns, s.mean_interval_s / 3600.0, rate * 1e3 * 86400.0))
+        print(f"  {SK_PANELS[k][0]}: {s.n_burns} burns, total {s.total_dv_km_s * 1e3:.3f} m/s, "
+              f"mean interval {s.mean_interval_s / 3600.0:.2f} h, steady rate {rate * 1e3 * 86400.0:.4f} m/s/day")
+    base = lines[0][3]
+    for k in (1, 2):
+        print(f"  {SK_PANELS[k][0]} / layered steady rate: {lines[k][3] / base:.4f} "
+              f"({100.0 * (lines[k][3] / base - 1.0):+.2f} %)")
+
+    fig, axes = plt.subplots(4, 1, figsize=(10.0, 10.5), sharex=True)
+    for k, ax in enumerate(axes):
+        label, colour = SK_PANELS[k]
+        ax.axhspan(SK_LOWER_KM, SK_UPPER_KM, color="0.9", zorder=0)
+        ax.plot(days[::4], out.osculating_altitude_km[::4, k], lw=0.3, color=colour, alpha=0.35)
+        ax.plot(days, out.mean_altitude_km[:, k], lw=1.6, color=colour)
+        for b in out.burns:
+            if b.body == slots[k]:
+                ax.axvline(b.epoch_s / 86400.0, lw=0.7, color="k", alpha=0.6, ymax=0.08)
+        total, n, hours, rate = lines[k]
+        text = (f"{label}\n{n} raises, total $\\Delta v$ = {total:.2f} m/s" +
+                (f", every {hours:.1f} h, {rate:.3f} m/s/day steady" if n >= 2 else ""))
+        ax.text(0.005, 0.97, text, transform=ax.transAxes, fontsize=8.5, va="top",
+                bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.9))
+        ax.set_ylim(SK_LOWER_KM - 4.5, SK_UPPER_KM + 8.5)
+        ax.set_ylabel("altitude (km)")
+        ax.grid(True, ls=":", alpha=0.5)
+    axes[-1].set_xlabel("time (days)")
+    axes[-1].set_xlim(0.0, SK_DAYS)
+    axes[0].set_title(
+        f"Station-keeping a 51.6 deg satellite in a [{SK_LOWER_KM:.1f}, {SK_UPPER_KM:.1f}] km "
+        f"mean-altitude band, B = {SK_B} m$^2$/kg, {SK_DAYS:.0f} days\n"
+        f"Cowell + J2 + drag at dt = {SK_DT_S:.0f} s, two-impulse raises. Faint: osculating altitude. "
+        f"Solid: the controller's one-period mean\n(blank while it re-establishes the mean after a "
+        f"raise). Ticks: raises.", fontsize=10)
+    fig.text(
+        0.01, 0.005,
+        f"Same satellite, same band, same controller - only the density law differs. Anchored at "
+        f"{SK_MATCH_KM:.0f} km, the single band budgets {100 * (1 - lines[1][3] / base):.1f} % less "
+        f"Delta-v than the table,\nbecause at 292 km the table's scale height is 45.5 km, not 60. "
+        f"Anchored at the band itself, the same single band differs by only "
+        f"{100 * abs(lines[2][3] / base - 1):.2f} %:\nwhat the choice costs is where the single band is "
+        f"anchored, not how many bands there are. Steady rates are validated in\n"
+        f"tests/validation/test_stationkeeping.py against the orbit-averaged decay converted at (n/2) da, "
+        f"to 4e-4.",
+        fontsize=8, va="bottom",
+    )
+    fig.tight_layout(rect=(0, 0.065, 1, 1))
+    _save(fig, "station_keeping.png")
+
+
+# ==================================================================================================
 
 FIGURES: Dict[str, Callable[[], None]] = {
     "ground": figure_ground_tracks,
@@ -793,6 +903,7 @@ FIGURES: Dict[str, Callable[[], None]] = {
     "hierarchy": figure_hierarchy,
     "atmosphere": figure_atmosphere,
     "access": figure_access_windows,
+    "stationkeeping": figure_station_keeping,
 }
 
 

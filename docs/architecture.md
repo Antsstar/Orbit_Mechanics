@@ -1013,6 +1013,81 @@ saw is not a pass another saw however well the intervals line up. `peak_elevatio
 differenced: `geometry.py` samples it rather than refining it, so it is a lower bound, and it appears
 here only where the *tests* choose a mask angle with it.
 
+## Station-keeping: the atmosphere model in the units of propellant
+
+`access.py` put model error into contact windows. `stationkeeping.py` puts the **atmosphere** choice
+into the unit an operator signs off on: the Delta-v it takes to hold a satellite in an altitude band.
+It adds no physics — drag, density and impulse are `drag.py`, `atmosphere.py` and `manoeuvres.py` —
+only the decision of when to burn and how much, and like `manoeuvres.py` and `access.py` it is not a
+registry entry: a controller is neither an acceleration nor a propagator.
+
+**The policy is data.** `StationKeepingSpec(lower_km, upper_km, r_ref_km, impulses)`: when the mean
+altitude falls to `lower_km`, raise it to `upper_km`, as a two-impulse Hohmann transfer between mean
+radii (circular after) or one prograde burn. `StationKeeper.observe()` runs after every step;
+`run_station_keeping` drives it. The burn log (`Burn`) and `summarise_burns` give total Delta-v, number
+of raises and mean interval per body.
+
+**What it keys on is the design decision.** Under J2 a 300 km, 51.6 deg orbit's osculating altitude
+swings 12 km peak to peak about its mean; a controller keyed to it fires once per orbit at the J2 dip
+while the orbit is kilometres inside the band. The quantity is the **one-period time average of
+osculating altitude**, which annihilates every short-period term because each is periodic in the
+argument of latitude. Two corrections make it good to metres rather than tens of metres: the window
+is the trapezoidal integral over *exactly* one Keplerian period (a rectangle of `round(T/dt)` samples
+leaks the oscillation), and it is extrapolated `T/2` forward along the slope of two consecutive
+windows (a trailing mean reads `|mdot| T/2` = 0.18 km high, 7 % of the band). No Brouwer/Kozai mean
+element: that would be a theory-internal osculating-to-mean conversion `CLAUDE.md` scopes narrowly,
+and a time average needs no theory. The price is that the controller is blind for ~2.5 orbits after
+each raise while it re-establishes the average.
+
+**Between steps, not an `events.Event`.** An event function must be a pure read of the instantaneous
+arena, and a mean is a function of history; `events.Event` has no action to fire a burn from; and
+the timing precision would be worthless — a smooth threshold crossed at `|mdot| dt` = 2–4 m per step
+moves nothing, and cancels out of the Delta-v rate. **What belongs upstream** if event-triggered
+manoeuvres are ever wanted: an `Event.action(sim, bodies)` hook run between the split sub-steps.
+
+**Validation** (`tests/validation/test_stationkeeping.py`) predicts the Delta-v *rate* without the
+controller's bookkeeping: `dv = (n/2) da` from Gauss's equation, and the cycle time from the
+orbit-averaged decay of an inclined circular orbit in a co-rotating atmosphere (matching an average
+of `drag_kernel` itself to 2e-15). Three further terms were each derived, and one of them only after
+measurement disagreed:
+
+| term | size | how known |
+|---|---|---|
+| density convexity `1 + <delta^2>/(2H^2)` | +3.7e-3 table, +2.2e-3 single band | `<rho(h_osc)>/rho(mean)` measured 3.72e-3 against 3.76e-3 |
+| RK4 truncation `(n h)^6 / 36` per step | 30 m/day at 60 s, 0.94 at 30 s | 1/36 from a standalone scalar RK4, engine within 5 % |
+| Hohmann transfer phase `tau (U - L)/(2H)` | +2.0e-3 table, +1.3e-3 single band | **found**: the layered residual was +2.48e-3 against a controller-free +4.7e-4 |
+
+Measured against the full prediction: **+4.0e-4 (table), +2.3e-4 (single band), +1.04e-3
+(single-impulse)** against `RATE_REL_TOL = 3e-3`, each equal to 1e-4 to the same satellite's
+controller-free decay residual, so the controller's accounting adds nothing measurable. The band is
+held and every burn fires within 10 m of the lower bound on an **independent** mean (a
+secular-plus-harmonics least-squares fit), intervals exceed the fastest possible band crossing, and
+the drag-free control spends exactly zero.
+
+**Two findings about integrator error.** The RK4 energy constant on a circular Kepler orbit is
+**1/36, not the harmonic oscillator's 1/72** that `test_atmosphere.py`'s budget quotes (harmless
+there — it is a 1e-5 budget item). And at `dt = 60 s` a *drag-carrying* satellite's RK4 decay exceeds
+the drag-free twin's by 3.2e-3 (table) / 1.7e-3 (single band) of the drag rate, falling as `h^4`:
+**a drag-free twin does not calibrate integrator drift under drag.** The test runs at 30 s for that
+reason; a Delta-v budget read off a coarse-step Cowell run inherits the bias.
+
+**The headline** (`docs/figures/station_keeping.png`, 10 days, B = 0.05 m^2/kg, band [291, 293.5]
+km): the table costs 3.436 m/s/day, 24 raises every 10.1 h, 34.78 m/s in total. The single band
+matched at 355 km with H = 60 km — `test_atmosphere.py`'s "one number for LEO" — costs 2.951 m/s/day
+(20 raises, 28.98 m/s): **14.1 % under-budgeted**, 0.49 m/s/day, because at 292 km the table's scale
+height is 45.5 km. The *same* single band anchored at the station instead differs by **0.14 %**. So
+what this choice costs is where the single band is anchored, not how many bands there are.
+
+**Negative controls**, each a one-line mutation of `stationkeeping.py`, restored with `git checkout
+--`: trigger on osculating altitude, **16/23 fail** (including the drag-free control burning); burn
+retrograde, **14/23 fail** (chattering at exactly the 13 560 s re-observation lockout); drop the lag
+correction, **8/23 fail** (burns 0.18 km late, band breached); rectangle window instead of the exact
+trapezoid, **2/23 fail** — caught, but thinly: at 30 s the 0.3-sample mismatch leaks only ~10 m.
+
+**Not built.** Eccentricity, inclination and phasing control; propellant mass (the report is Delta-v);
+a finite-burn model; a sweep integration (`ModelConfig` has nowhere to carry a controller yet — the
+spec is data, so adding it is one optional field).
+
 ---
 
 ## SGP4: an external tier, not a propagator

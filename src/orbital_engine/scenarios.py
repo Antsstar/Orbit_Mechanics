@@ -35,7 +35,7 @@ __all__ = [
     "VESSEL_DRY_MASS", "VESSEL_FUEL_MASS",
     "STATION_LATITUDE_DEG", "STATION_LONGITUDE_DEG", "STATION_ALTITUDE_KM",
     "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
-    "ground_station_pass", "eclipsed_satellite",
+    "ground_station_pass", "eclipsed_satellite", "station_keeping_satellites",
     "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
     "tle_satellites",
 ]
@@ -697,3 +697,80 @@ def tle_satellites(
         session=session,
         max_capacity=capacity if capacity is not None else len(names) + 8,
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# Station-keeping
+# --------------------------------------------------------------------------------------------------
+
+def station_keeping_satellites(
+    session: Session,
+    *,
+    n_sats: int = 3,
+    altitude_km: float = 300.0,
+    inclination_deg: float = 51.6,
+    raan_deg: float = 0.0,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth plus `n_sats` co-located massless Cowell satellites (`SK-SAT-00`, ...) on one circular orbit,
+    each already carrying `point_mass_gravity` and `j2` (Earth values), and nothing else.
+
+    Built for `stationkeeping.py`. The satellites are identical, so each can be given a different
+    atmosphere - or none, as the drag-free control - and the difference between their Delta-v budgets
+    is the modelling choice and nothing else, the same co-located-twin idiom `powered_vessel` and
+    `hohmann_pair` use. Drag is deliberately **not** configured: it is the thing being compared.
+
+    `altitude_km` is the *osculating* seed altitude above `geopotential.EARTH_R_EQ` (not
+    `EARTH_RADIUS`), the `r_ref` `drag.py` and `stationkeeping.StationKeepingSpec` should use. J2 is
+    on, and it matters: an osculating-circular seed is not a mean-circular orbit, so under J2 the
+    **one-period mean altitude sits below the seed** - 6.84 km below at 300 km and 51.6 deg - and the
+    osculating altitude swings 12 km peak to peak about it. Place a station-keeping band around the
+    mean, not the seed. That oscillation is exactly why a controller must not key on osculating
+    altitude (see `stationkeeping.py`), and why the inclination defaults to a non-zero, non-special
+    value: the J2 short-period terms scale with `sin^2 i`.
+    """
+    # Local import: `geopotential` is a force-model module registered on `import orbital_engine`, and
+    # importing it here keeps this module's import-time dependencies what they were.
+    from .geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
+
+    if n_sats < 1:
+        raise ValueError(f"n_sats must be at least 1, got {n_sats}")
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names = [f"SK-SAT-{k:02d}" for k in range(n_sats)]
+    for name in names:
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=VESSEL_FUEL_MASS, drag_area=4.0,
+            p=EARTH_R_EQ + altitude_km, e=0.0, i=math.radians(inclination_deg),
+            raan=math.radians(raan_deg), arg_pe=0.0, theta=0.0,
+        ))
+    session.commit()
+
+    sim = Simulation(
+        body_names=["Earth"] + names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+    sats = np.array([sim.name_to_index[n] for n in names], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, sats)
+    sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    return sim

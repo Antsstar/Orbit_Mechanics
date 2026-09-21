@@ -1258,6 +1258,29 @@ integrator — and no amount of work on the perturbation will show up.
 
 ---
 
+## A drag-free twin does not calibrate integrator drift under drag, and RK4's Kepler constant is 1/36
+
+**Symptom.** The station-keeping Delta-v rate (`tests/validation/test_stationkeeping.py`) came out
++4.9e-3 over its prediction at `dt = 60 s` against a 3e-3 budget, although the prediction already
+subtracted the RK4 drift *measured on a drag-free twin*. Separately, that twin's drift was 30.1 m/day
+against a derived 15.1: exactly twice.
+
+**Cause.** Two things. (1) The `(n h)^6 / 72` per-step energy loss quoted in `test_atmosphere.py`'s
+budget is the *harmonic oscillator's*. On a circular Kepler orbit a standalone scalar RK4 gives
+`da/a / h^6` -> 1/36 (0.02864, 0.02800, 0.02783, 0.02779 at h = 0.4 ... 0.05); the engine matches that
+to 0.2 %. (2) With the controller out of the loop, the drag satellites' decay still exceeded
+`hdot` by 3.2e-3 (table) / 1.7e-3 (single band) at 60 s, falling to 4.7e-4 / 4.0e-4 at 30 s - an
+`h^4` term that exists only when drag does. The twin cannot see it.
+
+**Fix.** The test runs at 30 s and uses the derived 1/36. Its *controller* residual then exposed a
+third term, the Hohmann transfer phase, which is in the prediction now (see the test docstring).
+
+**Generalisable.** A control measures the error it shares with the treatment and nothing else. Before
+subtracting a control's drift, check that the error is independent of the thing being measured -
+here, halving the step and watching the residual.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
