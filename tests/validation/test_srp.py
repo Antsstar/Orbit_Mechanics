@@ -42,8 +42,9 @@ from orbital_engine.geopotential import EARTH_R_EQ
 from orbital_engine.gravity import POINT_MASS_MODEL
 from orbital_engine.simulator import Simulation
 from orbital_engine.srp import (
-    SHADOW_MODEL_CONICAL, SHADOW_MODEL_CYLINDRICAL, SOLAR_CONSTANT_1AU, SOLAR_PRESSURE_1AU,
-    SRP_MODEL, SUN_RADIUS, shadow_factor, srp_kernel,
+    LATCH_AUTO, SHADOW_MODEL_CONICAL, SHADOW_MODEL_CYLINDRICAL, SOLAR_CONSTANT_1AU,
+    SOLAR_PRESSURE_1AU,
+    SRP_MODEL, SRP_PARAM_NAMES, SUN_RADIUS, shadow_factor, srp_kernel,
 )
 
 ArrF = NDArray[np.float64]
@@ -84,7 +85,7 @@ def _bare_arena(n_bodies: int) -> Tuple[ArrF, ArrF, NDArray[np.int32], ArrF, Arr
     state = np.zeros((n_bodies, 6))
     mu = np.zeros(n_bodies)
     parents = np.zeros(n_bodies, dtype=np.int32)
-    params = np.zeros((n_bodies, 7))
+    params = np.zeros((n_bodies, len(SRP_PARAM_NAMES)))
     out = np.zeros((n_bodies, 3))
     return state, mu, parents, params, out
 
@@ -122,7 +123,7 @@ def test_closed_form_magnitude_and_anti_sunward_direction() -> None:
     distances = np.array([1.0, 2.0, 0.5]) * AU2KM
     units = offsets / np.linalg.norm(offsets, axis=1)[:, None]
     state[2:5, :3] = state[1, :3] - units * distances[:, None]
-    params[2:5] = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
+    params[2:5] = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
 
     srp_kernel(np.arange(2, 5, dtype=np.int64), 0.0, state, mu, parents, params, out)
 
@@ -146,7 +147,7 @@ def test_kernel_is_additive_and_a_no_op_on_empty_indices() -> None:
     state, mu, parents, params, out = _bare_arena(3)
     state[1, :3] = [AU2KM, 0.0, 0.0]
     state[2, :3] = [0.0, 7000.0, 0.0]
-    params[2] = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
+    params[2] = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
     out[:] = 7.0
 
     srp_kernel(np.empty(0, dtype=np.int64), 0.0, state, mu, parents, params, out)
@@ -166,9 +167,9 @@ def test_degenerate_rows_are_exactly_zero() -> None:
     state[2, :3] = state[1, :3]                                     # sitting on the source
     state[3, :3] = [0.0, 7000.0, 0.0]
     state[4, :3] = [0.0, 7000.0, 0.0]
-    params[2] = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
-    params[3] = [0.0, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
-    params[4] = [CR, 0.0, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
+    params[2] = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
+    params[3] = [0.0, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
+    params[4] = [CR, 0.0, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
 
     with np.errstate(all="raise"):
         srp_kernel(np.arange(2, 5, dtype=np.int64), 0.0, state, mu, parents, params, out)
@@ -305,7 +306,7 @@ def test_the_kernel_multiplies_the_acceleration_by_the_shadow_factor() -> None:
     state[3, :3] = [-d_occ, 3.0 * r_occ, 0.0]                 # full sun
     state[4, :3] = [-d_occ, 0.0, 0.0]                         # umbra geometry, no occulter
     state[5, :3] = [-d_occ, r_occ, 0.0]                       # conical penumbra, near half-lit
-    base = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, r_occ, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL]
+    base = [CR, AREA_MASS, SOLAR_PRESSURE_1AU, 1.0, r_occ, SUN_RADIUS, SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
     params[2:5] = base
     params[4, 4] = 0.0
     params[5] = base
@@ -423,7 +424,7 @@ def test_srp_overtakes_drag_at_the_derived_crossover_altitude() -> None:
     for area_mass in (0.02, 0.2):
         params[:] = 0.0
         params[2:] = [CR, area_mass, SOLAR_PRESSURE_1AU, 1.0, 0.0, SUN_RADIUS,
-                      SHADOW_MODEL_CYLINDRICAL]
+                      SHADOW_MODEL_CYLINDRICAL, LATCH_AUTO]
         out[:] = 0.0
         srp_kernel(idx, 0.0, state, mu, parents, params, out)
         a_srp = np.linalg.norm(out[2:], axis=1).copy()
@@ -752,7 +753,7 @@ def test_srp_is_registered_with_a_citation_and_is_foreign_to_the_fused_cowell_pl
     the whole Cowell set down the NumPy `RK4Integrator` path. Asserted, not assumed."""
     model = registry.get_force_model(SRP_MODEL)
     assert model.param_names == (
-        "cr", "area_mass", "p_srp", "source", "r_occ", "r_source", "shadow_model")
+        "cr", "area_mass", "p_srp", "source", "r_occ", "r_source", "shadow_model", "shadow_latch")
     assert "Montenbruck" in model.citation and "unverified" in model.citation
 
     sim, idx = _config_sim()

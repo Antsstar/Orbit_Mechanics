@@ -4,8 +4,8 @@ Event-driven step splitting: cut a step at the instant a continuous event functi
 This is the generalisation of the scheduled-epoch split `manoeuvres.py` already has. A scheduled
 impulse knows its epoch in advance, so `Simulation.step` can simply cut there. An *event* does not:
 its epoch is defined implicitly, as the root of a scalar function of the arena state, and has to be
-found during the step. Everything downstream is the same machinery - the step is cut, `_advance` runs
-twice, and the clock is pinned to `t + dt` at the end.
+found during the step. Everything downstream is the same machinery - the step is cut, `_advance`
+runs more than once, and the clock is pinned to `t + dt` at the end.
 
 Why this exists
 ---------------
@@ -27,7 +27,7 @@ The event interface
 -------------------
 An `Event` is plain frozen data, like `manoeuvres.Manoeuvre`:
 
-    Event(name, function, bodies, direction, tol_s)
+    Event(name, function, bodies, direction, tol_s, latch)
 
 `function(sim, bodies) -> (k,)` returns one float per body of `bodies`, in *any* unit: only its sign
 and its continuity matter. It must be a **pure read** of the arena - `Simulation` evaluates it at
@@ -39,6 +39,8 @@ step with no crossing bit-identical to a step with no events registered at all.
   both. A discontinuity wants `0` - eclipse entry and exit are equally sharp. An apoapsis event would
   be `function = r . v`, `direction = -1`.
 - **`tol_s`** is the time tolerance the crossing is located to. See `DEFAULT_EVENT_TOL_S`.
+- **`latch`** is needed only by an event marking a *discontinuity*, and is the difference between
+  splitting the step and actually recovering the order. See "Splitting is not enough" below.
 
 Ready-made events: `shadow_event(sim)`, the cylindrical umbra boundary of every `"srp"` body that has
 one. A future altitude-threshold, apoapsis or elevation-mask event is the same three lines - a pure
@@ -81,59 +83,115 @@ Rather than running one root find per crossing body, the vector is reduced to a 
 crossed - so `H`'s first zero is the earliest crossing time, and one scalar root find serves any
 number of bodies at one trial propagation per iteration.
 
-The root find is **false position with the Illinois modification**, safeguarded by a bisection step
-whenever the interpolant falls too near an endpoint. It keeps a valid bracket at every iteration
-(unlike a secant method, which can leave one), and converges superlinearly on the near-linear `g` a
-geometric event produces, where plain bisection would need `log2(dt / tol_s)` iterations - 24 for
-`dt = 10 s` at the default tolerance. Termination is on **bracket width**, not on `|H|`, because the
-quantity that has to be small is a *time*: `|H|` small means nothing without the slope.
+The root find is **false position with the Illinois modification**. It keeps a valid bracket at every
+iteration (unlike a secant method, which can leave one) and converges superlinearly on the
+near-linear `g` a geometric event produces, where plain bisection would need `log2(dt / tol_s)`
+iterations - 24 for `dt = 10 s` at the default tolerance. Termination is on **bracket width**, not on
+`|H|`, because the quantity that has to be small is a *time*: `|H|` small means nothing without the
+slope.
 
-The returned time is the bracket's **far** endpoint - the side on which `H >= 0`, i.e. past the
-crossing - not its midpoint. Two reasons. It makes the error one-sided and bounded
-(`0 <= tau - tau_true <= tol_s`) rather than two-sided, and it guarantees the state at the split has
-the *post*-crossing sign, so the re-scan of the remainder cannot rediscover the crossing it just
-resolved and stall.
+Both endpoints of the converged bracket are returned, not a single root, because a *discontinuous*
+right-hand side needs both - see "Splitting is not enough" below.
 
 Multiple crossings in one step are handled by re-scanning: after splitting at the earliest root the
-remainder is scanned again, up to `Simulation.max_event_splits`. That is what makes a step longer
-than an eclipse (`dt = 3600 s` against a ~2100 s LEO eclipse) resolve *both* the entry and the exit.
+remainder is scanned again, up to `Simulation.max_event_splits`, which is what resolves a step in
+which one satellite enters eclipse while another leaves it. It does **not** rescue an even number of
+crossings of the *same* body inside one interval - see Limitations.
+
+Splitting is not enough: the branch latch
+-----------------------------------------
+Cutting the step at the crossing is necessary and, on its own, **does not restore fourth order**.
+Two things get in the way, both found by measurement rather than by reading the code.
+
+*RK4's stages are not on the trajectory.* Stage 4 samples `r + h v(k3)`, which differs from the
+solution at the step's end by `O(h^3 |da/dt|)` - 5.6e-4 km at `h = 5 s` in LEO. A sub-step that ends
+*exactly* at the terminator therefore evaluates that stage on whichever side of the surface an
+off-trajectory point happens to fall, and when it falls on the far side the stage carries weight 1/6
+of a full `Delta_a h`. Measured: `3.38e-6 km` against a derived `n Delta_a (h/6) T_rem = 3.26e-6 km`
+- **still first order**, and at `h = 1.25 s` actually *worse* than not splitting at all.
+
+The fix is `Event.latch`: for the duration of a sub-interval known to contain no crossing, the model
+is pinned to the branch it starts on (`srp.latch_shadow_branch` writes `srp.py`'s `shadow_latch`
+column; `Simulation._set_event_latches` releases it in a `finally`). The right-hand side is then
+genuinely smooth over that sub-interval - one branch, all four stages - which is the only condition
+under which RK4's order theorem says anything at all. An event marking something *continuous*
+(apoapsis, an altitude threshold) needs no latch and leaves it `None`.
+
+*The bracket is measured on a different trajectory from the split.* `h_at(tau)` is one advance of
+length `tau` from the interval start; the split is an advance to `tau_lo` followed by a micro-step.
+Within a tolerance of the surface those two can land on opposite sides. Worse, the event function
+**quantises**: `umbra_clearance` is `sqrt(...) - r_occ`, which rounds to exactly `0.0` for every
+position within one ulp of the surface, and a converging root find lands there often. `H` is then
+`-0.0`, and `-0.0 < 0.0` is false in IEEE 754, so a strict "have we passed it?" test declares the
+crossing resolved while the body sits exactly on a surface whose own membership test is strict and
+reads *lit*. `Simulation._advance_with_events` therefore checks the postcondition with `<= 0` and
+nudges by one tolerance until the sign has genuinely flipped (`MAX_CROSSING_NUDGES`).
+
+So a crossing costs three advances, not two: up to `tau_lo` on the pre-crossing branch (exact); one
+micro-step of at most `tol_s` across the bracket, the only interval that straddles the jump; and any
+nudges. The wrong branch is applied for `O(tol_s)`, never `O(h)`.
 
 What this costs, and what it buys
 ---------------------------------
-Per crossing: one extra `g` evaluation pair per step (negligible - it is a handful of dot products
-over the event bodies), plus `n_iter` trial propagations, each of which is one `_advance` of the whole
-arena, plus the final split advance. At the default tolerance `n_iter` is measured at 10-12 for a LEO
-terminator crossing from a 10 s step, so a crossing step costs roughly 12x a plain step, and a step
-with no crossing costs the same as today plus the snapshot copies. Both counters are exposed:
-`Simulation.event_splits` and `Simulation.event_evaluations`.
+A step with **no** crossing costs one extra `g` evaluation pair - a handful of dot products over the
+event bodies - plus the snapshot copies, and **no extra propagation at all**: the speculative advance
+is kept, not repeated, which is also what keeps it bit-identical.
 
-What it buys, derived before measuring (`tests/validation/test_events.py` is where this is asserted):
+A step **with** a crossing costs `n_iter` trial propagations, each one an `_advance` of the whole
+arena over a candidate sub-interval plus a snapshot restore, and then three advances instead of one.
+At the default tolerance `n_iter` is measured at **6 to 12** for a LEO terminator crossing from a
+10 s step; plain bisection would need 24, which is what an over-strong interior safeguard in
+`locate_crossing` produced before it was measured. So a crossing step costs roughly an order of
+magnitude more than a plain one, and a LEO satellite crosses twice per orbit out of hundreds of
+steps: on `scenarios.eclipsed_satellite` over 1.5 orbits at `dt = 10 s`, 3 crossings and 23 trial
+propagations against 880 steps - **under 3 % of the run**. Three counters are exposed:
+`Simulation.event_splits`, `event_evaluations` and `event_nudges`.
 
-- **RK4's order comes back.** With no step straddling the discontinuity, every step integrates a
-  smooth right-hand side, so the step-halving difference ratio returns to the fourth-order band. It
-  does not return to a clean 16, and must not be asserted to: the crossing *times* also move with `h`
-  (the trial propagations that locate them are themselves `h`-dependent), and RK4's asymptotic regime
-  needs the error to be dominated by one term.
-- **The residual is the tolerance.** Locating a crossing `eps` seconds late applies the wrong
-  acceleration for `eps`, giving a velocity error `Delta_a * eps` which then grows into position error
-  linearly in the time remaining, `T_rem`. Over `n` crossings that is `n * Delta_a * eps * T_rem`. For
-  `srp.py`'s validation case (`Delta_a = 1.19e-9 km/s^2`, 4 crossings, mean `T_rem = 4400 s`) it is
-  `2.1e-5 * eps` km - `2.1e-11 km` at the default tolerance, two orders below RK4's own truncation at
-  the *finest* step of the convergence ladder (`~2.3e-9 km` at `h = 1.25 s`). That headroom is the
-  whole reason the default is `1e-6` and not `1e-3`.
+What it buys, derived before measuring and asserted in `tests/validation/test_events.py`:
 
-`DEFAULT_EVENT_TOL_S` is not made smaller than that because it cannot usefully be: the shadow
-geometry is differenced out of heliocentric `global_states` (`~1.5e8 km`), so `g` carries `~1e-7 km`
-of rounding, which at a terminator closing speed of order `1 km/s` is `~1e-7 s` of time noise. The
-default sits one decade above that floor.
+- **RK4's order comes back, to a clean 16.** With the latch in place every step integrates a smooth
+  right-hand side, so the order theorem applies unchanged. Measured on
+  `scenarios.eclipsed_satellite` over 8800 s against a `dt = 0.3125 s` reference, at steps
+  20/10/5/2.5/1.25 s:
+
+      no shadow (control)   err 4.34e-4 ... 5.37e-9 km   ratios 17.31 16.68 16.30 17.18
+      cylinder, no split    err 3.76e-4 ... 9.18e-7 km   ratios 16.99  6.40  2.57  1.46
+      cylinder, split       err 4.33e-4 ... 5.19e-9 km   ratios 17.28 16.66 16.23 17.83
+
+  At `h = 1.25 s` the split run is **177x** better than the unsplit one and 3 % *below* the
+  no-shadow control - the discontinuity has stopped costing anything at all.
+- **The residual is the tolerance.** Applying the wrong branch for `eps` gives a velocity error
+  `Delta_a eps`, which grows into position error linearly in the time remaining: summed over
+  crossings, `Delta_a eps T_sum`. `eps` is one bracket width plus any nudges, so `eps ~ 2 tol_s`;
+  measured `k = err / (Delta_a tol_s T_sum)` is **2.0 to 2.7** across three decades of `tol_s`. At
+  the default tolerance on a 4400 s horizon that is `7.4e-12 km` - two to three orders below RK4's
+  own truncation at the finest step of the ladder above, which is why it does not show up there.
+  That headroom is the whole reason the default is `1e-6` and not `1e-3`.
+
+`DEFAULT_EVENT_TOL_S` is not made smaller because it cannot usefully be. The shadow geometry is
+differenced out of `global_states`; in a *heliocentric* arena (`~1.5e8 km`, e.g.
+`scenarios.sun_earth_moon`) `g` carries `~1e-7 km` of rounding, which at a terminator closing speed
+of order 1 km/s is `~1e-7 s` of time noise. The default sits one decade above that floor. Nor is
+there much point going tighter: above `tol_s ~ 1e-4` the residual stops tracking the tolerance
+anyway, because Illinois converges the *iterate* far inside the bracket long before the bracket
+*width* reaches a loose `tol_s`.
+
+**A heliocentric arena cannot show any of this.** A Cowell body whose `global_states` row is
+`1.5e8 km` loses nine digits to cancellation in the difference against its parent, which over 1.5
+LEO orbits floors the integrated trajectory at `~1e-5 km` - the same size as RK4's own truncation at
+`h = 10 s`. Fourth-order convergence is not observable there with *or* without a shadow. That is why
+`scenarios.eclipsed_satellite` exists and puts Earth at the arena root; see its docstring.
 
 Limitations
 -----------
 - **Endpoint sampling.** A crossing is detected from the sign of `g` at the two ends of an interval.
   A body that crosses an *even* number of times inside one interval shows no sign change and fires
   nothing - the classic event-detection blind spot, shared with `scipy.integrate.solve_ivp`. The
-  defence is the step size: an eclipse lasts thousands of seconds. Splitting and re-scanning handles
-  any number of crossings as long as no *sub-interval* contains an even number of them.
+  defence is the step size: an eclipse lasts thousands of seconds and `dt` is seconds to minutes.
+  Re-scanning handles any number of crossings as long as no *sub-interval* holds an even number of
+  them for any one body - so a 2400 s step in which one satellite leaves the umbra and another
+  enters it resolves both, while an 8000 s step spanning one satellite's entry, exit and next entry
+  resolves only the first. Both are asserted in `tests/validation/test_events.py`.
 - **No tangential events.** A `g` that touches zero without changing sign (a grazing eclipse) is
   invisible for the same reason. Locating it would need a minimum of `g` rather than a root.
 - **Not free for analytic bodies.** The trial propagations advance the whole arena, not just the

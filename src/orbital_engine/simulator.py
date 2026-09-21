@@ -197,6 +197,12 @@ class Simulation:
         self.max_event_splits: int = events.MAX_SPLITS_PER_STEP
         self._event_splits: int = 0
         self._event_evaluations: int = 0
+        self._event_nudges: int = 0
+        # Absolute simulation times of every located crossing, in order. One float per crossing -
+        # a year of LEO eclipses is ~11000 of them, under 100 kB - and `clear_events` empties it.
+        # This is the answer to "when were the eclipses?", which is the question a comparison sweep
+        # actually asks of an event, so it is kept rather than derived again downstream.
+        self._event_epochs: List[float] = []
         # Snapshot of everything `_advance` mutates, so a trial propagation can be undone exactly.
         # `accel_accum`, `_kick`, `_accum`, `_cowell_rel` and `_secular_j2_rel` are deliberately
         # absent: every one of them is fully rewritten at its dispatch rows before being read
@@ -1299,11 +1305,36 @@ class Simulation:
         self._events.clear()
         self._event_directions = np.empty(0, dtype=np.float64)
         self._event_tolerances = np.empty(0, dtype=np.float64)
+        self._event_epochs.clear()
 
     @property
     def event_splits(self) -> int:
         """How many times an event has cut a step since this simulation was built. A diagnostic."""
         return self._event_splits
+
+    @property
+    def event_epochs(self) -> tuple[float, ...]:
+        """
+        Absolute simulation time of every located crossing, in the order they were located.
+
+        Each is the far endpoint of the converged bracket, so it is **at or after** the true crossing
+        by no more than the event's `tol_s` (plus any postcondition nudge - see
+        `_advance_with_events`). For the shadow event these are the eclipse entry and exit times.
+        Emptied by `clear_events`.
+        """
+        return tuple(self._event_epochs)
+
+    @property
+    def event_nudges(self) -> int:
+        """
+        Extra micro-steps of one tolerance spent forcing the arena strictly past a located crossing.
+
+        Part of the error budget, not just a diagnostic: the wrong branch of a discontinuous model is
+        applied for at most `(1 + event_nudges / event_splits) * tol_s` per crossing, which is what
+        `tests/validation/test_events.py` turns into a position-error bound. See
+        `events.MAX_CROSSING_NUDGES`.
+        """
+        return self._event_nudges
 
     @property
     def event_evaluations(self) -> int:
@@ -1460,6 +1491,7 @@ class Simulation:
             # The residual is then the *tolerance*, not the step - `n Delta_a tol_s T_rem` - which
             # is what makes it vanish from the convergence ladder instead of dominating it.
             sign0 = np.sign(g0)
+            self._event_epochs.append(float(self._event_snap_t) + tau_hi)
             self._set_event_latches(sign0)
             try:
                 self._restore_event_state()
@@ -1499,6 +1531,7 @@ class Simulation:
                     self._advance(tol_s)
                     advanced += tol_s
                     nudges += 1
+                    self._event_nudges += 1
             finally:
                 self._set_event_latches(None)
             self._event_splits += 1

@@ -504,6 +504,15 @@ def _validate_srp(
     at zero pressure and produce exactly no force, silently), and that a shadow needs a real occulter,
     which is the body's Keplerian parent.
     """
+    if "shadow_latch" in coefficients:
+        raise ValueError(
+            f"force model '{SRP_MODEL}': 'shadow_latch' is engine-owned state, not a coefficient. "
+            f"It is written and released by Simulation._advance_with_events for the duration of a "
+            f"sub-step cut at a terminator crossing, and a value pinned here would freeze the "
+            f"shadow for the whole run. Enable the event instead: "
+            f"sim.add_event(events.shadow_event(sim))."
+        )
+
     for required in ("source", "p_srp"):
         if required not in coefficients:
             raise ValueError(
