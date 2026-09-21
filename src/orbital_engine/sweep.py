@@ -42,6 +42,16 @@ strictly additive - the error statistics and the timing are computed by exactly 
 were before, and `access is None` (the default) does not build a grid, a station or a second truth.
 See `access.py` for the metric definitions and the matching rule.
 
+**External tiers.** Some models the sweep must rank are not something the arena can step: SGP4 is
+an analytic theory evaluated by a stateful third-party object (`sgp4_bridge.py`), and `CLAUDE.md`
+forbids stateful dependencies inside `step()`. `ExternalTier` is the second kind of tier for that:
+plain data naming the bodies and a pure function `times_s -> (n_times, n_bodies, 3)` positions
+relative to a named central body. `run_sweep(..., external=[...])` scores it against the **same**
+truth, the same way - error at the horizon as statistics over bodies, minimum-of-batches timing of
+producing one state per `dt` up to the horizon, and `AccessMetrics` from the same access grid - and
+appends its `SweepResult` after the `ModelConfig` results. Nothing about an engine configuration's
+path changes when `external` is empty or not.
+
 **No plotting dependency.** This module never imports `matplotlib`; `benchmarks/frontier_plot.py`
 does that.
 """
@@ -54,8 +64,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .access import (
-    AccessMetrics, AccessSpec, access_grid, compare_windows, windows_from_simulation,
-    windows_from_truth,
+    AccessMetrics, AccessSpec, access_grid, compare_windows, windows_from_positions,
+    windows_from_simulation, windows_from_truth,
 )
 from .custom_types import PropagatorType
 from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, reference_for
@@ -63,8 +73,8 @@ from .benchmark import measure
 from .simulator import Simulation
 
 __all__ = [
-    "ForceModelSpec", "ModelConfig", "ErrorStats", "SweepResult",
-    "eligible_bodies", "apply_config", "run_sweep", "access_metrics_for",
+    "ForceModelSpec", "ModelConfig", "ExternalTier", "ErrorStats", "SweepResult",
+    "eligible_bodies", "apply_config", "run_sweep", "access_metrics_for", "score_external",
 ]
 
 
@@ -101,6 +111,29 @@ class ModelConfig(object):
     mean_seed: bool = False
     force_models: Sequence[ForceModelSpec] = field(default_factory=tuple)
     bodies: Optional[Sequence[str]] = None
+
+
+@dataclass(frozen=True)
+class ExternalTier:
+    """
+    A model tier whose trajectory is produced outside the arena - see the module docstring.
+
+    `positions(times_s)` takes seconds since the scenario's `t = 0` and returns `(n_times,
+    len(bodies), 3)` km, **relative to `central_body`**, in the scenario's inertial frame. It must be
+    a pure function: `run_sweep` calls it repeatedly to time it. `bodies` are body names in the
+    scenario, which is how its rows are matched to truth. `dt` is the cadence at which the tier is
+    asked for states when it is timed, so its cost is comparable to an engine tier stepping at `dt`;
+    it does not affect the error, which is evaluated at the horizon itself.
+
+    Truth for an external tier is the scenario's truth, which was seeded from the scenario's initial
+    state - so the tier is only meaningfully scored if that state is the tier's own state at `t = 0`
+    (`scenarios.tle_satellites` guarantees this for SGP4).
+    """
+    name: str
+    dt: float
+    bodies: Sequence[str]
+    central_body: str
+    positions: Callable[[NDArray[np.float64]], NDArray[np.float64]]
 
 
 @dataclass(frozen=True)
@@ -318,6 +351,62 @@ def _time_propagation(
     return measure(run, batches=batches, inner=1, warmup=warmup, setup=setup).best
 
 
+def score_external(
+    tier: ExternalTier,
+    horizon_s: float,
+    truth: ReferenceTrajectory,
+    *,
+    timing_batches: int = 5,
+    timing_warmup: int = 2,
+    access: Optional[AccessSpec] = None,
+    access_truth: Optional[ReferenceTrajectory] = None,
+) -> SweepResult:
+    """
+    One `ExternalTier` against an already-integrated truth - the external counterpart of one
+    configuration's pass through `run_sweep`'s loop, exposed so a caller holding a truth can score a
+    tier without re-integrating it.
+
+    `truth` must end at `horizon_s`. The error is `|tier - truth|` at the horizon with both sides
+    taken relative to `tier.central_body`. Timing is one call producing a state every `tier.dt` up
+    to the horizon. With `access`, `access_truth` must be sampled on `access_grid(horizon_s,
+    access.sample_dt_s)`; the tier is evaluated on exactly that grid, so there is no step-size
+    divisibility condition to check - an external tier samples, it does not step.
+    """
+    if abs(float(truth.times[-1]) - horizon_s) > 1e-9 * max(1.0, horizon_s):
+        raise ValueError(f"truth ends at {truth.times[-1]} s, not at the horizon {horizon_s} s")
+
+    central = truth.position_of(tier.central_body)[-1]
+    truth_rel = np.stack([truth.position_of(name)[-1] - central for name in tier.bodies])
+    at_horizon = tier.positions(np.array([horizon_s], dtype=np.float64))[0]
+    errors_km: NDArray[np.float64] = np.linalg.norm(at_horizon - truth_rel, axis=1)
+
+    n_steps = max(1, int(round(horizon_s / tier.dt)))
+    grid: NDArray[np.float64] = np.asarray(
+        tier.dt * np.arange(1, n_steps + 1, dtype=np.float64), dtype=np.float64,
+    )
+    wall_time_us = measure(
+        lambda: tier.positions(grid), batches=timing_batches, inner=1, warmup=timing_warmup,
+    ).best
+
+    access_metrics: Optional[AccessMetrics] = None
+    if access is not None:
+        if access_truth is None:
+            raise ValueError("access metrics need access_truth sampled on the access grid")
+        names = list(tier.bodies) if access.bodies is None else list(access.bodies)
+        columns = [list(tier.bodies).index(name) for name in names]
+        agrid = access_grid(horizon_s, access.sample_dt_s)
+        model = windows_from_positions(tier.positions(agrid)[:, columns, :], agrid, access)
+        access_metrics = compare_windows(windows_from_truth(access_truth, names, access), model)
+
+    return SweepResult(
+        config_name=tier.name,
+        error=_error_stats(errors_km),
+        wall_time_us=wall_time_us,
+        n_bodies=len(tier.bodies),
+        access=access_metrics,
+    )
+
+
 def run_sweep(
     build_scenario: Callable[[], Simulation],
     configs: Sequence[ModelConfig],
@@ -329,6 +418,7 @@ def run_sweep(
     timing_batches: int = 5,
     timing_warmup: int = 2,
     access: Optional[AccessSpec] = None,
+    external: Sequence[ExternalTier] = (),
 ) -> List[SweepResult]:
     """
     Run every configuration in `configs` against one scenario and return one `SweepResult` each, in
@@ -351,6 +441,9 @@ def run_sweep(
     alone rather than being read off the dense one: `solve_ivp`'s dense output at the horizon is not
     bit-identical to a run that stops there, and the position-error statistics must not move because
     an unrelated metric was switched on.
+
+    `external` tiers (`ExternalTier`, e.g. `sgp4_bridge.sgp4_tier`) are scored by `score_external`
+    against the same two truths and appended, in order, after the `configs` results.
     """
     truth_sim = build_scenario()
     times = np.array([0.0, horizon_s], dtype=np.float64)
@@ -392,6 +485,12 @@ def run_sweep(
             wall_time_us=wall_time_us,
             n_bodies=int(idx.size),
             access=access_metrics,
+        ))
+
+    for tier in external:
+        results.append(score_external(
+            tier, horizon_s, truth, timing_batches=timing_batches, timing_warmup=timing_warmup,
+            access=access, access_truth=access_truth,
         ))
 
     return results
