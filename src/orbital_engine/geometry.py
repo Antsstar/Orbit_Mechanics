@@ -54,6 +54,42 @@ derived in place, so the derivation - not the citation - is what the tests hold.
   the edges are refined to, and entirely silent. With the default the station's position is a
   function of simulation time alone, which is what `Simulation.t` means.
 
+## Range rate, and its sign
+
+`elevation_azimuth` optionally returns **range rate**, the quantity a downstream link or network
+study needs for Doppler. It is `d|rho| / dt` and nothing else - a kinematic scalar. Carrier
+frequency, Doppler shift and link margin are properties of a *radio*, not of an orbit, and are
+deliberately on the far side of this module's boundary.
+
+**Sign: positive = opening (the range is growing, the body is receding); negative = closing.** That
+is the plain time derivative of the reported `range_km`, so `d(range)/dt > 0` and "range rate > 0"
+say the same thing, and a consumer computing a received frequency applies its own minus sign
+(`f_rx ~ f_tx (1 - rho_dot / c)`: a positive range rate is a red shift). Stating it here because an
+inverted convention is a sign error no plot of a pass would reveal.
+
+**The transport term is the whole content of the calculation.** The station is fixed in the
+*rotating* frame, so its inertial velocity is `omega x r_station`, and
+
+    rho      = r_body - r_station
+    rho_dot  = v_body - omega x r_station                       <- the transport term
+    d|rho|/dt = (rho . rho_dot) / |rho|
+
+Omitting `omega x r_station` leaves a smooth, plausible, wrong answer. For the coplanar equatorial
+550 km pass of `scenarios.ground_station_pass` the closed form is
+`d|rho|/dt = r R sin(u) (n - omega) / |rho|` with `u` the central angle, and dropping the transport
+term replaces the station-relative rate `n - omega` by `n`: at the horizon crossing that is
+**0.4646 km/s out of 6.521 km/s, 7.1 %** - and 0.4646 km/s is exactly `R omega`, the station's own
+speed, because at the horizon the line of sight is tangent to the sphere at the station and the
+station's due-east velocity lies along it. `tests/validation/test_geometry.py` asserts that
+difference as a number rather than asserting a tolerance.
+
+Two equivalent formulations exist and the module uses the first: differentiate in the inertial
+frame and rotate the result (`A v_body - omega x r_station_fixed`, with `A` the body-fixed
+rotation), or work in the rotating frame (`A v_body - omega x A r_body`). Their difference is
+`omega x rho`, which is perpendicular to `rho`, so the projection onto `rho` - the only thing range
+rate uses - is identical. The first is used because `omega x r_station_fixed` is one constant vector
+per station rather than one per sample.
+
 ## The rotation sign
 
 `ReferenceFrames.inertia_to_fixed` applies `Transformations.Rz(theta)`, an **active** rotation, so
@@ -69,7 +105,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -100,11 +136,18 @@ class Topocentric:
 
     The station axis is always present, even for a single scalar station, so downstream code never
     has to branch on it.
+
+    `range_rate_km_s` is `None` unless `elevation_azimuth` was given velocities, and otherwise has
+    the same shape as `range_km`. **Positive means opening (receding)** - see the module docstring;
+    it is `d(range_km)/dt` including the station's own motion. A body at the station's exact
+    position has an undefined range rate and reports exactly 0.0, the same convention azimuth uses
+    at the zenith.
     """
     times_s: ArraySeconds
     elevation_rad: ArrayFloat
     azimuth_rad: ArrayFloat
     range_km: ArrayFloat
+    range_rate_km_s: Optional[ArrayFloat] = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +167,13 @@ class AccessWindow:
     last). Its edge is the grid endpoint, its duration is a lower bound, and an access metric that
     averages durations must either drop or flag it - which is why the flag exists rather than the
     window being silently truncated or silently discarded.
+
+    `peak_time_s` is the **sample time** at which `peak_elevation_rad` was attained, carrying the
+    same "sampled, not refined" caveat: it is one of the grid times, within `h/2` of the true
+    maximum for a smooth pass. It exists so a consumer can evaluate another series - range and range
+    rate, in `access.ContactWindow` - at the same instant the peak elevation belongs to, rather than
+    re-deriving the argmax and risking a different tie-break. It defaults to `nan` so a hand-built
+    record that only cares about the interval can omit it.
     """
     station_index: int
     body_index: int
@@ -133,6 +183,7 @@ class AccessWindow:
     peak_elevation_rad: float
     rise_clipped: bool
     set_clipped: bool
+    peak_time_s: float = math.nan
 
 
 # --------------------------------------------------------------------------------------------------
@@ -206,6 +257,7 @@ def elevation_azimuth(
     positions_km: ArrayFloat,
     times_s: ArraySeconds,
     *,
+    velocities_km_s: Optional[ArrayFloat] = None,
     latitude_rad: Numeric,
     longitude_rad: Numeric,
     altitude_km: Numeric = 0.0,
@@ -215,7 +267,8 @@ def elevation_azimuth(
     epoch_s: ScalarFloat = 0.0,
 ) -> Topocentric:
     """
-    Elevation, azimuth and range of each body from each station over a time grid.
+    Elevation, azimuth, range and - given velocities - **range rate** of each body from each station
+    over a time grid.
 
     `positions_km` is `(n_times, n_bodies, 3)` (a `(n_times, 3)` single-body array is accepted and
     given one body column), **central-body-relative inertial** positions - i.e. `viz.sample_states`
@@ -243,9 +296,33 @@ def elevation_azimuth(
        relative precision exactly where the elevation is highest, which is where a pass metric cares
        most, and it needs a clip to survive `rho_Z / |rho|` rounding past 1 at the zenith.
 
-    The velocity slot handed to `inertia_to_fixed` is zeroed: only positions matter here, and a
-    body-fixed *velocity* would need the transport term `-omega x r` that this module never uses.
-    Range **rate** is therefore not computed.
+    **Range rate** is computed only when `velocities_km_s` is given - `(n_times, n_bodies, 3)` or
+    `(n_times, 3)`, the **same frame as `positions_km`**, i.e. central-body-relative *inertial*
+    velocities, which is columns 3:6 of `viz.sample_states(..., relative_to=central)`. It is then
+    `Topocentric.range_rate_km_s`, **positive = opening**, and `None` otherwise, so every existing
+    caller is unchanged.
+
+    Why this extends `elevation_azimuth` rather than living in its own function: range rate is the
+    derivative of the `rho` this function already builds, through the same station, the same
+    `-theta` rotation and the same sign convention - a second entry point would have to reproduce
+    all three, and the module docstring's whole complaint about that rotation is how quietly it goes
+    wrong when duplicated.
+
+    Step 4, then, given velocities: rotate them with the same `-theta` (a pure rotation `A v`, *not*
+    a body-fixed velocity - no transport term is applied to the body), subtract the station's
+    rotated inertial velocity `omega x r_station_fixed`, and project:
+
+        rho_dot = A v_body - omega x r_station_fixed
+        d|rho|/dt = (rho . rho_dot) / |rho|
+
+    The station term is one constant vector per station, `omega * (-y_fixed, +x_fixed, 0)`, because
+    the rotation is about `+z` (the same assumption `j2` and `drag` make). The module docstring
+    derives why projecting `rho_dot` in this "rotate the inertial derivative" form gives the same
+    scalar as differentiating in the rotating frame, and what the term is worth: 0.4646 km/s of
+    6.521 km/s at the horizon of a 550 km equatorial pass.
+
+    A body exactly at the station gives `|rho| = 0`; the numerator is then 0 too, and the quotient
+    is defined to 0.0 rather than `nan`, matching the zenith-azimuth convention above.
     """
     pos = np.asarray(positions_km, dtype=np.float64)
     if pos.ndim == 2:
@@ -285,8 +362,35 @@ def elevation_azimuth(
     azimuth: ArrayFloat = np.arctan2(east, -south) % (2.0 * math.pi)
     ranges: ArrayFloat = np.linalg.norm(rho, axis=-1)
 
+    range_rate: Optional[ArrayFloat] = None
+    if velocities_km_s is not None:
+        vel = np.asarray(velocities_km_s, dtype=np.float64)
+        if vel.ndim == 2:
+            vel = vel[:, np.newaxis, :]
+        if vel.shape != pos.shape:
+            raise ValueError(
+                f"velocities_km_s has shape {vel.shape}, incompatible with positions {pos.shape}."
+            )
+        # `A v`, a pure rotation of the inertial velocity - deliberately not the body-fixed
+        # velocity, which would also carry `-omega x r_body`. See the docstring: the two differ by
+        # `omega x rho`, which is orthogonal to `rho` and so drops out of the projection anyway.
+        v_rot, _ = ReferenceFrames.inertia_to_fixed(
+            vel[..., np.newaxis], np.zeros_like(vel)[..., np.newaxis], -theta
+        )
+        # omega x r_station, expressed in the body-fixed frame: rotation is about +z.
+        station_vel = float(omega) * np.stack(
+            [-station_fixed[:, 1], station_fixed[:, 0], np.zeros(station_fixed.shape[0])], axis=-1
+        )
+        rho_dot = v_rot[..., 0][:, np.newaxis, :, :] - station_vel[np.newaxis, :, np.newaxis, :]
+        # |rho| = 0 forces the numerator to 0 as well, so dividing by 1.0 there returns exactly 0.0.
+        rate: ArrayFloat = (
+            np.sum(rho * rho_dot, axis=-1) / np.where(ranges > 0.0, ranges, 1.0)
+        )
+        range_rate = rate
+
     return Topocentric(
         times_s=times, elevation_rad=elevation, azimuth_rad=azimuth, range_km=ranges,
+        range_rate_km_s=range_rate,
     )
 
 
@@ -381,15 +485,19 @@ def access_windows(
                 set_clipped = i1 == last
                 rise = float(times[0]) if rise_clipped else _crossing(times, excess, i0 - 1)
                 set_t = float(times[last]) if set_clipped else _crossing(times, excess, i1)
+                # One argmax serves both the peak elevation and the instant it belongs to, so the
+                # two can never disagree about which sample the peak is.
+                peak = i0 + int(np.argmax(excess[i0:i1 + 1]))
                 windows.append(AccessWindow(
                     station_index=s,
                     body_index=b,
                     rise_s=rise,
                     set_s=set_t,
                     duration_s=set_t - rise,
-                    peak_elevation_rad=float(excess[i0:i1 + 1].max()) + mask,
+                    peak_elevation_rad=float(excess[peak]) + mask,
                     rise_clipped=rise_clipped,
                     set_clipped=set_clipped,
+                    peak_time_s=float(times[peak]),
                 ))
     return windows
 

@@ -32,6 +32,17 @@ measured minus exact against it - not against a tolerance. The grids are phase-l
 always falls 30 % of the way into its interval) so that halving `h` scales `a b` by exactly 4 and
 the convergence order is measured rather than asserted by eye.
 
+**Range rate, four ways.** `rho_dot = r R sin(u) Omega / rho` is the closed form of the same
+coplanar pass, so the analytic instants pin it to floating point (6.5213 km/s at the horizon, and
+*exactly* zero at closest approach - asserted at the analytic instant, because the nearest grid
+sample is off by `rho'' h / 2`, 1.26 km/s at `h = 30 s`). The independent check is a central
+difference of the range series, which shares no algebra with the analytic rate and is compared
+against `rho''' h^2 / 6` in the equatorial case and against its own halving ratio in the inclined
+one. The transport term `omega x r_station` is asserted as a *number*: at the horizon of an
+equatorial pass it is exactly `R omega = 0.4646 km/s` of 6.5213 km/s, 7.1 %. And the sign - positive
+= opening - is asserted as two signs rather than an absolute value, because an inverted convention
+passes every magnitude check here and inverts every downstream Doppler.
+
 The inclined case exists because the equatorial one is degenerate: an equatorial station watching an
 equatorial orbit has an identically zero SEZ *south* component, so it cannot discriminate a
 transposed south/east axis. `test_inclined_pass_matches_the_general_triangle` checks the general
@@ -65,6 +76,13 @@ OMEGA_REL = N_MEAN - EARTH_OMEGA                     # 1.0236e-3 rad/s, station-
 C_RATIO = R_BODY / R_ORBIT                           # cos(lambda_0)
 LAMBDA_0 = math.acos(C_RATIO)                        # 0.40136 rad = 23.0 deg
 RANGE_HORIZON = math.sqrt(R_ORBIT ** 2 - R_BODY ** 2)  # 2703.81 km
+
+# Range rate of the coplanar pass at the horizon, `r R sin(lambda_0) Omega / rho_0`. It is also the
+# largest |range rate| of the pass: `rho'' = 0` there exactly, because `r cos lambda_0 = R` makes
+# the two terms of `rho'' = (r R Omega^2 cos u - rho_dot^2) / rho` cancel.
+RANGE_RATE_HORIZON = R_ORBIT * R_BODY * math.sin(LAMBDA_0) * OMEGA_REL / RANGE_HORIZON  # 6.5213
+# Curvature of the range at closest approach, `r R Omega^2 / (r - R)`: 0.0840 km/s^2.
+RHO_DDOT_CLOSEST = R_ORBIT * R_BODY * OMEGA_REL ** 2 / (R_ORBIT - R_BODY)
 
 # The satellite is seeded at true anomaly 180 deg and the station sits on the prime meridian, so the
 # two share a longitude - the satellite is exactly overhead - when Omega t = pi.
@@ -157,17 +175,26 @@ def _phase_locked_grid(h: float, t_anchor: float, t_end: float) -> ArrF:
 # Sampling helpers
 # --------------------------------------------------------------------------------------------------
 
-def _sample_positions(
+def _sample_states(
     session: Session, times: ArrF, *, inclination_deg: float = 0.0,
 ) -> ArrF:
-    """Earth-relative inertial positions of the single pass satellite, shape `(n_times, 1, 3)`."""
+    """Earth-relative inertial states of the single pass satellite, shape `(n_times, 1, 6)`."""
     sim = scenarios.ground_station_pass(
         session, altitude_km=ALT_KM, inclination_deg=inclination_deg,
     )
     earth = sim.name_to_index["Earth"]
     sat = sim.name_to_index["PASS-SAT-00"]
-    states = viz.sample_states(sim, [sat], times, relative_to=earth)
-    return np.ascontiguousarray(states[:, :, :3])
+    states: ArrF = viz.sample_states(sim, [sat], times, relative_to=earth)
+    return states
+
+
+def _sample_positions(
+    session: Session, times: ArrF, *, inclination_deg: float = 0.0,
+) -> ArrF:
+    """Earth-relative inertial positions of the single pass satellite, shape `(n_times, 1, 3)`."""
+    return np.ascontiguousarray(
+        _sample_states(session, times, inclination_deg=inclination_deg)[:, :, :3]
+    )
 
 
 def _look_angles(
@@ -178,6 +205,30 @@ def _look_angles(
         latitude_rad=lat, longitude_rad=lon, altitude_km=0.0,
         omega=EARTH_OMEGA, body_radius_km=R_BODY,
     )
+
+
+def _look_with_velocity(
+    states: ArrF, times: ArrF, *, lat: float = STATION_LAT, lon: float = STATION_LON,
+) -> geometry.Topocentric:
+    """The same look angles, plus range rate, from a `(n_times, n_bodies, 6)` state array."""
+    return geometry.elevation_azimuth(
+        np.ascontiguousarray(states[:, :, :3]), times,
+        velocities_km_s=np.ascontiguousarray(states[:, :, 3:]),
+        latitude_rad=lat, longitude_rad=lon, altitude_km=0.0,
+        omega=EARTH_OMEGA, body_radius_km=R_BODY,
+    )
+
+
+def _rho(t: float) -> float:
+    """Closed-form slant range of the coplanar equatorial pass, `sqrt(r^2 + R^2 - 2 r R cos u)`."""
+    u = OMEGA_REL * (t - T_OVERHEAD)
+    return math.sqrt(R_ORBIT ** 2 + R_BODY ** 2 - 2.0 * R_ORBIT * R_BODY * math.cos(u))
+
+
+def _rho_dot(t: float) -> float:
+    """Its derivative, `r R sin(u) Omega / rho` - positive after the overhead moment (opening)."""
+    u = OMEGA_REL * (t - T_OVERHEAD)
+    return R_ORBIT * R_BODY * math.sin(u) * OMEGA_REL / _rho(t)
 
 
 # ==================================================================================================
@@ -488,6 +539,164 @@ def test_inclined_pass_matches_the_general_triangle(db_session: Session) -> None
     assert np.allclose(range_exact, look.range_km[:, 0, 0], rtol=EXACT_RANGE_RTOL)
     # The case is only non-degenerate if the satellite actually rises there.
     assert float(np.max(look.elevation_rad)) > math.radians(20.0)
+
+
+# ==================================================================================================
+# Range rate
+# ==================================================================================================
+
+def test_range_rate_is_absent_unless_velocities_are_given(db_session: Session) -> None:
+    """
+    The field is `None` without velocities - the contract that keeps every existing caller working -
+    and the look angles are bit-identical with and without them, since velocity enters nothing else.
+    """
+    times = np.array([T_RISE, T_OVERHEAD, T_SET])
+    states = _sample_states(db_session, times)
+    without = _look_angles(np.ascontiguousarray(states[:, :, :3]), times)
+    with_v = _look_with_velocity(states, times)
+
+    assert without.range_rate_km_s is None
+    assert with_v.range_rate_km_s is not None
+    assert np.array_equal(without.elevation_rad, with_v.elevation_rad)
+    assert np.array_equal(without.range_km, with_v.range_km)
+
+    with pytest.raises(ValueError):
+        geometry.elevation_azimuth(
+            np.zeros((3, 1, 3)), times, velocities_km_s=np.zeros((3, 2, 3)),
+            latitude_rad=0.0, longitude_rad=0.0, omega=0.0, body_radius_km=R_BODY,
+        )
+
+
+def test_range_rate_matches_the_coplanar_closed_form_and_signs_opening_positive(
+    db_session: Session,
+) -> None:
+    """
+    The three named instants against `rho_dot = r R sin(u) Omega / rho`, and the sign convention.
+
+    Differentiating `rho^2 = r^2 + R^2 - 2 r R cos u` with `u = Omega (t - t_overhead)` gives that
+    closed form directly; `Omega = n - omega` is the **station-relative** rate, which is where the
+    transport term lives (see the next test). At the horizon it is 6.5213 km/s, and at the analytic
+    instant the only error is floating point - nothing here is interpolated.
+
+    **Sign: positive = opening.** Before the overhead moment `sin u < 0` and the satellite is
+    closing, after it the range is growing. An inverted convention passes every magnitude check in
+    this file and inverts every downstream Doppler shift, so it is asserted as two signs, not as an
+    absolute value.
+    """
+    times = np.array([T_RISE, T_OVERHEAD, T_SET])
+    rate = _look_with_velocity(_sample_states(db_session, times), times).range_rate_km_s
+    assert rate is not None
+    measured = rate[:, 0, 0]
+
+    assert float(measured[0]) == pytest.approx(-RANGE_RATE_HORIZON, rel=EXACT_RANGE_RTOL)
+    assert float(measured[2]) == pytest.approx(+RANGE_RATE_HORIZON, rel=EXACT_RANGE_RTOL)
+    assert float(measured[0]) < 0.0 < float(measured[2])
+
+
+def test_range_rate_vanishes_at_closest_approach(db_session_factory: Callable[[], Session]) -> None:
+    """
+    Exactly zero at the overhead instant, and *not* resolvable to zero on a sampled grid.
+
+    `rho_dot = r R Omega sin(u) / rho` vanishes at `u = 0`, so the analytic instant must return zero
+    up to floating point. How much is that? An angular position error `du` shows up as
+    `r R Omega du / rho = 82.1 km/s per radian`; the propagation is closed form, so `du` is a few
+    ulp of a `pi`-sized angle, ~2e-15 rad, giving **~1.6e-13 km/s**. The assertion is 1e-11, and the
+    measured value is 5.4e-14.
+
+    The grid half of it is the reason that instant has to be asked for explicitly: the sample of
+    *minimum range* sits up to `h/2` from closest approach, where the rate has already grown to
+    `rho'' h / 2` with `rho''(0) = r R Omega^2 / (r - R) = 0.0840 km/s^2` - 1.26 km/s at `h = 30 s`.
+    A test that sampled a grid and asserted "about zero" would be asserting nothing.
+    """
+    times = np.array([T_OVERHEAD])
+    rate = _look_with_velocity(_sample_states(db_session_factory(), times), times).range_rate_km_s
+    assert rate is not None
+    assert abs(float(rate[0, 0, 0])) < 1e-11
+
+    h = 30.0
+    grid = np.arange(T_RISE - 100.0, T_SET + 100.0, h)
+    look = _look_with_velocity(_sample_states(db_session_factory(), grid), grid)
+    assert look.range_rate_km_s is not None
+    nearest = int(np.argmin(look.range_km[:, 0, 0]))
+    bound = RHO_DDOT_CLOSEST * h / 2.0
+    assert abs(float(look.range_rate_km_s[nearest, 0, 0])) <= bound
+    # ... and it is nowhere near zero, which is what makes the analytic instant the only honest test.
+    assert abs(float(look.range_rate_km_s[nearest, 0, 0])) > 0.1 * bound
+
+
+def test_the_transport_term_is_the_stations_own_speed(db_session: Session) -> None:
+    """
+    Dropping `omega x r_station` would replace `Omega = n - omega` by `n`: 7.1 % at the horizon.
+
+    The two closed forms differ by `r R omega sin(lambda_0) / rho_0`, which for a station on the
+    equator and a satellite on its horizon is **exactly `R omega = 0.4646 km/s`** - the station's
+    own ground speed, projected entirely onto the line of sight because that line is tangent to the
+    sphere at the station and the station's velocity is due east, along it. So the assertion is a
+    number, not a tolerance: the measured rate must sit `R omega` away from the no-transport answer,
+    and on the correct side of it.
+
+    0.4646 km/s against LEO range rates of 6.5 km/s is not a rounding effect, and it is the class of
+    error that produces a plausible pass and a wrong Doppler.
+    """
+    times = np.array([T_SET])
+    rate = _look_with_velocity(_sample_states(db_session, times), times).range_rate_km_s
+    assert rate is not None
+    measured = float(rate[0, 0, 0])
+
+    no_transport = R_ORBIT * R_BODY * math.sin(LAMBDA_0) * N_MEAN / RANGE_HORIZON
+    assert no_transport - measured == pytest.approx(R_BODY * EARTH_OMEGA, rel=1e-9)
+    assert no_transport - measured == pytest.approx(0.464581, abs=1e-6)
+    # Without the term the engine would read 6.9859 km/s where the geometry says 6.5213 km/s.
+    assert measured == pytest.approx(RANGE_RATE_HORIZON, rel=EXACT_RANGE_RTOL)
+    assert abs(measured - no_transport) / abs(measured) == pytest.approx(0.0712, abs=1e-4)
+
+
+def test_range_rate_matches_a_central_difference_of_the_range(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The independent check: the range *series* differenced numerically, sharing no algebra with the
+    analytic rate.
+
+    A central difference of `rho` has error `rho''' h^2 / 6`. Two things are asserted, in the two
+    geometries:
+
+    * **Equatorial.** The engine's own error, `(rho(t+h) - rho(t-h)) / 2h - rho_dot(t)`, is compared
+      with the *same* difference taken on the closed-form `rho(t)` of the coplanar pass - a
+      prediction, not a fitted tolerance. At `t = T_RISE + 100 s` and `h = 8 s` both are
+      +1.8146e-4 km/s (`rho''' = 1.700e-5 km/s^3` gives `rho''' h^2 / 6 = 1.814e-4`), agreeing to
+      1.6e-9 relative.
+    * **Inclined 53 deg, station at 35 N / 20 E.** Nothing closed-form here, so what is asserted is
+      the *order*: halving `h` must quarter the error. Measured ratios are 4.000, 4.000, 4.000.
+
+    A missing transport term would break both, because the range series it differences already
+    contains the station's motion while the analytic rate would not.
+    """
+    t0 = T_RISE + 100.0
+    for h in (8.0, 4.0, 2.0):
+        grid = np.array([t0 - h, t0, t0 + h])
+        look = _look_with_velocity(_sample_states(db_session_factory(), grid), grid)
+        assert look.range_rate_km_s is not None
+        ranges = look.range_km[:, 0, 0]
+        engine_error = float((ranges[2] - ranges[0]) / (2.0 * h) - look.range_rate_km_s[1, 0, 0])
+        closed_error = (_rho(t0 + h) - _rho(t0 - h)) / (2.0 * h) - _rho_dot(t0)
+        assert engine_error == pytest.approx(closed_error, rel=1e-5)
+
+    lat, lon = math.radians(35.0), math.radians(20.0)
+    errors: List[float] = []
+    for h in (8.0, 4.0, 2.0, 1.0):
+        grid = np.array([2500.0 - h, 2500.0, 2500.0 + h])
+        look = _look_with_velocity(
+            _sample_states(db_session_factory(), grid, inclination_deg=53.0), grid,
+            lat=lat, lon=lon,
+        )
+        assert look.range_rate_km_s is not None
+        ranges = look.range_km[:, 0, 0]
+        errors.append(float((ranges[2] - ranges[0]) / (2.0 * h) - look.range_rate_km_s[1, 0, 0]))
+
+    assert abs(errors[0]) > 1e-6, "the inclined case must have a measurable error to halve"
+    for coarse, fine in zip(errors, errors[1:]):
+        assert coarse / fine == pytest.approx(4.0, abs=0.05)
 
 
 # ==================================================================================================

@@ -865,7 +865,25 @@ station–satellite–centre triangle with the station's inertial position writt
 because the equatorial case has an identically zero SEZ *south* component and cannot discriminate a
 transposed south/east axis — the same symmetry trap `hohmann_pair` documents.
 
-**Deliberately not built.** No range rate (so no Doppler, and no link budget), no refraction or
+**Range rate, and where the boundary sits.** `elevation_azimuth` optionally takes velocities and
+returns `d|rho|/dt`, **positive = opening (receding)**. It extends that function rather than
+standing beside it because it is the derivative of the `rho` that function already builds: a second
+entry point would have to repeat the station construction and the `-theta` rotation, and repeating
+that rotation is precisely how this module goes quietly wrong. The content of the calculation is the
+transport term — the station is fixed in the *rotating* frame, so its inertial velocity is
+`omega x r_station` and `rho_dot = v_body - omega x r_station`. Drop it and the coplanar closed form
+silently replaces the station-relative rate `n - omega` with `n`: 0.4646 km/s of 6.521 km/s at the
+horizon of a 550 km equatorial pass, 7.1 %, and 0.4646 km/s is exactly `R omega`, the station's own
+ground speed, because at the horizon the line of sight is tangent to the sphere at the station.
+`tests/validation/test_geometry.py` asserts that difference as a number, checks the analytic rate
+against a central difference of the range series (which shares no algebra with it, and converges at
+the claimed second order — ratios 4.000), and pins the sign as two signs rather than a magnitude,
+since an inverted convention passes every magnitude check and inverts every downstream Doppler.
+
+The boundary is drawn *at* range rate: Doppler shift, carrier frequency and link margin are
+properties of a radio, not of an orbit, and no part of this engine computes them.
+
+**Deliberately not built.** No refraction or
 terrain horizon, no multi-station scheduling or conjunction search, and no sweep-level aggregation *in this module*:
 contact totals and pass-count statistics are the metric layer that consumes this one, and they
 now live in `access.py` (next section) rather than here, so `geometry.py` stays free of
@@ -966,10 +984,30 @@ Cowell's 0.223 s is the check on the measurement itself: its 1.88 km position er
 0.265 s pass shift at `Omega = 1.024e-3 rad/s`, so what is being reported is the along-track share of
 a known error and not the sampling grid.
 
+### The contact dataset
+
+`AccessMetrics` says how wrong a model's *schedule* is. The export to a downstream network or ISL
+study needs the contact's *contents* as well, which for a link budget is range and range rate.
+`contact_windows` / `contacts_from_simulation` return `ContactWindow`: the `AccessWindow` unchanged,
+plus a `ContactSample(time_s, range_km, range_rate_km_s)` at rise, peak elevation and set. Those
+three instants are chosen because the window already names them — no new grid, no re-propagation —
+and because they bracket what a link budget asks: the edges are the worst-case range and the
+*extremes* of range rate (`rho'' = 0` at the horizon exactly, for a coplanar circular pass), the
+peak is closest approach, where the range rate passes through zero.
+
+Rise and set are interpolated times, so both series are linearly interpolated onto them, `O(h^2)`;
+the peak is a grid time and needs no interpolation but inherits `peak_elevation_rad`'s `O(h)`
+sampling offset, so its range rate is bounded by `rho'' h / 2` rather than being zero — 0.42 km/s at
+`h = 10 s` on the reference pass, measured 0.070. Nothing about the metrics changed: the windows
+`contact_windows` returns are asserted equal to `windows_from_positions`' windows, and both go
+through one `_topocentric` call so the two paths cannot drift apart.
+
 ### Deliberately not built
 
 No scheduling or conflict resolution, no gap statistics (maximum outage is the obvious next
-reduction and needs a use case first), no range rate and so no Doppler, and no matching across
+reduction and needs a use case first), no Doppler shift or link budget (range rate is the kinematic
+quantity; the rest belongs to a radio), no range-rate *error* statistic in `AccessMetrics` — the
+dataset is an export, not a second metric — and no matching across
 stations or bodies — `station_index` and `body_index` partition the problem, and a pass one station
 saw is not a pass another saw however well the intervals line up. `peak_elevation_rad` is not
 differenced: `geometry.py` samples it rather than refining it, so it is a lower bound, and it appears
