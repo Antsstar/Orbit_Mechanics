@@ -1151,6 +1151,81 @@ happens to solve this and the shared-scratchpad collision below at the same time
 
 ---
 
+## `-0.0 < 0.0` is false, and it hid a first-order error behind a correct-looking split
+
+**Symptom.** Event-driven step splitting (`events.py`) cut every step at the shadow terminator, the
+crossing times matched an analytic computation to 5.6e-11 s, and the convergence ladder still read
+`32.36, 8.19, 0.32, 892.50` — noise, not fourth order. A "past the crossing" postcondition had
+already been added specifically to catch this and was never firing.
+
+**Cause.** Two independent things, and the second one is the interesting one.
+
+1. `locate_crossing`'s bracket is measured on the *trial* trajectory (one `_advance(tau)` from the
+   interval start), while the split follows a different one (an advance to `tau_lo`, then a
+   micro-step). Within a tolerance of the surface those can land on opposite sides, so the arena
+   could be left on the pre-crossing side and the next sub-step's first RK4 stage read the wrong
+   branch. Hence a postcondition: keep nudging until the sign has flipped.
+2. The postcondition tested `H < 0.0`. `umbra_clearance` is `sqrt(...) - r_occ`, which for any
+   position within one ulp of a 6378 km surface **returns exactly `0.0`** — and a converging root
+   find lands within an ulp of the root routinely, so this is the common case, not a corner. `H` is
+   then `-sign0 * 0.0 = -0.0`, and `-0.0 < 0.0` is **false** in IEEE 754. The loop declared the
+   crossing resolved while the body sat exactly on a surface whose own membership test
+   (`perp2 < r_occ**2`) is strict and therefore read *lit*.
+
+**How it was found.** Not by reading. A full-precision trace of every `shadow_factor` call across one
+crossing, printing `g`, `nu` and the latch, showed the sequence ending `g = +0.000000e+00, nu = 1.0`
+where it had to be dark.
+
+**Fix.** Test `<= 0.0`. The ladder went to `17.28, 16.66, 16.23, 17.83` immediately.
+
+**Generalisable.** A geometric event function is a *difference of nearly equal quantities* near its
+own root, so it quantises there. Any "which side are we on" test written against one must treat
+exact zero as *on the surface*, never as *past it*, and must agree with whatever strict or non-strict
+comparison the model itself uses. Printing `%.6f` is not enough to see this; print `%.6e` or the
+repr.
+
+---
+
+## Cutting the step at a discontinuity is necessary and not sufficient
+
+**Symptom.** With the split in place and the crossing located to 1e-6 s, the error still fell only
+`2.66x, 0.89x` per halving, and at `h = 1.25 s` was *worse* than not splitting at all (3.38e-6 km
+against 9.18e-7 km).
+
+**Cause.** RK4's internal stages are not on the trajectory. Stage 4 evaluates at `r + h v(k3)`, which
+differs from the solution at the step's end by `O(h^3 |da/dt|)` — 5.6e-4 km at `h = 5 s` in LEO. A
+sub-step that ends *exactly* at a discontinuity therefore samples that stage on whichever side of the
+surface an off-trajectory point happens to fall, and a stage on the wrong side contributes weight 1/6
+of a full `Delta_a h`. The derived `n Delta_a (h/6) T_rem = 3.26e-6 km` matched the measurement to
+4 %, which is what identified it.
+
+**Fix.** A *branch latch*: over a sub-interval known to contain no crossing, pin the model to the
+branch it starts on (`Event.latch`, `srp.shadow_latch`). Then the right-hand side really is smooth
+over the interval at all four stages, which is the condition RK4's order theorem actually requires —
+"the solution is smooth" is not enough if the stages sample outside a smooth neighbourhood of it.
+
+---
+
+## A heliocentric arena cannot demonstrate a fourth-order integrator
+
+**Symptom.** A convergence ladder on `sun_earth_moon(leo_satellite=True)` read `17.35, 0.84` for the
+*control* — a plain point-mass Cowell satellite with no shadow and no SRP at all.
+
+**Cause.** The arena's `global_states` are heliocentric, so a LEO satellite's row is `~1.5e8 km` and
+its acceleration is computed by differencing against its parent's: nine significant digits gone. Over
+1.5 LEO orbits that floors the integrated trajectory at `~1e-5 km`, which is the same size as RK4's
+own truncation at `h = 10 s`. Below that step the ladder measures rounding.
+
+**Fix.** `scenarios.eclipsed_satellite`, which puts Earth at the arena root (satellite coordinates
+`~7000 km`) and a massless luminous marker 1 AU out as the SRP source. The floor drops by six orders
+and the same ladder reads 16.
+
+**Generalisable.** Before measuring *any* integrator property, check the control. If the smooth,
+no-perturbation case does not converge at the expected order, the scenario is wrong, not the
+integrator — and no amount of work on the perturbation will show up.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
