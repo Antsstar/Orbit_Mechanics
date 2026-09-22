@@ -1085,8 +1085,54 @@ correction, **8/23 fail** (burns 0.18 km late, band breached); rectangle window 
 trapezoid, **2/23 fail** — caught, but thinly: at 30 s the 0.3-sample mismatch leaks only ~10 m.
 
 **Not built.** Eccentricity, inclination and phasing control; propellant mass (the report is Delta-v);
-a finite-burn model; a sweep integration (`ModelConfig` has nowhere to carry a controller yet — the
-spec is data, so adding it is one optional field).
+a finite-burn model. Per-config controllers - see the next section.
+
+---
+
+## Delta-v as a sweep metric: the sweep's third currency
+
+`run_sweep(..., station_keeping=StationKeepingSpec(...), delta_v_baseline="<config name>")` fills
+`SweepResult.delta_v` with `stationkeeping.DeltaVMetrics`: per-body total Delta-v, raises and steady
+m/s/day (first raise excluded, as in the study), their medians over bodies, and the signed relative
+budget error against the baseline, negative = under-budgets. It is wired exactly like `access`: one
+extra propagation per engine configuration (`sweep.station_keeping_for`, a fresh build through
+`apply_config` and then `run_station_keeping` - the study's own function), never touching the error or
+timing runs, so `ErrorStats` and `AccessMetrics` are bit-identical with it on or off (tested).
+
+**Why a baseline config and not truth.** Truth (`reference.py`) has no drag, so it has no Delta-v:
+every drag tier's "error against truth" would be +100 %, which says nothing. The comparison that is
+meaningful is the one the study made - this atmosphere against that one - so the reference is a
+*configuration* of the same sweep, named explicitly and never inferred ("the Cowell one", "the last
+one"): which model is the yardstick is the premise of the comparison, and a default would choose it
+silently. A tier with no drag (Keplerian, secular J2, Cowell without drag) predicts no raise and
+scores exactly **-1.0**; that is the finding, not an error, and it is reported rather than refused.
+
+**Why a coarse `dt` is refused rather than adapted.** The controller's mean is a trapezoid over one
+period of samples, so it needs `MIN_SAMPLES_PER_ORBIT` = 4 steps per window (below 3 the J2 `2u` term
+aliases into the mean). `check_station_keeping_dt` refuses a config below that, by name, before truth
+is integrated - the same stance as `access_metrics_for`'s divisibility check. Substituting a finer step
+would score a model nobody configured. An analytic tier's position error does not depend on `dt`, so a
+caller sweeping one for Delta-v simply gives it a controller-compatible `dt`.
+
+**Measured through the sweep** (`tests/validation/test_sweep_delta_v.py`, 18 h, one cycle): the single
+band matched at 355 km reads **-0.1453** against a derived -0.1416 (tolerance 1e-2, the single-cycle
+endpoint term), at the band centre -0.0030 against -0.0019, the baseline 3.451 m/s/day against the
+study's 3.436; and the same numbers to 1e-12 as `run_station_keeping` called directly. Over a short
+horizon the *total* Delta-v is nearly blind (-1e-4: both tiers made two raises) - the steady rate is
+the headline.
+
+**Not built: sweeping controllers.** The spec is per sweep, so every configuration faces the same
+policy. Comparing *policies* (band width, one impulse against two, a different trigger) is the natural
+next step and would put an optional `StationKeepingSpec` on `ModelConfig`. It is deliberately not done
+here: a controller is a decision policy, not a model of the physics, and mixing the two in one ranking
+would confound "which atmosphere is right" with "which operator is thrifty". `ExternalTier` (SGP4)
+always gets `delta_v = None` - a pure function of time cannot take a burn.
+
+`benchmarks/figures.py`'s `figure_station_keeping` still calls `run_station_keeping` directly: it
+plots the altitude series, which a `SweepResult` does not carry, and it runs all four satellites in one
+arena, where each burn's scheduled second impulse splits the step for every Cowell body - so its
+numbers would not be bit-identical to four single-config arenas (the split is inexact for Cowell,
+`manoeuvres.py`), and routing it through the sweep would move the published figure.
 
 ---
 

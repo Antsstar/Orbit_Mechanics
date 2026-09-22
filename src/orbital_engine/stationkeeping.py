@@ -130,7 +130,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Final, List, Optional, Sequence, TYPE_CHECKING, Union
+from typing import Any, Final, List, Optional, Sequence, TYPE_CHECKING, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -143,7 +143,16 @@ if TYPE_CHECKING:
 __all__ = [
     "StationKeepingSpec", "Burn", "StationKeeper", "StationKeepingRun", "BurnSummary",
     "hohmann_raise_dv", "single_impulse_raise_dv", "summarise_burns", "run_station_keeping",
+    "MIN_SAMPLES_PER_ORBIT", "window_period_s", "steady_rate", "BodyDeltaV", "DeltaVMetrics",
+    "delta_v_metrics",
 ]
+
+#: The fewest steps per window period `StationKeeper` accepts. The trapezoidal window integrates a
+#: harmonic of `k` cycles per period to zero unless `k` is a multiple of the sample count, and J2's
+#: short-period terms are `k = 1, 2`, so fewer than 3 samples alias the `2u` term straight into the
+#: mean; 4 leaves one sample of margin. It is a floor for the estimator, not an accuracy statement:
+#: a Cowell tier that coarse is far outside RK4's useful range long before the window fails.
+MIN_SAMPLES_PER_ORBIT: Final = 4.0
 
 #: Prograde, in `manoeuvres.py`'s RSW convention.
 _PROGRADE: Final = np.array([0.0, 1.0, 0.0], dtype=np.float64)
@@ -232,6 +241,12 @@ def _window_weights(n_float: float) -> NDArray[np.float64]:
     return w
 
 
+def window_period_s(spec: StationKeepingSpec, mu: float) -> float:
+    """The controller's averaging window (s): the Keplerian period at the band's midpoint radius."""
+    a_mid = spec.r_ref_km + 0.5 * (spec.lower_km + spec.upper_km)
+    return 2.0 * math.pi * math.sqrt(a_mid ** 3 / mu)
+
+
 class StationKeeper:
     """
     The dead-band controller, applied to `bodies` of one `Simulation` stepped at a fixed `dt`.
@@ -281,10 +296,9 @@ class StationKeeper:
         # first body's and require the rest to agree, so the shared buffer means one thing.
         if not bool(np.all(mu == mu[0])):
             raise ValueError("all station-kept bodies must share one parent mass (one window length)")
-        a_mid = spec.r_ref_km + 0.5 * (spec.lower_km + spec.upper_km)
-        self.period_s = 2.0 * math.pi * math.sqrt(a_mid ** 3 / float(mu[0]))
+        self.period_s = window_period_s(spec, float(mu[0]))
         self._n_float = self.period_s / self.dt
-        if self._n_float < 4.0:
+        if self._n_float < MIN_SAMPLES_PER_ORBIT:
             raise ValueError(
                 f"dt={dt} s gives only {self._n_float:.2f} samples per orbit; the one-period mean "
                 f"needs a step well below the orbital period ({self.period_s:.0f} s)")
@@ -377,12 +391,34 @@ class StationKeeper:
 
 @dataclass(frozen=True)
 class BurnSummary:
-    """Per-body totals: Delta-v (km/s), number of raises, and the mean interval between them (s)."""
+    """Per-body totals: Delta-v (km/s), number of raises, the mean interval between them (s), and the
+    steady Delta-v rate (km/s per s) - see `steady_rate`."""
 
     body: int
     total_dv_km_s: float
     n_burns: int
     mean_interval_s: float
+    steady_rate_km_s_per_s: float = field(default=float("nan"))
+
+
+def steady_rate(burns: Sequence[Burn]) -> float:
+    """
+    One body's steady Delta-v rate (km/s per s): `sum_{k=2..K} dv_k / (t_K - t_1)` over its raises in
+    epoch order - the study's definition (`tests/validation/test_stationkeeping.py`, "Measured rate").
+    The first raise is excluded because its timing and size depend on where the run *started* in the
+    band, not on the atmosphere; each later raise repays exactly one dead-band cycle of decay.
+
+    **Zero raises give exactly 0.0**: the model predicts no propellant over the horizon - a drag-free
+    configuration's real answer. A drag model whose first raise falls beyond the horizon reads the
+    same, which is why a horizon must span at least two cycles of the slowest-decaying tier. **One
+    raise gives `nan`**: there is no cycle to measure.
+    """
+    if len(burns) == 0:
+        return 0.0
+    if len(burns) == 1:
+        return float("nan")
+    ordered = sorted(burns, key=lambda x: x.epoch_s)
+    return float(sum(x.dv_km_s for x in ordered[1:]) / (ordered[-1].epoch_s - ordered[0].epoch_s))
 
 
 def summarise_burns(burns: Sequence[Burn], bodies: Sequence[int]) -> List[BurnSummary]:
@@ -395,9 +431,76 @@ def summarise_burns(burns: Sequence[Burn], bodies: Sequence[int]) -> List[BurnSu
         interval = float(np.mean(np.diff(epochs))) if epochs.size >= 2 else float("nan")
         out.append(BurnSummary(
             body=int(b), total_dv_km_s=float(sum(x.dv_km_s for x in mine)), n_burns=len(mine),
-            mean_interval_s=interval,
+            mean_interval_s=interval, steady_rate_km_s_per_s=steady_rate(mine),
         ))
     return out
+
+
+# ==================================================================================================
+# The sweep metric: Delta-v in decision units, relative to a named baseline configuration
+# ==================================================================================================
+
+@dataclass(frozen=True)
+class BodyDeltaV:
+    """
+    One station-kept body's budget over a sweep horizon: total Delta-v (m/s, every raise including
+    the first), number of raises, and the steady rate (m/s per day, `steady_rate`'s definition).
+    """
+
+    body: str
+    total_dv_m_s: float
+    n_raises: int
+    steady_rate_m_s_per_day: float
+
+
+@dataclass(frozen=True)
+class DeltaVMetrics:
+    """
+    A configuration's station-keeping budget and its error against a **baseline configuration** of the
+    same sweep (`sweep.run_sweep(..., delta_v_baseline=)`), never against truth - `reference.py`'s
+    truth has no drag, so it has no Delta-v to compare with.
+
+    `rate_error_rel = median_rate / baseline_median_rate - 1`, and `total_error_rel` likewise on total
+    Delta-v; signed, **negative = under-budgets**. The steady rate is the headline: the total also
+    carries the first raise, whose size depends on where in the band the run started. The baseline's
+    own errors are exactly 0.0; a drag-free configuration's are exactly -1.0, a real result (it
+    predicts no raise) and not an error. Both are `nan` when the baseline's median is zero or `nan`
+    (fewer than two raises in the horizon): there is then nothing to be relative to. Medians are over
+    bodies, like `sweep.ErrorStats`; a `nan` body rate propagates into the median, never skipped.
+    """
+
+    baseline: str
+    bodies: Tuple[BodyDeltaV, ...]
+    median_total_dv_m_s: float
+    median_raises: float
+    median_steady_rate_m_s_per_day: float
+    rate_error_rel: float
+    total_error_rel: float
+
+
+def _relative(value: float, base: float) -> float:
+    if not math.isfinite(base) or base == 0.0:
+        return float("nan")
+    return value / base - 1.0
+
+
+def _medians(rows: Sequence[BodyDeltaV]) -> Tuple[float, float, float]:
+    return (float(np.median([r.total_dv_m_s for r in rows])),
+            float(np.median([r.n_raises for r in rows])),
+            float(np.median([r.steady_rate_m_s_per_day for r in rows])))
+
+
+def delta_v_metrics(
+    bodies: Sequence[BodyDeltaV], baseline_bodies: Sequence[BodyDeltaV], baseline: str,
+) -> DeltaVMetrics:
+    """Reduce per-body budgets to medians over bodies and score them against the baseline's."""
+    total, raises, rate = _medians(bodies)
+    base_total, _, base_rate = _medians(baseline_bodies)
+    return DeltaVMetrics(
+        baseline=baseline, bodies=tuple(bodies), median_total_dv_m_s=total, median_raises=raises,
+        median_steady_rate_m_s_per_day=rate, rate_error_rel=_relative(rate, base_rate),
+        total_error_rel=_relative(total, base_total),
+    )
 
 
 @dataclass(frozen=True)

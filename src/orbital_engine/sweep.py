@@ -52,12 +52,20 @@ producing one state per `dt` up to the horizon, and `AccessMetrics` from the sam
 appends its `SweepResult` after the `ModelConfig` results. Nothing about an engine configuration's
 path changes when `external` is empty or not.
 
+**Station-keeping Delta-v, optionally.** For drag the decision unit is propellant. Pass
+`station_keeping=StationKeepingSpec(...)` with `delta_v_baseline="<config name>"` and every engine
+`SweepResult` carries `stationkeeping.DeltaVMetrics`: per-body total Delta-v, raises and steady
+m/s/day, and the signed relative budget error against the **named baseline configuration** - not
+against truth, which has no drag and so no Delta-v. It is the same kind of additive measurement as
+`access`: one extra propagation per configuration from a fresh build, at that configuration's own
+`dt`, and nothing about the error or timing runs changes. See `station_keeping_for`.
+
 **No plotting dependency.** This module never imports `matplotlib`; `benchmarks/frontier_plot.py`
 does that.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
@@ -68,6 +76,10 @@ from .access import (
     windows_from_simulation, windows_from_truth,
 )
 from .custom_types import PropagatorType
+from .stationkeeping import (
+    MIN_SAMPLES_PER_ORBIT, BodyDeltaV, DeltaVMetrics, StationKeepingSpec, delta_v_metrics,
+    run_station_keeping, window_period_s,
+)
 from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, reference_for
 from .benchmark import measure
 from .simulator import Simulation
@@ -75,6 +87,7 @@ from .simulator import Simulation
 __all__ = [
     "ForceModelSpec", "ModelConfig", "ExternalTier", "ErrorStats", "SweepResult",
     "eligible_bodies", "apply_config", "run_sweep", "access_metrics_for", "score_external",
+    "check_station_keeping_dt", "station_keeping_for",
 ]
 
 
@@ -128,6 +141,10 @@ class ExternalTier:
     Truth for an external tier is the scenario's truth, which was seeded from the scenario's initial
     state - so the tier is only meaningfully scored if that state is the tier's own state at `t = 0`
     (`scenarios.tle_satellites` guarantees this for SGP4).
+
+    An external tier's `SweepResult.delta_v` is always `None`, with or without `station_keeping`: it
+    is a pure function of time, so it cannot take a burn, and a station-keeping budget needs the
+    trajectory to respond to the controller's impulses.
     """
     name: str
     dt: float
@@ -150,14 +167,16 @@ class SweepResult:
     """One configuration's outcome: its name, error statistics, minimum-of-batches wall time (us) for
     the propagation alone, and how many bodies the statistics were taken over.
 
-    `access` is `None` unless `run_sweep` was given an `AccessSpec`; it never affects the four fields
-    above, which are computed by the same code either way.
+    `access` is `None` unless `run_sweep` was given an `AccessSpec`, and `delta_v` is `None` unless it
+    was given a `StationKeepingSpec` (and always for an `ExternalTier`); neither affects the four
+    fields above, which are computed by the same code either way.
     """
     config_name: str
     error: ErrorStats
     wall_time_us: float
     n_bodies: int
     access: Optional[AccessMetrics] = None
+    delta_v: Optional[DeltaVMetrics] = None
 
 
 def eligible_bodies(sim: Simulation) -> NDArray[np.int64]:
@@ -319,6 +338,68 @@ def access_metrics_for(
     return compare_windows(truth, model)
 
 
+def check_station_keeping_dt(
+    sim: Simulation, config: ModelConfig, spec: StationKeepingSpec,
+) -> None:
+    """
+    Refuse a configuration whose `dt` the controller cannot observe at: fewer than
+    `stationkeeping.MIN_SAMPLES_PER_ORBIT` steps per averaging window (the Keplerian period at the
+    band's midpoint, ~5420 s at 292 km, so `dt` must be at most ~1355 s).
+
+    Checked against `sim` - any build of the scenario, read and never mutated - before anything is
+    propagated, so a sweep fails in milliseconds rather than after its truth. `StationKeeper` would
+    raise the same thing later, without the configuration's name. The step is never substituted:
+    the Delta-v must come from the model at the step `run_sweep` timed and scored. An analytic tier's
+    position error does not depend on `dt`, so the caller is free to give it a controller-compatible
+    one; a Cowell tier's does, and the budget then carries its truncation error too.
+    """
+    idx = _resolve_bodies(sim, config)
+    if idx.size == 0:
+        return
+    mu = sim.mu_array[idx] + sim.mu_array[sim.parent_indices[idx]]
+    if not bool(np.all(mu > 0.0)):
+        raise ValueError(f"config {config.name!r}: every station-kept body needs a massive parent")
+    period = window_period_s(spec, float(np.max(mu)))
+    if period / config.dt < MIN_SAMPLES_PER_ORBIT:
+        raise ValueError(
+            f"config {config.name!r}: dt={config.dt} s gives {period / config.dt:.2f} samples per "
+            f"station-keeping window ({period:.0f} s); the controller's one-period mean needs at least "
+            f"{MIN_SAMPLES_PER_ORBIT:.0f}. Give this config a dt <= {period / MIN_SAMPLES_PER_ORBIT:.0f} "
+            f"s - the Delta-v is never computed at a different step than the config's own."
+        )
+
+
+def station_keeping_for(
+    build_scenario: Callable[[], Simulation],
+    config: ModelConfig,
+    horizon_s: float,
+    spec: StationKeepingSpec,
+) -> Tuple[BodyDeltaV, ...]:
+    """
+    One configuration's station-keeping budget: a fresh build with `apply_config`, stepped to
+    `horizon_s` at `config.dt` under `stationkeeping.run_station_keeping` - the same function the
+    standalone study calls, so the result is that study's to the bit for the same configuration and
+    arena. Every body the configuration targets is station-kept. A configuration with no drag makes
+    no raise and returns zero Delta-v: a real prediction, not an error.
+
+    `horizon_s` must already be a whole number of steps (`run_sweep` checks it).
+    """
+    sim = build_scenario()
+    sim.record_history = False
+    idx = apply_config(sim, config)
+    if idx.size == 0:
+        return ()
+    run = run_station_keeping(sim, idx, spec, horizon_s, config.dt)
+    slot_to_name = {slot: name for name, slot in sim.name_to_index.items()}
+    return tuple(
+        BodyDeltaV(
+            body=slot_to_name[s.body], total_dv_m_s=s.total_dv_km_s * 1e3, n_raises=s.n_burns,
+            steady_rate_m_s_per_day=s.steady_rate_km_s_per_s * 1e3 * 86400.0,
+        )
+        for s in run.summary
+    )
+
+
 def _time_propagation(
     build_scenario: Callable[[], Simulation],
     config: ModelConfig,
@@ -419,6 +500,8 @@ def run_sweep(
     timing_warmup: int = 2,
     access: Optional[AccessSpec] = None,
     external: Sequence[ExternalTier] = (),
+    station_keeping: Optional[StationKeepingSpec] = None,
+    delta_v_baseline: Optional[str] = None,
 ) -> List[SweepResult]:
     """
     Run every configuration in `configs` against one scenario and return one `SweepResult` each, in
@@ -444,8 +527,33 @@ def run_sweep(
 
     `external` tiers (`ExternalTier`, e.g. `sgp4_bridge.sgp4_tier`) are scored by `score_external`
     against the same two truths and appended, in order, after the `configs` results.
+
+    `station_keeping`, when given, adds `SweepResult.delta_v` to every engine configuration: one extra
+    propagation each (`station_keeping_for`), scored against the configuration named by
+    `delta_v_baseline`, which is **required** and must name a config in `configs` - it is never
+    inferred, because which model is the reference is the comparison's premise, not a default.
+    Every config's `dt` is checked against the controller first (`check_station_keeping_dt`), before
+    truth is integrated. `delta_v_baseline` without `station_keeping` is refused too, since it would
+    otherwise be silently ignored.
     """
     truth_sim = build_scenario()
+
+    if station_keeping is not None:
+        names = [c.name for c in configs]
+        if delta_v_baseline is None:
+            raise ValueError(
+                "station_keeping needs delta_v_baseline: the name of the config every Delta-v budget "
+                "is scored against (truth has no drag, so there is no truth Delta-v).")
+        if len(set(names)) != len(names):
+            raise ValueError(f"station_keeping needs unique config names to score by; have {names}")
+        if delta_v_baseline not in names:
+            raise ValueError(
+                f"delta_v_baseline={delta_v_baseline!r} names no config in this sweep; have {names}")
+        for config in configs:
+            check_station_keeping_dt(truth_sim, config, station_keeping)
+    elif delta_v_baseline is not None:
+        raise ValueError("delta_v_baseline was given without station_keeping; it would be ignored")
+
     times = np.array([0.0, horizon_s], dtype=np.float64)
     truth = reference_for(
         truth_sim, times, rtol=truth_rtol, atol=truth_atol, oblateness=oblateness,
@@ -458,6 +566,7 @@ def run_sweep(
             rtol=truth_rtol, atol=truth_atol, oblateness=oblateness,
         )
 
+    budgets: dict[str, Tuple[BodyDeltaV, ...]] = {}
     results: List[SweepResult] = []
     for config in configs:
         # The horizon must be a whole number of steps. Rounding it silently would score the config
@@ -489,6 +598,11 @@ def run_sweep(
                 build_scenario, config, horizon_s, access, access_truth,
             )
 
+        if station_keeping is not None:
+            budgets[config.name] = station_keeping_for(
+                build_scenario, config, horizon_s, station_keeping,
+            )
+
         results.append(SweepResult(
             config_name=config.name,
             error=_error_stats(errors_km),
@@ -496,6 +610,15 @@ def run_sweep(
             n_bodies=int(idx.size),
             access=access_metrics,
         ))
+
+    if station_keeping is not None and delta_v_baseline is not None:
+        # Scored after the loop, when the baseline's budget exists whatever its position in `configs`.
+        base = budgets[delta_v_baseline]
+        results = [
+            replace(r, delta_v=delta_v_metrics(budgets[r.config_name], base, delta_v_baseline))
+            if budgets[r.config_name] else r
+            for r in results
+        ]
 
     for tier in external:
         results.append(score_external(
