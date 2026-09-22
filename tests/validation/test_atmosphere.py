@@ -122,8 +122,10 @@ much stronger drag (11 km per orbit at the end, against 0.2 km there):
 - *Mean-rate second order.* The orbit-averaged rate for a slightly eccentric orbit gains a factor
   `I_0(a e / H) ~ 1 + (a e / H)^2 / 4`, which is 5.3e-4 at the very end and far less earlier; weighted
   over the decay, under **1e-4**.
-- *RK4 drift.* `(n dt)^6 / 72` per step at `n dt = 0.0346` is 2.4e-11, or 2.1e-7 over 8640 steps,
-  which is 1.4e-3 km in `a`: **1.2e-5** of the decay. The drag-free control measures it directly.
+- *RK4 drift.* `(n dt)^6 / 36` per step at `n dt = 0.0346` is 4.8e-11, or 4.1e-7 over 8640 steps,
+  which is 2.8e-3 km in `a`: **2.4e-5** of the decay. The constant is 1/36 on a circular Kepler orbit,
+  not the harmonic oscillator's 1/72 (measured 1/36.0 at `n dt` = 0.035 and 0.069; see
+  `docs/engineering-log.md`). The drag-free control measures it directly.
 - *Mean-ODE quadrature.* Converged: 2000 and 32000 RK4 steps agree to 1e-10 relative, including across
   the band kinks, so it contributes nothing.
 

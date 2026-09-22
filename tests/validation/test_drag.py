@@ -40,7 +40,9 @@ The scenario is a = 6921 km, T = 5730 s, n = 1.097e-3 /s, dt = 20 s (n dt = 0.02
 - *RK4 energy drift.* A linear oscillator loses a fraction `(n dt)^6 / 72` of its energy per RK4 step,
   which gives 1.5e-12 per step, 2.2e-9 over the run, and 1.5e-5 km in `a`. That is 1.5e-5 of `Delta a`.
   Kepler motion is not linear, so this only fixes the order of magnitude. Allowing a factor of 5 gives
-  7.5e-5. A drag-free control satellite in the same arena measures it directly.
+  7.5e-5. (The circular-Kepler constant has since been measured as 1/36, twice the oscillator's, which
+  gives 2.9e-5 - inside that allowance; see `docs/engineering-log.md`.) A drag-free control satellite
+  in the same arena measures it directly.
 - *Osculating vs mean.* Drag drives an eccentricity oscillation of amplitude
   `e ~ 2 a_T / (v n) = rho B' a`, which is 4.7e-6. Over that radial excursion `a e`, density varies by
   `a e / H` = 5.4e-4 and `v^3` by `3e`. Both vary once per orbit, so they average out of the secular
