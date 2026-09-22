@@ -1065,7 +1065,7 @@ secular-plus-harmonics least-squares fit), intervals exceed the fastest possible
 the drag-free control spends exactly zero.
 
 **Two findings about integrator error.** The RK4 energy constant on a circular Kepler orbit is
-**1/36, not the harmonic oscillator's 1/72** that `test_atmosphere.py`'s budget quotes (harmless
+**1/36, not the harmonic oscillator's 1/72** that `test_atmosphere.py`'s budget quoted until 9976353 corrected it (harmless
 there — it is a 1e-5 budget item). And at `dt = 60 s` a *drag-carrying* satellite's RK4 decay exceeds
 the drag-free twin's by 3.2e-3 (table) / 1.7e-3 (single band) of the drag rate, falling as `h^4`:
 **a drag-free twin does not calibrate integrator drift under drag.** The test runs at 30 s for that
