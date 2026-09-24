@@ -27,7 +27,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `body.py` | `BodyHandle`, a UI-facing pointer into the arena | unchanged, never instantiated |
 | `kernels.py` | Compiled scalar twins of the hot paths | **new** |
 | `scenarios.py` | Declarative universe builders, shared by tests and benchmarks | **new** |
-| `reference.py` | Independent DOP853 N-body truth trajectories, optionally with explicitly passed J2 | **new** |
+| `reference.py` | Independent DOP853 N-body truth trajectories, optionally with explicitly passed J2 and J3..J6 | **new** |
 | `benchmark.py` | Timing primitive (minimum-of-batches) | **new** |
 | `forces.py` | Force-model composition: enabled physics as a per-body bitmask, additive stateless kernels, and the acceleration contract integrators consume | **new** |
 | `gravity.py` | `point_mass_gravity`: the central two-body term relative to the gravitational parent | **new** |
@@ -43,6 +43,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `geometry.py` | Observation geometry: ground-station look angles, interpolated access windows, and the spherical line-of-sight test. Pure functions of position arrays, like `viz.py`'s transforms — the primitive layer under a future access-based error metric | **new** |
 | `access.py` | The sweep-level access metric built on `geometry.py`: model contact windows matched to truth's by time overlap, then differenced into rise/set shift, duration error, total contact error and **passes gained or lost**. Consumed by `sweep.run_sweep(access=...)`, which gains one optional field and changes nothing else | **new** |
 | `events.py` | Event-driven step splitting: a step cut where a continuous function of the arena state changes sign, located by a bracketed root find over trial propagations. The second thing `step()` splits for, after a scheduled manoeuvre — and the first that has to *find* its own epoch | **new** |
+| `zonal.py` | `zonal`: the J3..J6 zonal harmonics of the parent, additive to `j2`, with a matching truth option in `reference.py` written from a different derivation | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -1211,6 +1212,83 @@ network (TLEs are strings). All satellites share one scenario epoch, and a TLE w
 from it is evaluated at a large `tsince`, which is legitimate but degrades SGP4. SGP4's mean-element
 state is not re-fitted from engine output, which would need a differential corrector. The external
 tier has no `ModelConfig` and cannot carry force models: it is whatever the external model is.
+
+---
+
+## Higher zonals: J3..J6 as a second model, not a wider first one
+
+`zonal.py` registers `"zonal"`: the J3..J6 perturbation of the Keplerian parent, per-body coefficients
+`(r_eq, j3, j4, j5, j6)`, spin axis = frame +z like `j2`. It exists to turn "does my task need more
+than J2?" into a sweep result.
+
+**Why additive to `j2` rather than a J2..Jn replacement.** A general-degree model that included n = 2
+would have had to either duplicate J2 - two models that can both be enabled on a body, each adding
+J2, which is a double count that raises nothing - or replace `"j2"`, which is the one force model
+with a fused compiled Cowell twin (`kernels.cowell_rk4_step`) and whose `force_model_params["j2"]` row
+`SECULAR_J2` reads its coefficients from. Degrees 3..6 as a separate bit touch neither: a J2..J6
+configuration is `"j2"` plus `"zonal"`, the J2-only configurations are unchanged bit for bit, and the
+sweep's model ladder gets one more rung instead of a rewritten one. The truth mirrors the split:
+`reference_for(..., oblateness=..., zonal=...)`, with degree 2 refused on the zonal side so it has
+exactly one door.
+
+**Why the truth needed a second derivation.** The truth is the only thing that can catch a kernel
+error that looks plausible, and it can only do that if it does not share the error. The kernel
+evaluates `a_n = (mu/r^2) J_n (R/r)^n [P_{n+1}'(s) r_hat - P_n'(s) z_hat]` from Bonnet's recursion and
+the derivative recursion. `reference.zonal_field` never recurses and never projects: each `P_n` is
+typed out as its explicit polynomial, split into Cartesian monomials `c z^k r^-m`, and each monomial is
+differentiated in x, y, z directly. The two agree to 1e-14..9e-14 of each degree's natural scale over
+80 points from LEO to GEO, poles and equator included, and a third evaluation (a finite-differenced
+potential built on `numpy.polynomial.legendre`) agrees with the kernel to 2e-11. Mutations show the
+split has teeth: a wrong Bonnet coefficient, an odd-degree sign flip, or a wrong Legendre index in the
+kernel each fail the cross-check and 4-5 other tests; a wrong degree-5 table entry in the truth fails
+the cross-check and the convergence test; a truth field that is not the gradient of its potential
+fails the truth's energy check. The field cross-check and the engine-converges-to-truth test each
+catch all five; parity catches only the index error, which is what it is for.
+
+**Orbit dynamics, measured differentially.** J2's short-period eccentricity signal (2.0e-3 peak to peak
+here) is as large as three days of J3's drift, and J2^2 is as large as J4, so each is measured as the
+difference between co-located twins that differ only in the degree (`scenarios.zonal_twins`). J3's
+long-period rate, derived by averaging as `de/dt = -(3/2) n J3 (R/p)^3 (1 - e^2) sin i (1 - (5/4)
+sin^2 i) cos w` (the `(1 - e^2)` is absent from the commonly quoted form; at e = 0.02 it is 4e-4):
+predicted +/-2.4288e-4 over three days, measured +/-2.4390e-4 (+0.42 %, sign following `cos w`), of
+which +0.39 % is the osculating-versus-mean semi-major axis of the seed. J4's secular node rate
+`(15/16) n J4 (R/p)^4 (1 + 3e^2/2) cos i (4 - 7 sin^2 i)`: predicted -5.898e-4 rad, measured -5.956e-4
+(+0.97 %, of which +0.50 % is mean `a`; the rest is J2 x J4 cross terms at the estimated size).
+
+**The headline.** 12 satellites, 550 km / 53 deg, 24 h, three stations, 5 deg mask, 189 passes, truth
+with J2..J6 (`python benchmarks/zonal_sweep.py`, ~30 s):
+
+| Tier | median km | max km | mean \|rise\| | max \|rise\| | lost / gained | total contact |
+|---|---|---|---|---|---|---|
+| Cowell + j2, 60 s | 3.109 | 4.721 | 0.101 s | 0.730 s | 0 / 0 | -12.0 s |
+| Cowell + j2 + zonal, 60 s | 1.877 | 1.893 | 0.063 s | 0.223 s | 0 / 0 | -2.2 s |
+| Cowell + j2, 15 s | 1.265 | 2.851 | 0.070 s | 0.588 s | 0 / 0 | -9.9 s |
+| Cowell + j2 + zonal, 15 s | 0.0027 | 0.0027 | 0.0003 s | 0.0004 s | 0 / 0 | 0.0 s |
+| Secular J2, mean-seeded | 5.262 | 8.044 | 1.608 s | 8.026 s | 1 / 0 | +159.6 s |
+
+The estimate written before the run (in `benchmarks/zonal_sweep.py`'s docstring) was ~1-2 km of
+along-track from omitting J3..J6 - J4's secular drift of the mean argument of latitude, -1.3 km common
+to every satellite, plus ~1 km per satellite from the J3/J4 short-period offset of each seed's mean
+`a` - and ~0.2 s of window shift. Measured: 1.26 km median (the 15 s pair, where RK4 truncation is
+2.7e-3 km and the difference is model alone), 2.85 km worst, and 0.07 s mean / 0.59 s worst rise
+shift. So:
+
+- **In kilometres, J3..J6 matter** - omitting them costs 470x the 15 s error - but they do **not**
+  dominate Cowell's 60 s truncation (1.88 km); the two add nearly in phase to 3.11 km. Below about a
+  50 s step, the missing zonals are the larger error.
+- **In windows, they do not move a 24 h schedule past the 1 s pad**: 0.59 s at worst, no pass gained
+  or lost, total contact 9.9 s short over 189 passes. A task that is decided in contact windows at this
+  horizon does not need more than J2; one decided in kilometres, or over several days (the J4 term
+  alone is secular), does. The Cowell + j2 + zonal 60 s tier reproduces exactly the Cowell + j2 60 s
+  figures measured against J2-only truth (1.88 km, 0.063 / 0.223 s), as it should: the zonal model
+  removes the model error and leaves the truncation.
+
+**Cost, and why it is not on the frontier plot yet.** A Cowell body carrying `"zonal"` is foreign to
+the fused compiled plan, so the whole Cowell set runs the NumPy `RK4Integrator`: 5.4 s for the 15 s
+tier against 0.041 s for the fused `j2`-only tier, 130x, which is implementation, not physics. The
+compiled twin (the term added to `kernels._cowell_accel` and the plan's accepted-bit set) is the
+`kernel-twin` follow-up; until it lands, Cowell + zonal wall times are not comparable with the fused
+tiers.
 
 ---
 
