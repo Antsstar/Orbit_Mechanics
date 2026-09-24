@@ -35,7 +35,8 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `thirdbody.py` | `third_body`: one named perturber's point-mass pull, direct minus indirect, relative to the parent | **new** |
 | `integrators.py` | Fixed-step RK4, integrating a body's state relative to its parent | **new** |
 | `drag.py` | `drag`: atmospheric drag in a co-rotating atmosphere, composable with `point_mass_gravity` and `j2`. The density law is a per-body coefficient, not a hard-coded formula | **new** |
-| `atmosphere.py` | The density laws `drag` chooses between: one exponential band, or Vallado Table 8-4's 28-band piecewise-exponential profile | **new** |
+| `atmosphere.py` | The density laws `drag` chooses between: one exponential band, Vallado Table 8-4's 28-band piecewise-exponential profile, or an NRLMSIS 2.0 profile - all but the first through one piecewise-exponential evaluator | **new** |
+| `msis_bridge.py` | NRLMSIS 2.0 wrapped at the boundary: `pymsis` averaged into an altitude profile at configuration time, memoised per solar-activity triple, read by `drag`'s kernel | **new** |
 | `srp.py` | `srp`: cannonball solar radiation pressure from a named light source, with a cylindrical or conical shadow. The shadow geometry is a per-body coefficient, the same way `drag` selects its density law | **new** |
 | `viz.py` | Plot-*data* preparation: trajectory sampling over a time grid, ground tracks via `frames`' body-fixed transforms, altitude series, and error curves against a `reference.py` truth. No matplotlib import, so the library stays installable without it — `benchmarks/figures.py` is the consumer that draws | **new** |
 | `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
@@ -455,8 +456,8 @@ atmosphere. The reasons are the same: one setter, and per-body sweeps in a singl
 `VesselORM.drag_area` and `dry_mass` could supply `B` at ingest, but a drag coefficient `C_d` is not
 stored, so `B` is an explicit coefficient for now.
 
-**What it does not do.** Spherical altitude `|r| - r_ref`, no solar or geomagnetic activity, and no
-diurnal bulge. The fused compiled Cowell twin does not include drag, so enabling it on any Cowell body
+**What it does not do.** Spherical altitude `|r| - r_ref`, no diurnal bulge, and solar and
+geomagnetic activity only as constant indices under the MSIS law (see "NRLMSIS 2.0" below). The fused compiled Cowell twin does not include drag, so enabling it on any Cowell body
 sends the whole Cowell set down the NumPy path.
 
 ---
@@ -514,11 +515,99 @@ Above the match the relationship reverses and then reverses again - the table is
 cannot reproduce that shape at any choice of `H`, which is the whole argument for the table. The first
 draft of the test asserted a monotone divergence in both directions and was wrong.
 
-**Still not modelled**, by either law: solar and geomagnetic activity, the diurnal bulge, winds,
+**Still not modelled** by these two laws: solar and geomagnetic activity, the diurnal bulge, winds,
 seasonal and latitudinal variation. Real density at 400 km swings by more than an order of magnitude
-over a solar cycle, which is larger than the gap between the two laws offered here. `pymsis`
-(NRLMSISE-00) is the right dependency for that and `CLAUDE.md` forbids reimplementing it. No compiled
-twin: drag is not in the fused plan, so a compiled density law would have nothing to plug into.
+over a solar cycle, which is larger than the gap between the two laws. The next section adds activity
+through `pymsis`, as a third value of the same selector. No compiled twin: drag is not in the fused
+plan, so a compiled density law would have nothing to plug into.
+
+---
+
+## NRLMSIS 2.0: solar activity as a sweep axis, evaluated at the boundary
+
+`msis_bridge.py` wraps `pymsis` (NRLMSIS 2.0; Emmert et al. 2021, citation from memory) as a third
+density law, `DENSITY_MODEL_MSIS = 2.0`, with three new `"drag"` coefficients `f107`, `f107a`, `ap`
+(columns 7-9). A solar-activity sweep is therefore coefficients alone -
+`ForceModelSpec("drag", {..., "density_model": 2.0, "f107": 140, "f107a": 140, "ap": 15})`, or
+`msis_coefficients(SOLAR_ACTIVITY_MODERATE)` - with no new mask bit, for the reasons the previous
+section gives for the table.
+
+**Boundary, not step.** `pymsis` holds process-global Fortran state and costs ~1.3 us per point; a
+step must never call it (`CLAUDE.md`). So `drag`'s `validate_coefficients` hook evaluates, **once per
+distinct `(f107, f107a, ap)`**, the MSIS mass density averaged over latitude (8-point Gauss-Legendre
+in `sin lat`), local time (8 longitudes at 00:00 UT) and day of year (24 whole days) at 601 altitude
+nodes, 0-1000 km (1 km to 200 km, 2 km above) - 1.3 s. The kernel reads that profile through the same
+piecewise-exponential evaluator the table uses, each band's scale height chosen to close exactly on
+the next node, i.e. log-linear interpolation: +29 us per kernel call against the table's cost. The
+profile is **memoised as a pure function of the triple** - the only module state, and it cannot leak
+between simulations because nothing else enters it. A kernel that meets an unevaluated triple (a row
+switched to MSIS by direct assignment) raises `LookupError` instead of evaluating lazily, because a
+lazy evaluation would be `pymsis` inside a step.
+
+**No network, ever.** `pymsis` downloads CelesTrak's space-weather file whenever an index is `None`.
+Here the indices are configuration data, never looked up by date: selecting MSIS without all three in
+the same call is refused, solar indices on a non-MSIS row are refused (they would be silently
+ignored), and a test configures a fresh profile with sockets patched to raise.
+
+**Bit-identical for everything that existed.** The masks for the first two laws are the same booleans
+as before and the MSIS term adds exactly `+0.0`; the kernel reads columns 7-9 only on MSIS rows, so
+even a legacy 7-column parameter array works. Asserted against a frozen copy of the pre-MSIS kernel on
+random mixed arenas, and checked on a 2000-step Cowell + J2 + drag run against the pre-change package
+(bitwise equal).
+
+**What the average discards is a model choice**, and its size is measured from MSIS (moderate
+activity): the diurnal bulge, **2.30x** day/night at 400 km on the equator (1.68x at 292 km); the
+semi-annual season, **1.63x** in the global mean at 400 km; latitude, ~4 % in zonal means and
++0.19 % for a 51.6 deg orbit's sampling at 292 km; and any time variation of the indices. An orbit
+whose plane sweeps all local times sees the global mean on average (about two months for a
+non-sun-synchronous LEO); a dawn-dusk sun-synchronous orbit never does. The index choice moves the
+400 km mean by **24x** between ECSS low (65/65/0) and high (250/250/45) activity - the reason the law
+exists.
+
+**The from-memory table, cross-checked** (a plausibility check against an independent model, *not*
+verification against Vallado's text): table over MSIS at ECSS moderate activity (140/140/15), every
+10 km from 150 to 1000 km, lies between **0.793 (800 km) and 1.278 (160 km)**, inside a derived
+factor-1.5 envelope (the table's unstated reference activity at 0.011 per sfu, plus 15-30 %
+model-to-model spread). The table is 11-28 % denser than moderate MSIS below 540 km and up to 21 %
+thinner above; above 700 km it carries a 2-4 % saw-tooth per band with minima at the base altitudes,
+the size of a constant-`H` fit's own error. No band stands out beyond that - the one local feature, a
+4 % rise to 350 km, sits on the only thermospheric band whose `H` falls (53.63 to 53.30 km), and
+continuity closes both of its boundaries to 1e-4, so it is the fit, not a transcription slip.
+
+**The headline, in Delta-v** (`benchmarks/msis_sweep.py`, 6 days, the station-keeping scenario of
+the previous sections, baseline MSIS moderate). Estimated before running from the cycle model with
+each law's density and local scale height:
+
+| tier | density / MSIS mod at 292 km | predicted | **measured** | raises | m/s/day |
+|---|---|---|---|---|---|
+| MSIS moderate (140/140/15) | 1 | baseline | baseline | 13 | 3.047 |
+| MSIS low (65/65/0) | 0.280 | -0.7196 | **-0.7193** | 4 | 0.855 |
+| MSIS high (250/250/45) | 2.341 | +1.3443 | **+1.3439** | 29 | 7.142 |
+| layered table | 1.128 | +0.1288 | **+0.1282** | 14 | 3.438 |
+| single band at 355 km, H = 60 km | 0.969 | -0.0311 | **-0.0311** | 12 | 2.952 |
+
+**The solar-activity assumption swings the station-keeping budget by -72 % / +134 % (0.86 to 7.14
+m/s/day, a factor 8.3); the atmosphere-model choice by 16 % (2.95 to 3.44).** Solar activity is five
+to ten times the larger question. And the two static laws *straddle* moderate MSIS: the station-keeping
+section's "single band under-budgets by 14 %" was measured against a table that itself sits 13 %
+above moderate MSIS at 292 km - against MSIS the single band is 3 % low. The fast version
+(`tests/validation/test_msis_delta_v.py`, 20 h, without the 40.7 h-cycle low tier) measures +1.3432,
++0.1311 and -0.0333 against the same predictions, inside a 1e-2 budget on `(1 + error)`.
+
+**Validation** (`tests/validation/test_msis.py`, `test_msis_wiring.py`, `test_msis_delta_v.py`): the
+profile against a direct `pymsis` average built independently, within the log-linear bound
+`|f''| dh^2/8` with `f''` from MSIS itself - and, above 100 km, *equal* to the leading-order term to
+0.95-0.999; the averaged mass density equal to MSIS's own species sum to 5.4e-8 (column and units);
+sea level 1.213 against USSA-76's 1.225; high/low 24x at 400 km; decay against the orbit-averaged
+mean ODE on the profile (moderate 3.2e-4, low 5.9e-4, each against a derived budget). Six source
+mutations each fail 9-19 tests; dropping the version pin fails none, because in `pymsis` 0.13.0 the
+2.1 mass density is bitwise 2.0's - an equivalent mutant, not a gap.
+
+**Not built.** Density as a function of the satellite's own local time and latitude (the diurnal
+bulge) - that needs the Sun's direction and an epoch inside the kernel, and a table in more than one
+dimension; time-varying indices (storms, 27-day rotation); geodetic altitude; MSIS in `reference.py`'s
+truth (truth has no drag, and the Delta-v metric compares configurations, not truth). No compiled twin,
+as for the other laws.
 
 ---
 

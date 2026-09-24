@@ -1281,6 +1281,39 @@ here, halving the step and watching the residual.
 
 ---
 
+## `pymsis`: six things its signature does not tell you
+
+Found while wrapping NRLMSIS 2.0 (`msis_bridge.py`). None raises; each silently changes what you get.
+
+1. **It downloads.** `pymsis.calculate(..., f107s=None, ...)` fetches CelesTrak's space-weather file
+   for the given dates if *any* of `f107s`, `f107as`, `aps` is `None`. The engine never passes
+   `None`: `drag.py` refuses MSIS without all three indices in the same call, and
+   `test_msis.py::test_configuring_msis_never_touches_the_network` patches sockets to prove it.
+2. **Its default version is 2.1, not 2.0.** Pin `version=`. (For *mass density* it is moot in
+   `pymsis` 0.13.0 - 2.1 only adds NO, not part of the total, so the two are bitwise identical there;
+   the version-drop mutant is therefore undetectable. `version=0` is NRLMSISE-00, 1-20 % denser.)
+3. **Inputs and outputs are float32.** Altitudes are packed into a `float32` Fortran array and the
+   output is `float32`: 6e-8 relative on every density. Harmless for drag, but a second difference of
+   `ln rho` at 0.5 km spacing carries ~1e-6 /km^2 of noise, which is the whole curvature above
+   ~800 km - a test that estimates `d^2 ln rho / dh^2` there must keep its equality claims above a
+   floor (`test_msis.py` uses 3e-5 on the interpolation term).
+4. **Grid mode versus fly-through mode is decided by lengths.** If `dates`, `lons`, `lats` and `alts`
+   all have the same length the call is a satellite fly-through `(n, 11)`, otherwise a 5-D grid. A
+   quadrature with, say, 8 of each would silently switch modes; `msis_mean_density` checks the shape.
+5. **Day of year is an integer.** `create_input` truncates the date to a day and puts the remainder
+   into UT seconds. A quadrature node at a fractional day therefore moves the *local time* of every
+   longitude sample. Use whole days at 00:00 UT (`msis_bridge.quadrature_nodes`).
+6. **Output columns are not all populated.** Under 2.0 the NO column is all-NaN, and O/N/anomalous O
+   are NaN below their model floors - `np.nan_to_num` before summing species.
+
+**Also a mistake made while budgeting the MSIS decay test.** The first draft budgeted the low-activity
+satellite's decay residual from RK4's Kepler energy drift alone (1.8e-4) and measured 5.9e-4. The
+missing term was already in this log (the previous entry): RK4's truncation of the *drag* term
+itself, 1.9e-4 of the drag rate at 30 s. With it the budget is 4.8e-4. The fix was to the
+derivation, not to the tolerance.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

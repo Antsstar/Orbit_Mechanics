@@ -119,6 +119,30 @@ within 15 %; and the two satellites' first-orbit decay ratio, 0.1841, matches th
 355 km, 0.1851, to 0.55 % (asserted 1 %: over the first orbit the moderate satellite descends 0.85 km
 and the low one 0.16 km, so on average they sample 0.8 % and 0.2 % more than the starting density -
 a 0.6 % shift of the ratio).
+
+Negative controls
+-----------------
+Each mutation was applied to the real source, this module plus `test_msis_wiring.py` and
+`test_msis_delta_v.py` run (48 tests), and the file restored with `git checkout --`:
+
+- *units slip at the wrap* (`rho * 1e3` in `msis_mean_density`) - **18 fail**: every direct
+  comparison, the species sum, sea level and 400 km, the table envelope, all three decay tests (the
+  orbit re-enters), and every Delta-v test.
+- *wrong output column* (`Variable.N2`, a number density in m^-3) - **19 fail**: the same set plus the
+  solar high/low ratio.
+- *altitude in metres* (`alts * 1e3` into `pymsis`) - **18 fail**.
+- *NRLMSISE-00 instead of 2.0* (`version=0`) - **10 fail**: the direct comparisons, the quadrature
+  budget, the species sum (00 carries its own masses and anomalous-oxygen convention), the discards,
+  and the table/single-band Delta-v predictions. Not the magnitude checks: 00 is only 1-20 % away.
+- *Gauss-Legendre nodes with equal weights* - **10 fail**, the direct comparisons and Delta-v.
+- *MSIS rows dispatched to the table* (`use_msis = selector >= 2.5` in `drag.py`; also running
+  `test_atmosphere.py` and `test_drag.py`, 76 tests) - **9 fail**: the kernel closed form, the three
+  decay tests, the cache-miss test, four Delta-v tests. All of `test_atmosphere.py` and `test_drag.py`
+  pass - the legacy laws share nothing with the MSIS path.
+
+One mutation **cannot** fail, and is recorded as an equivalent mutant rather than a gap: dropping
+`version=MSIS_VERSION` lets `pymsis` default to 2.1, whose mass density is **bitwise identical** to
+2.0's (2.1 adds NO, which is not part of the total) - measured on `pymsis` 0.13.0.
 """
 from __future__ import annotations
 

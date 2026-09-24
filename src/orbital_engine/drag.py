@@ -336,9 +336,10 @@ def drag_kernel(
     # would overflow `exp`) can neither divide by zero nor overflow.
     separated = r2 > 0.0
     selector = coeff[:, _DENSITY_MODEL_COL]
-    use_exponential = selector < 0.5
+    beyond_exponential = selector >= 0.5          # the two-law kernel's `use_layered`, verbatim
+    use_exponential = ~beyond_exponential         # so even a NaN selector keeps its old meaning
     use_msis = selector >= 1.5
-    use_layered = ~use_exponential & ~use_msis
+    use_layered = beyond_exponential & ~use_msis
     density = (                                                                       # kg/m^3
         exponential_density(altitude, coeff[:, _RHO0_COL], coeff[:, _H0_COL], scale_height,
                             separated & use_exponential & (scale_height > 0.0))

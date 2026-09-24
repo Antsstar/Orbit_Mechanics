@@ -11,9 +11,14 @@ NRL Fortran code defined in:
   (2021). **Citation from memory, unverified against the text.**
 
 `pymsis` defaults to MSIS **2.1**; this module pins `version=2.0` (`MSIS_VERSION`) because 2.0 is the
-model asked for and the published one above. The output column is `pymsis.Variable.MASS_DENSITY`
-(index 0, **kg/m^3** - the unit `drag.py`'s single `1e3` conversion already assumes; the other
-columns are number densities in m^-3 and temperature in K). Altitude goes in as **km**.
+model asked for and the published one above. For mass density the pin is currently moot - 2.1 adds
+NO, which is not part of the total, and `pymsis` 0.13.0 returns bitwise the same mass density from
+both - but it keeps the model named rather than inherited from a package default. NRLMSISE-00
+(`version=0`) is 1-20 % denser in the thermosphere (+9 % at 292 km) and would be a different model.
+
+The output column is `pymsis.Variable.MASS_DENSITY` (index 0, **kg/m^3** - the unit `drag.py`'s
+single `1e3` conversion already assumes; the other columns are number densities in m^-3 and
+temperature in K). Altitude goes in as **km**.
 `tests/validation/test_msis.py` pins both without trusting this paragraph: the averaged mass density
 must equal the averaged sum of `n_s m_s` over MSIS's own species columns and masses, which fails by
 orders of magnitude for any other column and by 1e3 for a units slip.
@@ -60,7 +65,8 @@ for constant `(f107, f107a, ap)`:
   points.
 - *local solar time*: 8 longitudes at 00:00 UT, i.e. local times 01:30, 04:30, ..., 22:30. At fixed UT
   longitude and local time are the same coordinate, so this also averages MSIS's longitude terms.
-  Exact: 8 equally spaced samples integrate harmonics up to 7, and MSIS's tides stop at 3.
+  Agrees with 48 samples to 1e-6: MSIS's tides stop at the terdiurnal harmonic, and 8 equally
+  spaced samples integrate everything below harmonic 8 exactly.
 - *day of year*: 24 integer days (MSIS takes an integer day of year), year 2001. Converged to 5e-5
   against 48.
 
@@ -71,20 +77,23 @@ as its spherical `|r| - r_ref` - the same identification `drag.py` already makes
 **Discarded, deliberately**, and measured from MSIS itself (moderate activity, `test_msis.py`):
 
 - *the diurnal bulge*: at 400 km on the equator at equinox, density across local time spans a
-  factor **2.31** (1.68 at 292 km). An orbit whose node is fixed in local time (sun-synchronous) sees
+  factor **2.30** (1.68 at 292 km). An orbit whose node is fixed in local time (sun-synchronous) sees
   one side of it all the time; the profile gives it the mean.
-- *seasons*: the global mean swings by a factor **1.62** over the year at 400 km (1.42 at 292 km),
+- *seasons*: the global mean swings by a factor **1.63** over the year at 400 km (1.44 at 292 km),
   the semi-annual variation. A profile is one number per altitude for the whole year.
-- *latitude*: zonal means within +-4 % of the global mean. A 51.6 deg orbit's latitude sampling
-  differs from area weighting by **+0.2 %**.
+- *latitude*: zonal means within ~4 % of the global mean at 400 km. A 51.6 deg orbit's latitude sampling
+  differs from area weighting by **+0.19 %** at 292 km.
 - *time variation of the indices*: `(f107, f107a, ap)` are constants for the run - no storms, no 27-day
   rotation, no solar-cycle trend. That is exactly what makes solar activity a sweep axis instead of a
   date lookup.
 
-The first two are factors of 1.4 to 2.3 locally, but a satellite in a non-sun-synchronous orbit
-averages over local time and season within days to weeks, which is what a global mean represents. The
-index choice moves the mean by a factor of **24** at 400 km between ECSS low and high activity - far
-larger than anything the average throws away, and the reason this law exists.
+The first two are factors of 1.4 to 2.3 locally. Every revolution of an orbit crosses both day and
+night sides, but *which* local times it samples at which latitudes is set by its plane's local time,
+and only a plane that precesses through all local times (about two months for a non-sun-synchronous
+LEO) sees the global mean on average; a dawn-dusk sun-synchronous orbit never does, and over a few
+days any orbit carries a bias of up to tens of percent that this profile cannot represent. The index
+choice, by contrast, moves the mean by a factor of **24** at 400 km between ECSS low and high activity
+- far larger than anything the average throws away, and the reason this law exists.
 
 Solar-activity presets
 ----------------------
@@ -261,7 +270,7 @@ def _build_profile(f107: float, f107a: float, ap: float) -> MsisProfile:
 def msis_profile(f107: float, f107a: float, ap: float) -> MsisProfile:
     """
     The mean density profile for one solar-activity triple, memoised. **Configuration time only** -
-    on a cache miss this runs `pymsis` (~1 s). `drag.py`'s `validate_coefficients` calls it for every
+    on a cache miss this runs `pymsis` (~1.3 s). `drag.py`'s `validate_coefficients` calls it for every
     triple `enable_force_model` is asked for, so a kernel never meets an unevaluated one.
     """
     key = (float(f107), float(f107a), float(ap))

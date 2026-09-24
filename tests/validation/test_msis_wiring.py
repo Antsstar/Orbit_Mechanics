@@ -113,7 +113,8 @@ def _frozen_two_law_kernel(indices: NDArray[np.int64], state: ArrF, parent_indic
 
 def _legacy_arena(n: int, seed: int) -> tuple[ArrF, NDArray[np.int32], ArrF]:
     """`n` bodies about slot 0: random LEO-to-re-entry states, a root row, and every legacy flavour -
-    single band, table, unwritten selector, `H = 0` no-op, `B = 0` - in the first seven columns."""
+    single band, table, unwritten selector, `H = 0` no-op, `B = 0`, and a NaN selector (reachable only
+    by direct assignment, and still the single band) - in the first seven columns."""
     rng = np.random.default_rng(seed)
     state = np.zeros((n, 6))
     radius = EARTH_R_EQ + rng.uniform(-20.0, 1200.0, n)
@@ -124,7 +125,7 @@ def _legacy_arena(n: int, seed: int) -> tuple[ArrF, NDArray[np.int32], ArrF]:
     state[0] = 0.0                                                  # the parent / root
     parents = np.zeros(n, dtype=np.int32)
     params = np.zeros((n, N_LEGACY_COLUMNS))
-    flavour = np.arange(n) % 5
+    flavour = np.arange(n) % 6
     params[:, 0] = rng.uniform(0.0, 0.1, n)
     params[:, 4] = EARTH_R_EQ
     params[:, 5] = rng.choice([0.0, EARTH_OMEGA, -EARTH_OMEGA], n)
@@ -138,6 +139,8 @@ def _legacy_arena(n: int, seed: int) -> tuple[ArrF, NDArray[np.int32], ArrF]:
     params[flavour == 3, 6] = DENSITY_MODEL_EXPONENTIAL             # H = 0: the silent no-op
     params[flavour == 4, 0] = 0.0                                   # B = 0
     params[flavour == 4, 6] = DENSITY_MODEL_LAYERED
+    params[flavour == 5, 1:4] = [2e-12, 350.0, 55.0]               # a NaN selector, written directly:
+    params[flavour == 5, 6] = np.nan                                # the two-law kernel read it as 0.0
     return state, parents, params
 
 
