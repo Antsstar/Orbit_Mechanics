@@ -2,7 +2,7 @@
 name: numerics-debug
 description: Investigates numerically wrong-but-plausible results - trajectories that look reasonable and are not, energy that drifts when it should not, an integrator that misses its convergence order. Use for ambiguous root-cause work where the symptom is known but the cause is not. Investigates and reports; does not refactor.
 tools: Read, Grep, Glob, Bash, Edit
-model: claude-fable-5-1
+model: claude-opus-5-5
 effort: high
 ---
 

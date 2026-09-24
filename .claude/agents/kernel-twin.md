@@ -2,8 +2,8 @@
 name: kernel-twin
 description: Adds a compiled scalar twin in kernels.py for an existing NumPy reference implementation, together with its equivalence test, negative control, and benchmark entry. Use when a readable reference already exists and is known-correct, and the only goal is to make it fast without changing what it computes. Not for writing new physics.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: claude-opus-5
-effort: high
+model: claude-opus-5-5
+effort: medium
 ---
 
 You write compiled twins for OrbitalEngine's hot paths.

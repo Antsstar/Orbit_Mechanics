@@ -3,7 +3,7 @@ name: validation-harness
 description: Builds and extends the validation infrastructure - invariant tests (energy, momentum, reversibility, closure), convergence-order harnesses, reference comparisons, and benchmark metrics. Use for test and harness work where the pattern is established and the physics is already known-good.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: claude-sonnet-5
-effort: high
+effort: medium
 ---
 
 You build the validation infrastructure for OrbitalEngine.

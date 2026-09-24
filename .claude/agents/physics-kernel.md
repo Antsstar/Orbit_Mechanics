@@ -2,7 +2,7 @@
 name: physics-kernel
 description: Implements a single, bounded physics model or propagator kernel from a literature citation - force models (J2, drag, SRP, third-body, thrust), integrators, or propagators. Use when the task is well-specified and the reference is known. Not for open-ended investigation.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: claude-opus-5
+model: claude-opus-5-5
 effort: high
 ---
 

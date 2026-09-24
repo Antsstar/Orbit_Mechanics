@@ -2,7 +2,7 @@
 name: force-model-architect
 description: Designs and lands the force-model composition layer - the interface by which perturbations are enabled as data rather than code paths, the acceleration accumulation contract, and the integrator protocol that consumes it. Use for the architectural core of the force-model phase, not for individual force models.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: claude-fable-5-1
+model: claude-opus-5-5
 effort: high
 ---
 
