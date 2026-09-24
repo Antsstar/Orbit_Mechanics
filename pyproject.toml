@@ -35,6 +35,12 @@ reference = [
 sgp4 = [
     "sgp4>=2.20"
 ]
+# NRLMSIS 2.0 atmospheric density (msis_bridge.py, drag's DENSITY_MODEL_MSIS). Wrapped, never
+# reimplemented; imported lazily and evaluated only at configuration time, so the engine imports and
+# runs without it. Written against the `calculate(..., version=)` API; developed on 0.13.0.
+msis = [
+    "pymsis>=0.10"
+]
 test = [
     "pytest",
     "pytest-cov",  # Helpful for seeing which lines of code aren't tested yet
@@ -42,7 +48,8 @@ test = [
     "pandas-stubs",
     "numba>=0.60",  # Included so CI gates the compiled path, not only the fallback.
     "scipy>=1.10",  # Needed by tests/validation/test_reference_agreement.py.
-    "sgp4>=2.20"    # Needed by tests/validation/test_sgp4_bridge.py (Vallado's published vectors).
+    "sgp4>=2.20",   # Needed by tests/validation/test_sgp4_bridge.py (Vallado's published vectors).
+    "pymsis>=0.10"  # Needed by tests/validation/test_msis*.py (NRLMSIS 2.0 density).
 ]
 dev = [
     "ipykernel",
@@ -63,6 +70,12 @@ ignore_missing_imports = true
 # and treats its objects as `Any` at that one boundary.
 [[tool.mypy.overrides]]
 module = ["sgp4.*"]
+ignore_missing_imports = true
+
+# pymsis ships no py.typed marker; msis_bridge.py is the only module that imports it, lazily, and
+# treats it as `Any` at that one boundary.
+[[tool.mypy.overrides]]
+module = ["pymsis", "pymsis.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

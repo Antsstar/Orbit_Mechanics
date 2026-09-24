@@ -520,7 +520,7 @@ def test_closed_form_layered_acceleration_matches_a_hand_computed_si_value() -> 
     state[1, :3] = _CF_R_KM
     state[1, 3:] = _CF_V
     params = np.zeros((2, len(DRAG_PARAM_NAMES)))
-    params[1] = [_CF_B, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_LAYERED]
+    params[1, :7] = [_CF_B, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_LAYERED]
     out = np.zeros((2, 3))
     with np.errstate(all="raise"):
         drag.drag_kernel(np.array([1], dtype=np.int64), 0.0, state, np.array([MU, 0.0]),
@@ -547,10 +547,10 @@ def test_the_selector_dispatches_per_body_and_an_unwritten_row_stays_on_the_sing
     state[1:, :3] = [EARTH_R_EQ + 400.0, 0.0, 0.0]
     state[1:, 3:] = [0.0, 7.0, 0.0]
     params = np.zeros((5, len(DRAG_PARAM_NAMES)))
-    params[1] = [0.02, 1e-12, 400.0, 60.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_EXPONENTIAL]
-    params[2] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_LAYERED]
-    params[3] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_EXPONENTIAL]  # H = 0: no-op
-    params[4] = [0.02, 1e-12, 400.0, 60.0, EARTH_R_EQ, 0.0, 0.0]                   # unwritten selector
+    params[1, :7] = [0.02, 1e-12, 400.0, 60.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_EXPONENTIAL]
+    params[2, :7] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_LAYERED]
+    params[3, :7] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_EXPONENTIAL]  # H = 0: no-op
+    params[4, :7] = [0.02, 1e-12, 400.0, 60.0, EARTH_R_EQ, 0.0, 0.0]                   # unwritten selector
     parents = np.array([0, 0, 0, 0, 0], dtype=np.int32)
     out = np.zeros((5, 3))
     with np.errstate(all="raise"):
@@ -567,15 +567,15 @@ def test_the_selector_dispatches_per_body_and_an_unwritten_row_stays_on_the_sing
 
 
 def test_enable_force_model_rejects_an_unknown_density_law() -> None:
-    """`validate_coefficients` refuses anything but the two selectors, before any bit or coefficient
-    is written. Without it, `density_model=2.0` would silently pick the layered law - a config typo
-    that changes the physics and raises nothing."""
+    """`validate_coefficients` refuses anything but the known selectors, before any bit or coefficient
+    is written. Without it, `density_model=3.0` would silently pick the nearest law (MSIS, since 2.0
+    was taken by it) - a config typo that changes the physics and raises nothing."""
     sim = scenarios.earth_constellation(_session(), n_sats=2, n_planes=2)
     sats = _sat_slots(sim)
     mask_before = sim.force_model_mask.copy()
 
     with pytest.raises(ValueError, match="density_model"):
-        sim.enable_force_model(DRAG_MODEL, sats, density_model=2.0, **_COMMON_COEFFS)
+        sim.enable_force_model(DRAG_MODEL, sats, density_model=3.0, **_COMMON_COEFFS)
     assert np.array_equal(sim.force_model_mask, mask_before)
     assert DRAG_MODEL not in sim.force_model_params
 
@@ -638,7 +638,7 @@ def test_a_model_config_can_select_the_density_law_as_plain_sweep_data(
 
 def test_drags_citation_and_parameter_layout_carry_the_density_law() -> None:
     model = registry.get_force_model(DRAG_MODEL)
-    assert model.param_names[-1] == "density_model"
+    assert model.param_names[6] == "density_model"
     assert model.validate_coefficients is not None
     assert "Table 8-4" in model.citation
     assert atmosphere.DENSITY_MODEL_EXPONENTIAL == 0.0, "the all-zero default must be the old law"
@@ -735,8 +735,8 @@ def test_a_co_rotating_layered_atmosphere_still_scales_drag_by_the_corotation_fa
     state[1:, :3] = [r, 0.0, 0.0]
     state[1:, 3:] = [0.0, v, 0.0]
     params = np.zeros((3, len(DRAG_PARAM_NAMES)))
-    params[1] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_LAYERED]
-    params[2] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, EARTH_OMEGA, DENSITY_MODEL_LAYERED]
+    params[1, :7] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_LAYERED]
+    params[2, :7] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, EARTH_OMEGA, DENSITY_MODEL_LAYERED]
     out = np.zeros((3, 3))
     drag.drag_kernel(np.array([1, 2], dtype=np.int64), 0.0, state, np.zeros(3),
                      np.array([0, 0, 0], dtype=np.int32), params, out)
