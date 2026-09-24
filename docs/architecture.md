@@ -314,14 +314,15 @@ Both restrictions above (mass and kinematic role) are also documented restrictio
 accidents.
 
 **The compiled twin is fused, not composed.** `kernels.cowell_rk4_step` is the second-implementation
-half of this propagator: one scalar loop per body doing all four RK4 stages with `point_mass_gravity`
-and `j2` inlined (`kernels._cowell_accel`, each term's arithmetic in the same order as its NumPy
-kernel), selected by `use_compiled_kernel` exactly like the Keplerian and secular twins. It cannot
+half of this propagator: one scalar loop per body doing all four RK4 stages with `point_mass_gravity`,
+`j2` and `zonal` (J3..J6) inlined (`kernels._cowell_accel`, each term's arithmetic in the same order
+as its NumPy kernel, and the terms added in registration order, as `compose_accelerations` adds
+them), selected by `use_compiled_kernel` exactly like the Keplerian and secular twins. It cannot
 call `forces.compose_accelerations` - numba does not dispatch over a list of Python callables - so
 instead of a general compiled composition layer it hard-codes the one combination the fidelity sweep
-runs, with per-body flags so a mixed arena (some satellites with J2, some without) still qualifies.
-`Simulation._refresh_cowell_plan` decides at configuration time, from the mask alone, whether every
-Cowell body's models are a subset of those two and no Cowell body is parented by another Cowell body
+runs, with per-body flags so a mixed arena (some satellites with J2, some with J2..J6, some without)
+still qualifies. `Simulation._refresh_cowell_plan` decides at configuration time, from the mask alone,
+whether every Cowell body's models are a subset of those three and no Cowell body is parented by another Cowell body
 (the kernel reads a parent's row as fixed across the stages, where `RK4Integrator` would see its stage
 candidates); if not, the whole Cowell set runs the NumPy path. The plan is rebuilt by both
 `_refresh_active_indices` and `resolve_force_models`, so it tracks `set_propagator` and
@@ -1256,7 +1257,7 @@ which +0.39 % is the osculating-versus-mean semi-major axis of the seed. J4's se
 (+0.97 %, of which +0.50 % is mean `a`; the rest is J2 x J4 cross terms at the estimated size).
 
 **The headline.** 12 satellites, 550 km / 53 deg, 24 h, three stations, 5 deg mask, 189 passes, truth
-with J2..J6 (`python benchmarks/zonal_sweep.py`, ~30 s):
+with J2..J6 (`python benchmarks/zonal_sweep.py`, ~11 s):
 
 | Tier | median km | max km | mean \|rise\| | max \|rise\| | lost / gained | total contact |
 |---|---|---|---|---|---|---|
@@ -1283,12 +1284,33 @@ shift. So:
   figures measured against J2-only truth (1.88 km, 0.063 / 0.223 s), as it should: the zonal model
   removes the model error and leaves the truncation.
 
-**Cost, and why it is not on the frontier plot yet.** A Cowell body carrying `"zonal"` is foreign to
-the fused compiled plan, so the whole Cowell set runs the NumPy `RK4Integrator`: 5.4 s for the 15 s
-tier against 0.041 s for the fused `j2`-only tier, 130x, which is implementation, not physics. The
-compiled twin (the term added to `kernels._cowell_accel` and the plan's accepted-bit set) is the
-`kernel-twin` follow-up; until it lands, Cowell + zonal wall times are not comparable with the fused
-tiers.
+**Cost.** The zonal term is fused into the compiled Cowell step (`kernels._cowell_accel`, per-body
+`has_zonal` flag, the same two Legendre recursions as `zonal.zonal_kernel` in the same order), so a
+Cowell + j2 + zonal configuration stays on the compiled path and its wall time is comparable with the
+other fused tiers. Held equivalent to the NumPy path in `tests/validation/test_kernel_equivalence.py`:
+the term alone to 4.1e-14 of its scale (bound 1e-12; a relative-1e-9 change to J3 reads 3.6e-9), and
+the Cowell state to 1.6e-14 elementwise at 50 steps and 1.4e-13 by norm over 5.2 orbits.
+
+Estimated before measuring, by counting: the zonal block is ~100 flops per evaluation against ~46 for
+point mass + J2, but its cost is a serial chain of six dependent divisions (the `/ n` of Bonnet's
+recursion, which cannot become a reciprocal multiply without changing the rounding the equivalence
+test holds), ~150 cycles of latency - so ~2-3x the fused `j2` kernel's per-body cost, and ~1.3x its
+whole-step cost at 12 satellites, where fixed per-step overhead dominates. Measured
+(`benchmarks/bench_step.py`, Cowell section): marginal kernel cost 0.206 us per body-step against
+0.113 for `j2` (1.8x; the chain overlaps better than the latency count assumed), and whole-step 7.9 us
+against 6.8 us at 12 satellites (1.16x), 18.4 against 12.8 at 60 (1.44x). In the sweep above, 24 h:
+
+| Tier | wall, fused | NumPy path (before the twin) |
+|---|---|---|
+| Cowell + j2, 60 s | 0.010 s | - |
+| Cowell + j2 + zonal, 60 s | 0.012 s | 1.25 s |
+| Cowell + j2, 15 s | 0.040-0.044 s | - |
+| Cowell + j2 + zonal, 15 s | 0.047-0.048 s | 4.9-5.4 s |
+
+J3..J6 now cost **1.10-1.17x** the `j2`-only tier at the same step, down from ~120x (130x as first
+recorded) - the remaining difference is physics, not implementation. A zonal body that also carries
+a model outside the fused set (`drag`, `srp`, `third_body`, `thrust`) still sends the whole Cowell set
+down the NumPy path.
 
 ---
 
@@ -1377,9 +1399,9 @@ optionally record.
 
 ## Deliberately not built
 
-- **A compiled force-composition layer.** Cowell's compiled twin is fused for `point_mass_gravity` +
-  `j2` only (see the Cowell section); `forces.compose_accelerations` and any other model stay NumPy,
-  and a Cowell body carrying one falls back to `RK4Integrator`. A general compiled dispatcher would
+- **A compiled force-composition layer.** Cowell's compiled twin is fused for `point_mass_gravity`,
+  `j2` and `zonal` only (see the Cowell section); `forces.compose_accelerations` and any other model
+  stay NumPy, and a Cowell body carrying one falls back to `RK4Integrator`. A general compiled dispatcher would
   need force models to be registered as compiled callables, which no model yet asks for.
 - **Massive Cowell bodies, N-body forces, and perturbers advanced per stage.** Massive Cowell bodies
   are rejected and N-body forces are unregistered; see the Cowell section above for why each needs

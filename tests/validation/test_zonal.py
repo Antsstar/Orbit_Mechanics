@@ -6,7 +6,7 @@ Every tolerance is a named constant derived in the comment above it *before* mea
 value is quoted next to it. The checks, in order:
 
 0. Registration, constants (EGM96 J2 from the same table reproduces `geopotential.EARTH_J2`),
-   refusals, exact-zero behaviour, and the fused-plan fallback.
+   refusals, exact-zero behaviour, and fused-plan membership.
 a. Field, two derivations: the kernel (Legendre recursions, projected on r_hat / z_hat) against
    `reference.zonal_field` (explicit polynomials, monomial-by-monomial Cartesian gradient), per degree
    and summed.
