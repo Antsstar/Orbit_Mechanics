@@ -434,8 +434,14 @@ def secular_j2_propagate(
 
 
 # ==================================================================================================
-# Cowell: RK4 with point-mass gravity and J2, fused
+# Cowell: RK4 with point-mass gravity, J2 and J3..J6, fused
 # ==================================================================================================
+
+# Highest zonal degree `zonal.zonal_kernel` evaluates (`zonal.ZONAL_DEGREES[-1]`). Restated rather than
+# imported so this module stays free of force-model imports; `zonal_params` columns are
+# `(r_eq, j3, j4, j5, j6)`, `J_n` in column `n - 2`, exactly `zonal.ZONAL_PARAM_NAMES`.
+_ZONAL_MAX_DEGREE = 6
+
 
 @njit
 def _cowell_accel(
@@ -443,13 +449,24 @@ def _cowell_accel(
     cx: float, cy: float, cz: float,
     mu_total: float, mu_par: float,
     has_point_mass: bool, has_j2: bool, j2: float, r_eq: float,
+    has_zonal: bool, zonal_params: NDArray[np.float64], row: int,
 ) -> tuple[float, float, float]:
     """
     Acceleration on one body at candidate position `(cx, cy, cz)` with its parent at `(px, py, pz)`:
-    the sum `forces.compose_accelerations` would build from `gravity.point_mass_gravity_kernel` and
-    `geopotential.j2_kernel`, with each term's arithmetic written in the same order as its NumPy
-    reference so the two agree to rounding. Composition order is irrelevant for two terms (IEEE
-    addition is commutative), and a disabled term contributes exactly `0.0`, as an absent model does.
+    the sum `forces.compose_accelerations` would build from `gravity.point_mass_gravity_kernel`,
+    `geopotential.j2_kernel` and `zonal.zonal_kernel`, with each term's arithmetic written in the same
+    order as its NumPy reference so the two agree to rounding. A disabled term contributes exactly
+    `0.0`, as an absent model does.
+
+    **Composition order matters with three terms.** IEEE addition is commutative but not associative,
+    so `(pm + j2) + zonal` and `pm + (j2 + zonal)` may differ in the last bit. The terms are added here
+    in registration order - `point_mass_gravity`, `j2`, `zonal` - which is the order
+    `forces.resolve_force_models` walks `registry.all_force_models()` and therefore the order
+    `compose_accelerations` accumulates them into `out`. Were the registration order ever different,
+    the two would differ by an ulp of the sum per evaluation, still far inside the 1e-12 bound.
+
+    `zonal_params[row]` is read only behind `has_zonal`, so a one-row dummy is safe when no body has
+    the zonal bit - the same convention as `j2_params` in `cowell_rk4_step`.
     """
     ax = 0.0
     ay = 0.0
@@ -482,6 +499,46 @@ def _cowell_accel(
             ay += k * y * (five_s2 - 1.0)
             az += k * z * (five_s2 - 3.0)
 
+    if has_zonal:
+        # zonal J3..J6: equation (Z) of zonal.py, the same two Legendre recursions in the same order
+        # as `zonal.zonal_kernel`, one scalar at a time. rel points from the primary to the body; mu is
+        # the parent's alone. The reference's zero-separation row adds an exact 0.0 through inv_r = 0;
+        # here the guard skips it, which adds nothing either.
+        x = cx - px
+        y = cy - py
+        z = cz - pz
+        r2 = x * x + y * y + z * z
+        if r2 > 0.0:
+            inv_r2 = 1.0 / r2
+            inv_r = math.sqrt(inv_r2)
+            s = z * inv_r
+            rho = zonal_params[row, 0] * inv_r                           # R / r
+
+            p_prev = 1.0              # P_0
+            p_curr = s                # P_1
+            dp_curr = 1.0             # P_1'
+            rho_n = rho               # (R/r)^1
+            radial = 0.0
+            axial = 0.0
+            for n in range(2, _ZONAL_MAX_DEGREE + 2):
+                p_next = ((2 * n - 1) * s * p_curr - (n - 1) * p_prev) / n      # P_n
+                dp_next = n * p_curr + s * dp_curr                              # P_n'
+                # dp_next is P_n': the radial term of degree n - 1 and the axial term of degree n.
+                # J_m sits in column m - 2.
+                if n >= 4:
+                    radial += zonal_params[row, n - 3] * rho_n * dp_next
+                rho_n = rho_n * rho                                             # (R/r)^n
+                if 3 <= n <= _ZONAL_MAX_DEGREE:
+                    axial += zonal_params[row, n - 2] * rho_n * dp_next
+                p_prev = p_curr
+                p_curr = p_next
+                dp_curr = dp_next
+
+            k = mu_par * inv_r2                                                 # mu / r^2
+            ax += k * radial * x * inv_r
+            ay += k * radial * y * inv_r
+            az += k * (radial * s - axial)
+
     return ax, ay, az
 
 
@@ -495,11 +552,13 @@ def cowell_rk4_step(
     has_point_mass: NDArray[np.bool_],
     has_j2: NDArray[np.bool_],
     j2_params: NDArray[np.float64],
+    has_zonal: NDArray[np.bool_],
+    zonal_params: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> None:
     """
     One classical RK4 step of every body in `indices`, integrated relative to its `parent_indices`
-    parent under `point_mass_gravity` and/or `j2` - the compiled twin of `integrators.RK4Integrator
+    parent under any subset of `point_mass_gravity`, `j2` and `zonal` - the compiled twin of `integrators.RK4Integrator
     .step` driving `Simulation.accelerations` with exactly those models, fused with the subtraction
     `Simulation.step` performs afterwards. Held equivalent to that pair at 1e-12 relative by
     `tests/validation/test_kernel_equivalence.py`.
@@ -507,8 +566,8 @@ def cowell_rk4_step(
     **Why fused rather than dispatched.** The NumPy path composes an arbitrary list of Python force
     kernels; numba cannot call into that list. This kernel therefore hard-codes the one combination
     the fidelity sweep runs (`_cowell_accel`), and `Simulation._refresh_cowell_plan` selects it only
-    when every Cowell body's mask is a subset of `{point_mass_gravity, j2}` - any other model falls
-    back to the NumPy path, so the fallback is data (`Simulation._cowell_fused_ok`), not a branch on
+    when every Cowell body's mask is a subset of `{point_mass_gravity, j2, zonal}` - any other model
+    falls back to the NumPy path, so the fallback is data (`Simulation._cowell_fused_ok`), not a branch on
     a model name inside the step.
 
     **What it writes.** `state[s]` is left holding `state[parent] + relative_result`, exactly as
@@ -520,10 +579,11 @@ def cowell_rk4_step(
     too close to the equivalence bound to leave to chance. `state[parent]` is read and never written,
     so a Cowell body whose parent is itself in `indices` is excluded by the caller's plan.
 
-    Per-body flags rather than one global pair so a mixed arena - some satellites with J2, some
-    without - stays on the compiled path. `j2_params` is `force_model_params["j2"]` when any body has
-    the J2 bit, and a one-row dummy otherwise; a row is only ever read behind its body's `has_j2`.
-    `t` is not a parameter: neither model depends on time. Scalar stage values live in registers, so
+    Per-body flags rather than one global set so a mixed arena - some satellites with J2, some
+    without, some with J3..J6 - stays on the compiled path. `j2_params` is `force_model_params["j2"]`
+    when any body has the J2 bit, and a one-row dummy otherwise; a row is only ever read behind its
+    body's `has_j2`. `zonal_params` / `has_zonal` follow the same convention for
+    `force_model_params["zonal"]`. `t` is not a parameter: no fused model depends on time. Scalar stage values live in registers, so
     unlike `RK4Integrator` this needs no stage scratch and allocates nothing.
     """
     half_dt = 0.5 * dt
@@ -535,6 +595,7 @@ def cowell_rk4_step(
         par = parent_indices[s]
         pm = has_point_mass[s]
         jj = has_j2[s]
+        zz = has_zonal[s]
         mu_par = mu_array[par]
         mu_total = mu_array[s] + mu_par
         j2 = 0.0
@@ -561,7 +622,8 @@ def cowell_rk4_step(
         v0y = state[s, 4] - pvy
         v0z = state[s, 5] - pvz
 
-        a1x, a1y, a1z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        a1x, a1y, a1z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq,
+                                    zz, zonal_params, s)
         v1x = v0x + half_dt * a1x
         v1y = v0y + half_dt * a1y
         v1z = v0z + half_dt * a1z
@@ -570,7 +632,8 @@ def cowell_rk4_step(
         cx = px + (r0x + half_dt * v0x)
         cy = py + (r0y + half_dt * v0y)
         cz = pz + (r0z + half_dt * v0z)
-        a2x, a2y, a2z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        a2x, a2y, a2z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq,
+                                    zz, zonal_params, s)
         v2x = v0x + half_dt * a2x
         v2y = v0y + half_dt * a2y
         v2z = v0z + half_dt * a2z
@@ -579,7 +642,8 @@ def cowell_rk4_step(
         cx = px + (r0x + half_dt * v1x)
         cy = py + (r0y + half_dt * v1y)
         cz = pz + (r0z + half_dt * v1z)
-        a3x, a3y, a3z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        a3x, a3y, a3z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq,
+                                    zz, zonal_params, s)
         v3x = v0x + dt * a3x
         v3y = v0y + dt * a3y
         v3z = v0z + dt * a3z
@@ -588,7 +652,8 @@ def cowell_rk4_step(
         cx = px + (r0x + dt * v2x)
         cy = py + (r0y + dt * v2y)
         cz = pz + (r0z + dt * v2z)
-        a4x, a4y, a4z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        a4x, a4y, a4z = _cowell_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq,
+                                    zz, zonal_params, s)
 
         # Weighted combination on the relative state, then back onto the parent's start-of-step row.
         rnx = r0x + sixth_dt * (v0x + 2.0 * v1x + 2.0 * v2x + v3x)
