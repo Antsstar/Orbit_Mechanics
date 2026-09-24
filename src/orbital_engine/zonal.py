@@ -91,11 +91,13 @@ effective row - passed values over already-stored ones - carries any non-zero `J
 every term is multiplied by `0^n` and the model silently contributes nothing, with `r_eq < 0` the odd
 degrees silently flip sign.
 
-**Not in the fused compiled Cowell plan.** `kernels.cowell_rk4_step` fuses only `point_mass_gravity`
-and `j2`, so a Cowell body carrying `"zonal"` sends the whole Cowell set down the NumPy
-`RK4Integrator` path (`Simulation._cowell_fused_ok` is `False` - asserted in the tests). A compiled
-twin of this kernel is the `kernel-twin` follow-up; until it exists, **Cowell + zonal wall times are not
-comparable with the fused tiers'**, and a sweep's timing column will overstate what J3..J6 cost.
+**In the fused compiled Cowell plan.** `kernels.cowell_rk4_step` fuses this term with
+`point_mass_gravity` and `j2` (`kernels._cowell_accel`, per-body `has_zonal` flag, the same recursions
+in the same order), so a Cowell body whose models are a subset of those three stays on the compiled
+path and its wall time is comparable with the other fused tiers. This function is the reference: the
+twin is held to it in `tests/validation/test_kernel_equivalence.py`, and a change here must be made
+there too. A zonal body that also carries any other model still sends the whole Cowell set down the
+NumPy `RK4Integrator` path.
 """
 from __future__ import annotations
 

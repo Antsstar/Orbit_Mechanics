@@ -24,6 +24,7 @@ from . import frames as fr
 from . import forces
 from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a force model (gravity.py)
 from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
+from . import zonal  # registers "zonal"; ZONAL_MODEL is in the fused Cowell plan below
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
@@ -217,9 +218,10 @@ class Simulation:
 
         # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
         # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
-        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity` and `j2` only,
-        # so `_cowell_fused_ok` records whether the current masks let `step()` use it; any other
-        # model on a Cowell body sends the whole Cowell set down the NumPy `RK4Integrator` path.
+        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2` and
+        # `zonal` only, so `_cowell_fused_ok` records whether the current masks let `step()` use it;
+        # any other model on a Cowell body sends the whole Cowell set down the NumPy `RK4Integrator`
+        # path.
         # `_cowell_rel` is the per-step parent-relative result both paths hand to the re-base in
         # `step()`, the same role `_secular_j2_rel` plays for that propagator.
         self._cowell_primaries: NDArray[np.int32] = np.empty(0, dtype=np.int32)
@@ -232,6 +234,9 @@ class Simulation:
         self._cowell_has_j2 = np.zeros(max_capacity, dtype=np.bool_)
         self._no_j2_params = np.zeros((1, len(geopotential.J2_PARAM_NAMES)), dtype=np.float64)
         self._cowell_j2_params: NDArray[np.float64] = self._no_j2_params
+        self._cowell_has_zonal = np.zeros(max_capacity, dtype=np.bool_)
+        self._no_zonal_params = np.zeros((1, len(zonal.ZONAL_PARAM_NAMES)), dtype=np.float64)
+        self._cowell_zonal_params: NDArray[np.float64] = self._no_zonal_params
         self._cowell_fused_ok: bool = False
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
@@ -430,35 +435,40 @@ class Simulation:
         """
         Decide, from data, whether `step()` may run the Cowell set through the fused compiled kernel.
 
-        `kernels.cowell_rk4_step` hard-codes `point_mass_gravity` and `j2` (numba cannot dispatch
-        over the Python kernel list `forces.compose_accelerations` walks), with per-body flags so a
-        mixed arena - some Cowell bodies with J2, some without, some with neither - still qualifies.
-        Two conditions disqualify the whole set, and the fallback is then the NumPy path for every
-        Cowell body, not a per-body split: any Cowell body carrying a bit outside those two models,
-        and any Cowell body whose parent is itself Cowell (the kernel reads a parent's row as fixed
+        `kernels.cowell_rk4_step` hard-codes `point_mass_gravity`, `j2` and `zonal` (J3..J6) - numba
+        cannot dispatch over the Python kernel list `forces.compose_accelerations` walks - with
+        per-body flags so a mixed arena - some Cowell bodies with J2, some with J2..J6, some with
+        neither - still qualifies. Two conditions disqualify the whole set, and the fallback is then
+        the NumPy path for every Cowell body, not a per-body split: any Cowell body carrying a bit
+        outside those three models (`drag`, `srp`, `third_body`, `thrust`, the test fixtures), and
+        any Cowell body whose parent is itself Cowell (the kernel reads a parent's row as fixed
         across the four stages; `RK4Integrator` would see the parent's stage candidates instead).
 
         Cached here, at configuration time, for the same reason `_force_dispatch_idx` is: the step
         must not pay a NumPy reduction over the mask to discover a configuration that only changes
         when `set_propagator`, `enable_force_model` or `resolve_force_models` is called. The
-        `"j2"` coefficient array is bound here too, since `forces.resolve_force_models` allocates it
-        lazily; a one-row dummy stands in until it exists, and the kernel only reads a row behind
-        that body's `has_j2` flag.
+        `"j2"` and `"zonal"` coefficient arrays are bound here too, since
+        `forces.resolve_force_models` allocates them lazily; a one-row dummy stands in until each
+        exists, and the kernel only reads a row behind that body's `has_j2` / `has_zonal` flag.
         """
         idx = self._cowell_idx
         self._cowell_primaries = self.parent_indices[idx]
 
         pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
         j2_bit = np.uint64(1) << np.uint64(get_force_model(geopotential.J2_MODEL).bit)
+        zonal_bit = np.uint64(1) << np.uint64(get_force_model(zonal.ZONAL_MODEL).bit)
         np.not_equal(self.force_model_mask & pm_bit, np.uint64(0), out=self._cowell_has_point_mass)
         np.not_equal(self.force_model_mask & j2_bit, np.uint64(0), out=self._cowell_has_j2)
+        np.not_equal(self.force_model_mask & zonal_bit, np.uint64(0), out=self._cowell_has_zonal)
 
-        foreign = (self.force_model_mask[idx] & ~(pm_bit | j2_bit)) != np.uint64(0)
+        foreign = (self.force_model_mask[idx] & ~(pm_bit | j2_bit | zonal_bit)) != np.uint64(0)
         parent_is_cowell = np.isin(self._cowell_primaries, idx)
         self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
 
         j2_params = self.force_model_params.get(geopotential.J2_MODEL)
         self._cowell_j2_params = self._no_j2_params if j2_params is None else j2_params
+        zonal_params = self.force_model_params.get(zonal.ZONAL_MODEL)
+        self._cowell_zonal_params = self._no_zonal_params if zonal_params is None else zonal_params
 
     def enable_force_model(
         self,
@@ -1075,7 +1085,7 @@ class Simulation:
                 cowell_rk4_step(
                     float(dt), self.global_states, self.mu_array, self.parent_indices, cowell_idx,
                     self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
-                    self._cowell_rel,
+                    self._cowell_has_zonal, self._cowell_zonal_params, self._cowell_rel,
                 )
             else:
                 parent_state_at_start = self.global_states[self._cowell_primaries].copy()

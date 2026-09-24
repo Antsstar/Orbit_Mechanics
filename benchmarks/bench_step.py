@@ -5,10 +5,12 @@ Run with:
 
     <env>/python.exe benchmarks/bench_step.py
 
-Reports four things, because they answer four different questions:
+Reports five things, because they answer five different questions:
 
 1. **Reference against compiled kernel** - the headline. Both compute the same thing, to within the
    tolerance asserted in `tests/validation/test_kernel_equivalence.py`, so the ratio is pure cost.
+   Keplerian propagation, then the fused Cowell RK4 step per force-model set (point mass, + j2,
+   + J3..J6 zonal), with the full `step()` cost alongside so the kernel's share is visible.
 2. **Cost per step by scenario** - what a performance regression would show up in.
 3. **Cost per step against body count** - separates per-body cost from fixed per-step overhead. A
    flat line means the engine is dispatch-bound rather than arithmetic-bound.
@@ -30,9 +32,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from orbital_engine import kernels, scenarios
+from orbital_engine import geopotential, kernels, scenarios, zonal
 from orbital_engine.benchmark import measure
+from orbital_engine.custom_types import PropagatorType
 from orbital_engine.database import Base
+from orbital_engine.integrators import RK4Integrator
 from orbital_engine.propagators import KeplerianPropagator
 from orbital_engine.simulator import Simulation
 
@@ -100,6 +104,61 @@ def bench_propagators() -> None:
         print(f"{name:<20}{slots:>7}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x{ker / slots:>10.3f}")
 
 
+COWELL_DT = 60.0
+
+# Cowell force-model sets the fused kernel implements, cheapest first. "zonal" is J3..J6 on top of j2.
+COWELL_MODEL_SETS: list[tuple[str, tuple[str, ...]]] = [
+    ("pm", ("point_mass_gravity",)),
+    ("pm+j2", ("point_mass_gravity", "j2")),
+    ("pm+j2+zonal", ("point_mass_gravity", "j2", "zonal")),
+]
+
+
+def build_cowell(n_sats: int, models: tuple[str, ...]) -> tuple[Simulation, np.ndarray]:
+    """`n_sats` Cowell satellites at 550 km / 53 deg carrying `models`, EGM96 coefficients."""
+    sim = build(lambda s: scenarios.earth_constellation(s, n_sats=n_sats, n_planes=6))
+    sats = np.asarray(
+        [i for n, i in sim.name_to_index.items() if n.startswith("SAT-")], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    coefficients: dict[str, dict[str, float]] = {
+        "point_mass_gravity": {},
+        "j2": {"j2": geopotential.EARTH_J2, "r_eq": geopotential.EARTH_R_EQ},
+        "zonal": {"r_eq": geopotential.EARTH_R_EQ, **zonal.EARTH_ZONALS},
+    }
+    for model in models:
+        sim.enable_force_model(model, sats.tolist(), **coefficients[model])
+    return sim, sats
+
+
+def bench_cowell() -> None:
+    rule("Cowell RK4 step: NumPy RK4Integrator against fused kernels.cowell_rk4_step")
+    print(f"{'models':<14}{'sats':>6}{'reference':>12}{'kernel':>10}{'speedup':>10}{'us/body':>10}"
+          f"{'full step':>11}")
+
+    for n_sats in (12, 60):
+        for label, models in COWELL_MODEL_SETS:
+            sim, sats = build_cowell(n_sats, models)
+            assert sim._cowell_fused_ok, f"{label} must qualify for the fused kernel"
+            primaries = sim.parent_indices[sats]
+            integrator = RK4Integrator(sim.max_capacity)
+
+            def reference() -> None:
+                integrator.step(sim.accelerations, sim.t, sim.global_states, COWELL_DT, sats, primaries)
+
+            def kernel() -> None:
+                kernels.cowell_rk4_step(
+                    COWELL_DT, sim.global_states, sim.mu_array, sim.parent_indices, sats,
+                    sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
+                    sim._cowell_has_zonal, sim._cowell_zonal_params, sim._cowell_rel,
+                )
+
+            ref = measure(reference, inner=50).best
+            ker = measure(kernel, inner=200).best
+            full = measure(lambda: sim.step(COWELL_DT), inner=50).best
+            print(f"{label:<14}{n_sats:>6}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x"
+                  f"{ker / n_sats:>10.3f}{full:>10.1f}u")
+
+
 def bench_scenarios() -> None:
     rule("Full step by scenario")
     print(f"{'scenario':<20}{'slots':>7}{'tiers':>7}{'us/step':>10}{'noise':>9}")
@@ -149,6 +208,7 @@ def bench_components() -> None:
 def main() -> int:
     print(f"numba available: {kernels.NUMBA_AVAILABLE}")
     bench_propagators()
+    bench_cowell()
     bench_scenarios()
     bench_scaling()
     bench_components()

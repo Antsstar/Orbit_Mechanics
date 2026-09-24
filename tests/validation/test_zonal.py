@@ -6,7 +6,7 @@ Every tolerance is a named constant derived in the comment above it *before* mea
 value is quoted next to it. The checks, in order:
 
 0. Registration, constants (EGM96 J2 from the same table reproduces `geopotential.EARTH_J2`),
-   refusals, exact-zero behaviour, and the fused-plan fallback.
+   refusals, exact-zero behaviour, and fused-plan membership.
 a. Field, two derivations: the kernel (Legendre recursions, projected on r_hat / z_hat) against
    `reference.zonal_field` (explicit polynomials, monomial-by-monomial Cartesian gradient), per degree
    and summed.
@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from orbital_engine import geopotential, reference, registry, scenarios, zonal
 from orbital_engine.custom_types import COEIndex, PropagatorType
+from orbital_engine.drag import DRAG_MODEL, EARTH_OMEGA
 from orbital_engine.frames import ReferenceFrames
 from orbital_engine.geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
 from orbital_engine.gravity import POINT_MASS_MODEL
@@ -197,18 +198,23 @@ def test_zero_coefficients_and_zero_separation_contribute_exactly_nothing() -> N
     assert _normalised_error(both, single[3] + single[4], _scale(rel, {3: J3, 4: J4})) < 16 * EPS
 
 
-def test_cowell_body_with_zonal_leaves_the_fused_compiled_plan(
+def test_cowell_body_with_zonal_stays_on_the_fused_compiled_plan(
     db_session_factory: Callable[[], Session],
 ) -> None:
-    """`kernels.cowell_rk4_step` fuses only point_mass_gravity and j2; a zonal bit is foreign, so the
-    whole Cowell set takes the NumPy path. That is why Cowell + zonal timings are not comparable with
-    the fused tiers until the compiled twin exists."""
+    """`kernels.cowell_rk4_step` fuses point_mass_gravity, j2 and zonal, so a zonal bit keeps the
+    Cowell set on the compiled path (held equivalent to the NumPy one in
+    `test_kernel_equivalence.py`), and Cowell + zonal timings are comparable with the other fused
+    tiers. A zonal body that also carries a model outside the fused set - drag here - still sends the
+    whole set down the NumPy path."""
     sim, sats = _constellation(db_session_factory())
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, sats)
     sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
     assert sim._cowell_fused_ok
     sim.enable_force_model(ZONAL_MODEL, sats[:1], r_eq=EARTH_R_EQ, **zonal.EARTH_ZONALS)
+    assert sim._cowell_fused_ok
+    sim.enable_force_model(DRAG_MODEL, sats[:1], ballistic_coeff=0.01, rho0=1e-12, h0=500.0,
+                           scale_height=60.0, r_ref=EARTH_R_EQ, omega=EARTH_OMEGA)
     assert not sim._cowell_fused_ok
 
 

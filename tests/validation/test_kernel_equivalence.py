@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
-from orbital_engine import geopotential, gravity, kernels, scenarios
+from orbital_engine import geopotential, gravity, kernels, scenarios, zonal
 from orbital_engine.custom_types import PropagatorType
 from orbital_engine.integrators import RK4Integrator
 from orbital_engine.propagators import KeplerianPropagator, SecularJ2Propagator
@@ -421,14 +421,15 @@ def test_secular_j2_bodies_do_not_change_plain_keplerian_bit_identity(
 
 
 # ==================================================================================================
-# Cowell: RK4 + point_mass_gravity + j2
+# Cowell: RK4 + point_mass_gravity + j2 + zonal
 # ==================================================================================================
 #
 # `kernels.cowell_rk4_step` is the fused twin of `integrators.RK4Integrator.step` driving
-# `Simulation.accelerations` with `point_mass_gravity` and/or `j2`, plus the subtraction `step()` makes
-# afterwards. Same tolerance as the Keplerian pair and for the same reason: identical arithmetic in the
-# same order, differing only in the summation order inside `np.einsum` for the three squared
-# components, so an ulp or so per force evaluation.
+# `Simulation.accelerations` with any subset of `point_mass_gravity`, `j2` and `zonal`, plus the
+# subtraction `step()` makes afterwards. Same tolerance as the Keplerian pair and for the same reason:
+# identical arithmetic in the same order, differing only in the summation order inside `np.einsum` for
+# the three squared components, so an ulp or so per force evaluation. The zonal section below says
+# what that means for the J3..J6 term specifically.
 
 COWELL_DT = 60.0
 
@@ -482,9 +483,58 @@ def _run_cowell_kernel(
     for _ in range(steps):
         kernels.cowell_rk4_step(
             dt, sim.global_states, sim.mu_array, sim.parent_indices, idx,
-            sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params, rel_out,
+            sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
+            sim._cowell_has_zonal, sim._cowell_zonal_params, rel_out,
         )
     return sim.global_states[idx].copy(), rel_out[idx].copy()
+
+
+_J2 = {"j2": geopotential.EARTH_J2, "r_eq": geopotential.EARTH_R_EQ}
+_ZONAL_FULL = {"r_eq": geopotential.EARTH_R_EQ, **zonal.EARTH_ZONALS}
+_ZONAL_J3_ONLY = {"r_eq": geopotential.EARTH_R_EQ, "j3": zonal.EARTH_J3}
+
+
+def _build_cowell_zonal(session: Session, *, variant: str) -> tuple[Simulation, np.ndarray]:
+    """
+    Cowell + `point_mass_gravity` satellites at 550 km / 53 deg (so `s = z/r` sweeps +/-0.8 and every
+    degree's odd and even parts are exercised) carrying `"zonal"`:
+
+    - `"j2+zonal"`: every satellite pm + j2 + J3..J6, all four degrees non-zero.
+    - `"j3_only"`: pm + j2 + a zonal row with only J3 non-zero (J4..J6 exactly 0.0).
+    - `"zonal_no_j2"`: pm + J3..J6 without j2, so the zonal term is composed straight onto pm.
+    - `"mixed"`: all of the above plus a pm-only body inside **one** kernel call, so the per-body
+      `has_zonal` / `has_j2` flags and the zonal row indexing are genuinely mixed.
+    """
+    sim = scenarios.earth_constellation(session, n_sats=8, n_planes=2, altitude_km=550.0)
+    sats = np.asarray(
+        [idx for name, idx in sim.name_to_index.items() if name.startswith("SAT-")], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(gravity.POINT_MASS_MODEL, sats.tolist())
+    if variant == "j2+zonal":
+        sim.enable_force_model(geopotential.J2_MODEL, sats.tolist(), **_J2)
+        sim.enable_force_model(zonal.ZONAL_MODEL, sats.tolist(), **_ZONAL_FULL)
+    elif variant == "j3_only":
+        sim.enable_force_model(geopotential.J2_MODEL, sats.tolist(), **_J2)
+        sim.enable_force_model(zonal.ZONAL_MODEL, sats.tolist(), **_ZONAL_J3_ONLY)
+    elif variant == "zonal_no_j2":
+        sim.enable_force_model(zonal.ZONAL_MODEL, sats.tolist(), **_ZONAL_FULL)
+    elif variant == "mixed":
+        sim.enable_force_model(geopotential.J2_MODEL, sats[:5].tolist(), **_J2)
+        sim.enable_force_model(zonal.ZONAL_MODEL, sats[:3].tolist(), **_ZONAL_FULL)
+        sim.enable_force_model(zonal.ZONAL_MODEL, sats[3:5].tolist(), **_ZONAL_J3_ONLY)
+        sim.enable_force_model(zonal.ZONAL_MODEL, sats[5:7].tolist(), **_ZONAL_FULL)
+        # sats[7]: point_mass_gravity only.
+    else:
+        raise ValueError(variant)
+    return sim, sats
+
+
+def _build_cowell_zonal_eccentric(session: Session) -> tuple[Simulation, np.ndarray]:
+    """An eccentric (perigee 6471 km), steeply inclined orbit on pm + j2 + J3..J6: `r` spans 6471 to
+    36667 km, so `(R/r)^n` spans six decades at n = 6, and `s` reaches +/-0.89."""
+    sim, sats = _build_cowell_two_body(session, p=11000.0, e=0.7, i=1.1, raan=2.0, arg_pe=0.8)
+    sim.enable_force_model(zonal.ZONAL_MODEL, sats.tolist(), **_ZONAL_FULL)
+    return sim, sats
 
 
 COWELL_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarray]]]] = [
@@ -493,6 +543,11 @@ COWELL_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarr
     ("mixed_j2", lambda s: _build_cowell_constellation(s, j2_on="half")),
     ("eccentric+j2", lambda s: _build_cowell_two_body(s, p=11000.0, e=0.7)),
     ("inclined+j2", lambda s: _build_cowell_two_body(s, p=9000.0, e=0.3, i=1.1, raan=2.0, arg_pe=0.8)),
+    ("j2+zonal", lambda s: _build_cowell_zonal(s, variant="j2+zonal")),
+    ("j2+zonal_j3_only", lambda s: _build_cowell_zonal(s, variant="j3_only")),
+    ("zonal_no_j2", lambda s: _build_cowell_zonal(s, variant="zonal_no_j2")),
+    ("mixed_zonal", lambda s: _build_cowell_zonal(s, variant="mixed")),
+    ("eccentric_inclined+j2+zonal", _build_cowell_zonal_eccentric),
 ]
 
 
@@ -528,6 +583,49 @@ def test_cowell_kernel_matches_reference_state(
         f"{name}: Cowell parent-relative state disagrees by {rel_diff:.3e} after {steps} steps")
 
 
+COWELL_LONG_STEPS = 500
+
+
+@pytest.mark.parametrize("name,build", COWELL_SCENARIOS, ids=[n for n, _ in COWELL_SCENARIOS])
+def test_cowell_kernel_matches_reference_over_several_orbits(
+    name: str, build: Callable[[Session], tuple[Simulation, np.ndarray]],
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    500 steps of 60 s - 5.2 orbits at 550 km - with the difference measured per body as `|dr|/|r|` and
+    `|dv|/|v|`, not elementwise.
+
+    **Why not elementwise here.** `_relative_difference` divides each component by `max(|a|, 1)`, and
+    over several orbits some position component is always passing near zero - measured: the elementwise
+    maximum at 500 steps sits on a component of 300 km within a 6921 km orbit, where one ulp of the
+    orbit-scale arithmetic is already 1e-13 of the component. That is a property of the metric, and the
+    pre-existing point_mass scenario shows it too (1.1e-12 elementwise at 500 steps against 9.9e-14 by
+    norm), so the elementwise test stays at the 1 and 50 steps it was derived for.
+
+    **Bound, derived.** Each step both sides round differently by ~eps = 1.1e-16 of the state (the
+    einsum order, and a J2/zonal ulp). Those roundings random-walk the semi-major axis, `da/a ~
+    sqrt(N) eps`, and Kepler shear turns that into along-track phase `~ n t sqrt(N) eps` (the integral of
+    `(3/2) n da/a` over a random walk). At N = 500, `n t` = 32.8 rad: **8e-14**. Measured 6e-14 to
+    1.4e-13 across these scenarios, zonal or not - the zonal term adds no divergence of its own. The
+    bound is 1e-12: an order above the random-walk estimate, and below the coherent worst case
+    (`1.5 n t N eps` = 2.7e-12), so a systematic per-step bias the size of an ulp would fail it.
+    """
+    reference_sim, ref_idx = build(db_session_factory())
+    kernel_sim, ker_idx = build(db_session_factory())
+    assert kernel_sim._cowell_fused_ok, "guard: this scenario must qualify for the fused kernel"
+
+    _, ref_rel = _run_cowell_reference(reference_sim, ref_idx, COWELL_DT, COWELL_LONG_STEPS)
+    _, ker_rel = _run_cowell_kernel(kernel_sim, ker_idx, COWELL_DT, COWELL_LONG_STEPS)
+    assert np.all(np.isfinite(ref_rel)) and np.all(np.isfinite(ker_rel))
+
+    dr = float(np.max(np.linalg.norm(ref_rel[:, :3] - ker_rel[:, :3], axis=1)
+                      / np.linalg.norm(ref_rel[:, :3], axis=1)))
+    dv = float(np.max(np.linalg.norm(ref_rel[:, 3:] - ker_rel[:, 3:], axis=1)
+                      / np.linalg.norm(ref_rel[:, 3:], axis=1)))
+    assert dr < KERNEL_AGREEMENT_REL_TOL, f"{name}: |dr|/|r| = {dr:.3e} after {COWELL_LONG_STEPS} steps"
+    assert dv < KERNEL_AGREEMENT_REL_TOL, f"{name}: |dv|/|v| = {dv:.3e} after {COWELL_LONG_STEPS} steps"
+
+
 def test_cowell_comparison_would_detect_a_perturbed_kernel(
     db_session_factory: Callable[[], Session],
 ) -> None:
@@ -550,6 +648,160 @@ def test_cowell_comparison_would_detect_a_perturbed_kernel(
         f"the tolerance is too loose to be meaningful")
 
 
+# --- The fused zonal term ---------------------------------------------------------------------------
+#
+# Why 1e-12 holds for J3..J6. `kernels._cowell_accel`'s zonal block is `zonal.zonal_kernel` written one
+# scalar at a time: the same two Legendre recursions (Bonnet's for P_n, `P_n' = n P_{n-1} + s
+# P_{n-1}'`) run from the same seeds over the same n = 2..7 with the same integer coefficients
+# (converted to float exactly), each product and sum evaluated left to right as NumPy evaluates the
+# array expression, and the final projection `((k * radial) * x) * inv_r` / `k * (radial * s - axial)`
+# unchanged. Two places differ:
+#
+# 1. `r^2`. The reference forms it with `np.einsum("ij,ij->i")`, whose inner summation order is
+#    NumPy's to choose; the twin writes `x*x + y*y + z*z`. At most an ulp or two of `r^2`, which
+#    propagates to a few ulp of the term - ~1e-15 relative.
+# 2. Composition. `compose_accelerations` adds the models into `out` in registration order
+#    (`point_mass_gravity`, `j2`, ..., `zonal`), and the twin adds them in that same order into a
+#    scalar starting at 0.0; with the fixture and other models absent from the fused set, the chain of
+#    additions is the same. (Were it not, the difference would be one rounding of the sum.)
+#
+# Everything else, RK4 included, is the arithmetic the pm + j2 pair above already certifies. So the
+# expected disagreement is ~1e-15 of the state per step - measured 5.6e-15 to 4.1e-14 of the term's
+# scale at field level, with 26-36 of 240 components not bit-identical - accumulating along-track
+# through Kepler shear over many steps (`test_cowell_kernel_matches_reference_over_several_orbits`).
+#
+# **What the state comparison cannot see.** The J3..J6 acceleration is ~5e-8 km/s^2 against ~8e-3 for
+# the central term, and over 50 steps of 60 s it moves a 550 km satellite by ~0.2 km, 3e-5 of its
+# radius. A relative error `delta` in the zonal term therefore shows in the state as ~3e-5 delta, and is
+# detected by a 1e-12 state bound only above delta ~ 3e-8. That is why the zonal term also has a
+# field-level comparison below, where the bound applies to the term itself and a 1e-9 perturbation of
+# one coefficient is visible (its negative control proves it), and why
+# `test_zonal_term_is_visible_to_the_state_comparison` guards that the state tests are not vacuous.
+
+def _zonal_field_points() -> np.ndarray:
+    """Relative positions spanning LEO to GEO, both hemispheres, the equator, a hair off it, the poles
+    and points near them - every sign combination of `s` and of each `P_n'`."""
+    lat_deg = [0.0, 1e-7, 3.0, -3.0, 17.0, -25.0, 35.26, -39.23, 49.1, -55.0, 63.43, -70.0, 85.0,
+               -89.99, 90.0, -90.0]
+    lon_deg = [0.0, 31.0, 77.0, 90.0, 141.0, 180.0, 203.0, 266.0, 299.0, 330.0, 12.0, 58.0, 160.0,
+               240.0, 0.0, 0.0]
+    pts = []
+    for r in (6500.0, 6921.0, 8000.0, 26560.0, 42164.0):
+        for la, lo in zip(np.radians(lat_deg), np.radians(lon_deg)):
+            pts.append([r * np.cos(la) * np.cos(lo), r * np.cos(la) * np.sin(lo), r * np.sin(la)])
+    return np.asarray(pts)
+
+
+ZONAL_ROWS: list[tuple[str, dict[str, float]]] = [
+    ("j3..j6", _ZONAL_FULL),
+    ("j3_only", _ZONAL_J3_ONLY),
+    ("j6_only", {"r_eq": geopotential.EARTH_R_EQ, "j6": zonal.EARTH_J6}),
+    ("j4_j5", {"r_eq": geopotential.EARTH_R_EQ, "j4": zonal.EARTH_J4, "j5": zonal.EARTH_J5}),
+]
+
+
+def _zonal_params(coefficients: dict[str, float], n: int) -> np.ndarray:
+    params = np.zeros((n, len(zonal.ZONAL_PARAM_NAMES)))
+    for col, name in enumerate(zonal.ZONAL_PARAM_NAMES):
+        params[:, col] = coefficients.get(name, 0.0)
+    return params
+
+
+def _zonal_fields(
+    rel: np.ndarray, coefficients: dict[str, float], parent: np.ndarray, *, perturb_j3: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    `(reference, twin, scale)` at every relative position in `rel`, with the parent at `parent`.
+    Reference: `zonal.zonal_kernel` over an arena whose slot 0 is the parent. Twin: `_cowell_accel`
+    with only its zonal flag set. `scale` is the term's natural size `sum_n mu |J_n| R^n / r^(n+2)`,
+    which `|a|` never falls far below (`test_zonal.py`'s module docstring: its minimum over latitude
+    is 1.5..2.1 times the scale). `perturb_j3` multiplies J3 on the twin's side only.
+    """
+    mu = scenarios.MU_EARTH
+    n = rel.shape[0]
+    state = np.zeros((n + 1, 6))
+    state[0, :3] = parent
+    state[1:, :3] = parent + rel
+    mu_array = np.zeros(n + 1)
+    mu_array[0] = mu
+    params = _zonal_params(coefficients, n + 1)
+    ref = np.zeros((n + 1, 3))
+    zonal.zonal_kernel(np.arange(1, n + 1, dtype=np.int64), 0.0, state, mu_array,
+                       np.zeros(n + 1, dtype=np.int32), params, ref)
+
+    twin_params = params.copy()
+    twin_params[:, 1] *= perturb_j3
+    twin = np.zeros((n, 3))
+    px, py, pz = (float(c) for c in state[0, :3])
+    for k in range(n):
+        cx, cy, cz = (float(c) for c in state[k + 1, :3])
+        twin[k] = kernels._cowell_accel(
+            px, py, pz, cx, cy, cz, mu, mu, False, False, 0.0, 0.0, True, twin_params, k + 1)
+
+    r = np.linalg.norm(rel, axis=1)
+    r_eq = coefficients["r_eq"]
+    scale = sum(
+        mu * abs(coefficients.get(f"j{deg}", 0.0)) * r_eq ** deg / r ** (deg + 2) for deg in zonal.ZONAL_DEGREES)
+    return ref[1:], twin, np.asarray(scale)
+
+
+PARENTS: list[tuple[str, np.ndarray]] = [
+    ("origin", np.zeros(3)),
+    ("heliocentric", np.array([1.495978707e8, -2.3e6, 4.1e4])),
+]
+
+
+@pytest.mark.parametrize("row_name,coefficients", ZONAL_ROWS, ids=[n for n, _ in ZONAL_ROWS])
+@pytest.mark.parametrize("parent_name,parent", PARENTS, ids=[n for n, _ in PARENTS])
+def test_fused_zonal_term_matches_zonal_kernel(
+    row_name: str, coefficients: dict[str, float], parent_name: str, parent: np.ndarray,
+) -> None:
+    """
+    The J3..J6 term alone, compiled against `zonal.zonal_kernel`, elementwise to 1e-12 of the term's
+    own scale - the sharp test the state comparison cannot be (see the section comment). The
+    heliocentric parent puts the body-minus-parent subtraction on a 1 AU grid, where both sides make
+    the same rounding of `rel` because they perform the same subtraction.
+    """
+    rel = _zonal_field_points()
+    ref, twin, scale = _zonal_fields(rel, coefficients, parent)
+    assert np.all(np.isfinite(twin)) and np.all(np.isfinite(ref))
+    diff = float(np.max(np.abs(twin - ref) / scale[:, None]))
+    assert diff < KERNEL_AGREEMENT_REL_TOL, (
+        f"{row_name} / {parent_name}: fused zonal term disagrees with zonal_kernel by {diff:.3e} of scale")
+
+
+def test_fused_zonal_comparison_would_detect_a_perturbed_coefficient() -> None:
+    """
+    Negative control for the field-level test: J3 scaled by (1 + 1e-9) on the twin's side only. J3 is
+    the largest of the four terms at every radius here (its share of `scale` is 0.52 at 6500 km
+    and grows outward), and `|a_3|` is at least 1.5 times its own scale, so the change is >= ~8e-10 of
+    the combined scale somewhere - three orders above the bound, and must be detected.
+    """
+    rel = _zonal_field_points()
+    ref, twin, scale = _zonal_fields(rel, _ZONAL_FULL, np.zeros(3), perturb_j3=1.0 + 1e-9)
+    diff = float(np.max(np.abs(twin - ref) / scale[:, None]))
+    assert diff > KERNEL_AGREEMENT_REL_TOL, (
+        f"a relative-1e-9 change to J3 was not detected (diff {diff:.3e}); the bound is vacuous")
+
+
+def test_zonal_term_is_visible_to_the_state_comparison(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The Cowell state tests above certify the fused zonal path only if dropping the zonal term would
+    fail them. Over 50 steps of 60 s the J3..J6 term moves each 550 km satellite by ~0.2 km (section
+    comment), ~3e-5 of the radius; the same compiled run with every `has_zonal` flag cleared must
+    therefore differ from the zonal run by far more than the 1e-12 bound - asserted at 1e-6.
+    """
+    with_sim, idx = _build_cowell_zonal(db_session_factory(), variant="j2+zonal")
+    without_sim, _ = _build_cowell_zonal(db_session_factory(), variant="j2+zonal")
+    without_sim._cowell_has_zonal[:] = False
+    _, with_rel = _run_cowell_kernel(with_sim, idx, COWELL_DT, 50)
+    _, without_rel = _run_cowell_kernel(without_sim, idx, COWELL_DT, 50)
+    diff = _relative_difference(with_rel, without_rel, np.ones(idx.size, dtype=bool))
+    assert diff > 1e-6, f"the zonal term moved the state by only {diff:.3e}; the state test is blind to it"
+
+
 def _build_cowell_moon(session: Session) -> tuple[Simulation, np.ndarray]:
     """The accelerating-parent case: a massless Moon on Cowell + `point_mass_gravity` around an Earth
     that is itself Keplerian about the Sun, so re-basing onto a moving parent is exercised."""
@@ -562,6 +814,7 @@ def _build_cowell_moon(session: Session) -> tuple[Simulation, np.ndarray]:
 
 WHOLE_STEP_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarray]]]] = [
     ("constellation+j2", lambda s: _build_cowell_constellation(s, j2_on="all")),
+    ("constellation+mixed_zonal", lambda s: _build_cowell_zonal(s, variant="mixed")),
     ("moon_about_moving_earth", _build_cowell_moon),
 ]
 
@@ -612,13 +865,14 @@ def test_cowell_step_paths_agree(
         f"(bound {KERNEL_AGREEMENT_REL_TOL:.1e} + re-base floor {rebase_floor:.1e})")
 
 
-def test_cowell_fused_kernel_is_selected_only_for_point_mass_and_j2(
+def test_cowell_fused_kernel_is_selected_only_for_point_mass_j2_and_zonal(
     db_session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The fallback is data: a Cowell body carrying any other model sends the set down the NumPy path,
-    and enabling that model after the plan was built must re-plan. Observed by spying on the name
-    `Simulation.step` calls, so this fails if the wiring silently stops reaching the kernel too.
+    The fallback is data: a Cowell body carrying any model outside `{point_mass_gravity, j2, zonal}`
+    sends the set down the NumPy path, and enabling that model after the plan was built must re-plan.
+    Observed by spying on the name `Simulation.step` calls, so this fails if the wiring silently stops
+    reaching the kernel too.
     """
     import orbital_engine.simulator as simulator_module
 
@@ -638,17 +892,24 @@ def test_cowell_fused_kernel_is_selected_only_for_point_mass_and_j2(
     sim.step(COWELL_DT)
     assert calls == [1], "the fused kernel was not used for a point_mass_gravity + j2 configuration"
 
+    sim.enable_force_model(zonal.ZONAL_MODEL, [int(sats[1])], **_ZONAL_FULL)
+    assert sim._cowell_fused_ok, "zonal is fused; enabling it must keep the compiled plan"
+    assert sim._cowell_has_zonal[sats[1]] and not sim._cowell_has_zonal[sats[0]]
+    assert sim._cowell_zonal_params is sim.force_model_params[zonal.ZONAL_MODEL]
+    sim.step(COWELL_DT)
+    assert calls == [1, 1], "the fused kernel was not used for a point_mass_gravity + j2 + zonal configuration"
+
     sim.enable_force_model("test_constant_accel", [int(sats[0])], ax=0.0, ay=0.0, az=0.0)
     assert not sim._cowell_fused_ok, "a foreign force model must disqualify the fused kernel"
     sim.step(COWELL_DT)
-    assert calls == [1], "the fused kernel ran despite a model it does not implement"
+    assert calls == [1, 1], "the fused kernel ran despite a model it does not implement"
 
     sim.use_compiled_kernel = False
     sim.force_model_mask[:] = np.uint64(0)
     sim.enable_force_model(gravity.POINT_MASS_MODEL, sats.tolist())
     assert sim._cowell_fused_ok, "removing the foreign model must re-qualify the fused kernel"
     sim.step(COWELL_DT)
-    assert calls == [1], "use_compiled_kernel=False must select the NumPy path"
+    assert calls == [1, 1], "use_compiled_kernel=False must select the NumPy path"
 
 
 # ==================================================================================================

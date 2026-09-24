@@ -6,7 +6,7 @@ Run with:
     <env>/python.exe benchmarks/zonal_sweep.py
 
 Prints one line per tier: median / RMS / max position error at 24 h against a DOP853 truth carrying
-J2..J6, then the access metrics (`access.format_metrics`). No figure, no file written. Takes a few
+J2..J6 and the propagation wall time, then the access metrics (`access.format_metrics`). No figure, no file written. Takes a few
 minutes: truth is integrated twice (horizon and the 60 s access grid) with the monomial zonal field.
 
 **Scenario and stations** are the access figure's (`benchmarks/figures.py`, section 6): 12 satellites,
@@ -17,8 +17,11 @@ this script does not import matplotlib.
 and 15 s, plus mean-seeded secular J2. The 15 s pair is not in the design brief; it is there because
 RK4's own truncation at 60 s is ~1.9 km at this horizon (`docs/architecture.md`, access section),
 the same size as the J3..J6 estimate below, so the 60 s pair alone cannot separate model from step.
-Timing is one batch and is **not comparable**: a Cowell body carrying `"zonal"` runs the NumPy path,
-the others the fused compiled kernel (see `zonal.py`).
+Timing is the minimum of three batches, after the scored run has already warmed the compiled
+kernels. Every Cowell tier runs the fused compiled kernel - `"zonal"` is fused into
+`kernels.cowell_rk4_step` alongside `j2` - so the wall times **are comparable**: measured 0.047 s for
+the zonal 15 s tier against 0.040 s for `j2` alone (1.16x). Before the twin, the zonal tier ran the
+NumPy `RK4Integrator` at 4.9-5.4 s, ~120x.
 
 **Estimate, written before the first run** (circular, i = 53 deg, a = 6921 km, n = 1.0965e-3 rad/s):
 
@@ -110,12 +113,12 @@ def main() -> None:
         build_scenario, build_configs(), HORIZON_S,
         oblateness={"Earth": (EARTH_J2, EARTH_R_EQ)},
         zonal={"Earth": (EARTH_R_EQ, {3: EARTH_J3, 4: EARTH_J4, 5: EARTH_J5, 6: EARTH_J6})},
-        timing_batches=1, timing_warmup=0, access=spec,
+        timing_batches=3, timing_warmup=0, access=spec,
     )
     print("truth: DOP853, J2 + J3..J6 (EGM96), 12 sats at 550 km / 53 deg, 24 h")
     for r in results:
         print(f"{r.config_name:<34} median {r.error.median_km:9.4f} km  rms {r.error.rms_km:9.4f} km  "
-              f"max {r.error.max_km:9.4f} km")
+              f"max {r.error.max_km:9.4f} km  wall {r.wall_time_us * 1e-6:8.4f} s")
     for r in results:
         if r.access is not None:
             print("  " + access.format_metrics(r.config_name, r.access))
