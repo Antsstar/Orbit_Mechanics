@@ -633,3 +633,33 @@ def test_j4_adds_the_first_order_secular_node_rate(db_session_factory: Callable[
     rate = 15.0 / 16.0 * n * J4 * (EARTH_R_EQ / NODE_A_KM) ** 4 * ci * (4.0 - 7.0 * s2)
     predicted = rate * (t2 - t1)
     assert abs((m2 - m1) / predicted - 1.0) < J4_RATE_REL_TOL, (m2 - m1, predicted)
+
+
+def test_run_sweep_forwards_zonal_to_both_truths(
+    db_session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wiring: `run_sweep(zonal=)` must reach the endpoint truth *and* the access truth. The headline
+    that exercises it lives in `benchmarks/zonal_sweep.py`, not the suite, so in review dropping
+    `zonal=` from the access-truth call passed all 43 zonal/sweep/access tests - every contact-window
+    metric would then be scored against a J2-only truth while the km metric used J2..J6, silently."""
+    from orbital_engine import access, sweep
+
+    seen: List[object] = []
+    real = sweep.reference_for
+
+    def spy(*args: object, **kwargs: object) -> reference.ReferenceTrajectory:
+        seen.append(kwargs.get("zonal"))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sweep, "reference_for", spy)
+    spec = access.AccessSpec(
+        stations=[access.GroundStation("equator", 0.0, 0.0)], central_body="Earth",
+        omega=7.2921159e-5, body_radius_km=scenarios.EARTH_RADIUS, sample_dt_s=60.0,
+    )
+    sweep.run_sweep(
+        lambda: _constellation(db_session_factory())[0],
+        [sweep.ModelConfig("kepler", PropagatorType.KEPLERIAN, 60.0)],
+        horizon_s=600.0, timing_batches=1, timing_warmup=0,
+        zonal=EARTH_ZONAL_TRUTH, access=spec,
+    )
+    assert seen == [EARTH_ZONAL_TRUTH, EARTH_ZONAL_TRUTH], seen
