@@ -496,6 +496,7 @@ def run_sweep(
     truth_rtol: float = TRUTH_RTOL,
     truth_atol: float = TRUTH_ATOL,
     oblateness: Optional[Mapping[str, Tuple[float, float]]] = None,
+    zonal: Optional[Mapping[str, Tuple[float, Mapping[int, float]]]] = None,
     timing_batches: int = 5,
     timing_warmup: int = 2,
     access: Optional[AccessSpec] = None,
@@ -516,7 +517,8 @@ def run_sweep(
     `oblateness` is forwarded unchanged to `reference.reference_for` - pass it whenever any configured
     tier includes a J2 model, or the truth is point-mass and every J2 tier is being judged against the
     wrong reference (see `reference.py`'s module docstring on why this argument is never inferred from
-    a `Simulation`'s own configuration).
+    a `Simulation`'s own configuration). `zonal` is forwarded the same way (J3..J6, see
+    `reference.reference_for`); omitting it leaves truth bit-identical to a sweep without the option.
 
     `access`, when given, adds `SweepResult.access` - contact-window error against the same truth
     model (see `access.py`). It costs **one** extra `reference_for` call for the whole sweep, on the
@@ -556,14 +558,14 @@ def run_sweep(
 
     times = np.array([0.0, horizon_s], dtype=np.float64)
     truth = reference_for(
-        truth_sim, times, rtol=truth_rtol, atol=truth_atol, oblateness=oblateness,
+        truth_sim, times, rtol=truth_rtol, atol=truth_atol, oblateness=oblateness, zonal=zonal,
     )
 
     access_truth: Optional[ReferenceTrajectory] = None
     if access is not None:
         access_truth = reference_for(
             build_scenario(), access_grid(horizon_s, access.sample_dt_s),
-            rtol=truth_rtol, atol=truth_atol, oblateness=oblateness,
+            rtol=truth_rtol, atol=truth_atol, oblateness=oblateness, zonal=zonal,
         )
 
     budgets: dict[str, Tuple[BodyDeltaV, ...]] = {}

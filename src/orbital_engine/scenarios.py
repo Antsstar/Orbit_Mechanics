@@ -37,7 +37,7 @@ __all__ = [
     "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
     "ground_station_pass", "eclipsed_satellite", "station_keeping_satellites",
     "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
-    "tle_satellites",
+    "tle_satellites", "zonal_twins", "zonal_twin_name",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -761,6 +761,92 @@ def station_keeping_satellites(
             p=EARTH_R_EQ + altitude_km, e=0.0, i=math.radians(inclination_deg),
             raan=math.radians(raan_deg), arg_pe=0.0, theta=0.0,
         ))
+    session.commit()
+
+    sim = Simulation(
+        body_names=["Earth"] + names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+    sats = np.array([sim.name_to_index[n] for n in names], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, sats)
+    sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    return sim
+
+
+def zonal_twin_name(orbit: int, copy: int) -> str:
+    """Name of copy `copy` on orbit `orbit` in `zonal_twins` - `ZN-00-0` is orbit 0's control."""
+    return f"ZN-{orbit:02d}-{copy}"
+
+
+def zonal_twins(
+    session: Session,
+    *,
+    arg_pe_deg: Sequence[float] = (0.0,),
+    copies: int = 2,
+    semi_major_axis_km: float = 7000.0,
+    eccentricity: float = 0.02,
+    inclination_deg: float = 40.0,
+    raan_deg: float = 0.0,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth plus `copies` co-located massless Cowell satellites on each of `len(arg_pe_deg)` orbits that
+    differ only in argument of perigee, every satellite carrying `point_mass_gravity` and `j2` (Earth
+    values) and nothing else. Named `zonal_twin_name(orbit, copy)`, seeded at perigee (`theta = 0`).
+
+    Built for `zonal.py`'s orbit-dynamics validation, which is **differential**: copy 0 stays the J2
+    control and a later copy is given `"zonal"` with one degree switched on, so the difference between
+    them is that degree and nothing else. That is the only way to see J3 or J4 here: J2's short-period
+    eccentricity signal (~1e-3) is as large as a day of J3's long-period drift, and J2^2 is as large as
+    J4, but both are common to the pair and cancel. The orbits share `a`, `e`, `i` and RAAN, so the
+    `cos(omega)` dependence of J3's eccentricity rate is measured in one arena by seeding two perigees
+    180 degrees apart.
+
+    `eccentricity` defaults to 0.02: large enough that the argument of perigee is well defined (J2
+    moves an osculating omega by ~`J2 (R/p)^2 / e` = 0.04 rad at this size), small enough that the
+    first-order theory's `e`-dependence is a small correction. `eccentricity=0.0` is allowed (the
+    node-rate case needs no perigee).
+    """
+    from .geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
+
+    if copies < 1:
+        raise ValueError(f"copies must be at least 1, got {copies}")
+    if not arg_pe_deg:
+        raise ValueError("arg_pe_deg must name at least one orbit")
+    if not 0.0 <= eccentricity < 1.0:
+        raise ValueError(f"eccentricity must be in [0, 1), got {eccentricity}")
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    p = semi_major_axis_km * (1.0 - eccentricity * eccentricity)
+    names: List[str] = []
+    for orbit, arg_pe in enumerate(arg_pe_deg):
+        for copy in range(copies):
+            name = zonal_twin_name(orbit, copy)
+            names.append(name)
+            session.add(VesselORM(
+                name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+                dry_mass=VESSEL_DRY_MASS, fuel_mass=VESSEL_FUEL_MASS, drag_area=4.0,
+                p=p, e=eccentricity, i=math.radians(inclination_deg),
+                raan=math.radians(raan_deg), arg_pe=math.radians(arg_pe), theta=0.0,
+            ))
     session.commit()
 
     sim = Simulation(
