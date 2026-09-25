@@ -35,6 +35,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -56,12 +57,13 @@ from orbital_engine.msis_bridge import (  # noqa: E402
 )
 from orbital_engine.simulator import Simulation  # noqa: E402
 from orbital_engine.stationkeeping import StationKeepingSpec  # noqa: E402
-from orbital_engine.sweep import ForceModelSpec, ModelConfig, run_sweep  # noqa: E402
+from orbital_engine.sweep import ForceModelSpec, ModelConfig, SweepResult, run_sweep  # noqa: E402
 
 B = 0.05
 DT_S = 30.0
 HORIZON_S = 6.0 * 86400.0
 SPEC = StationKeepingSpec(291.0, 293.5)
+BASELINE = "msis moderate"
 PREDICTED = {"msis low": -0.7196, "msis high": 1.3443, "layered": 0.1288, "single@355": -0.0311}
 
 
@@ -82,9 +84,10 @@ def drag(**law: float) -> ForceModelSpec:
                                        "omega": EARTH_OMEGA, **law})
 
 
-def main() -> None:
+def build_configs() -> List[ModelConfig]:
+    """The five tiers, baseline first. `benchmarks/figures.py` (`solar_activity.png`) reuses these."""
     rho355 = float(layered_density(np.array([355.0]))[0])
-    configs = [
+    return [
         ModelConfig("msis moderate", PropagatorType.COWELL, DT_S,
                     force_models=(drag(**msis_coefficients(SOLAR_ACTIVITY_MODERATE)),)),
         ModelConfig("msis low", PropagatorType.COWELL, DT_S,
@@ -96,9 +99,17 @@ def main() -> None:
         ModelConfig("single@355", PropagatorType.COWELL, DT_S, force_models=(drag(
             density_model=DENSITY_MODEL_EXPONENTIAL, rho0=rho355, h0=355.0, scale_height=60.0),)),
     ]
+
+
+def run_msis_sweep() -> List[SweepResult]:
+    """The headline sweep: every tier's station-keeping Delta-v against the MSIS-moderate baseline."""
+    return run_sweep(build, build_configs(), HORIZON_S, timing_batches=1, timing_warmup=0,
+                     station_keeping=SPEC, delta_v_baseline=BASELINE)
+
+
+def main() -> None:
     start = time.perf_counter()
-    results = run_sweep(build, configs, HORIZON_S, timing_batches=1, timing_warmup=0,
-                        station_keeping=SPEC, delta_v_baseline="msis moderate")
+    results = run_msis_sweep()
     print(f"6 days, dt = {DT_S:.0f} s, band [{SPEC.lower_km}, {SPEC.upper_km}] km, B = {B} m^2/kg, "
           f"baseline MSIS moderate ({time.perf_counter() - start:.0f} s)")
     print(f"{'tier':<15}{'raises':>7}{'m/s/day':>10}{'total m/s':>11}{'rate err':>10}{'predicted':>11}")
