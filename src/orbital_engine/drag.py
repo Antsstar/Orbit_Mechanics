@@ -8,7 +8,7 @@ perturbation in LEO, and it composes additively with `point_mass_gravity` and `j
 Reference implementation only. Like `j2_kernel`, this runs on every enabled body at every RK4 stage,
 so under `CLAUDE.md`'s two-implementation rule it wants a compiled twin in `kernels.py`. That twin is
 **deliberately not written**. `Simulation._refresh_cowell_plan` treats any mask bit other than
-`point_mass_gravity` and `j2` as foreign, so a Cowell body carrying `"drag"` sends the whole Cowell set
+`point_mass_gravity`, `j2` and `zonal` as foreign, so a Cowell body carrying `"drag"` sends the whole Cowell set
 down the NumPy `RK4Integrator` path (`tests/validation/test_drag.py` asserts this).
 
 Model

@@ -6,8 +6,8 @@ Run with:
     <env>/python.exe benchmarks/zonal_sweep.py
 
 Prints one line per tier: median / RMS / max position error at 24 h against a DOP853 truth carrying
-J2..J6 and the propagation wall time, then the access metrics (`access.format_metrics`). No figure, no file written. Takes a few
-minutes: truth is integrated twice (horizon and the 60 s access grid) with the monomial zonal field.
+J2..J6 and the propagation wall time, then the access metrics (`access.format_metrics`). No figure, no file written. Takes about
+20 s with numba, most of it truth: integrated twice (horizon and the 60 s access grid) with the monomial zonal field.
 
 **Scenario and stations** are the access figure's (`benchmarks/figures.py`, section 6): 12 satellites,
 one plane, 550 km / 53 deg, 24 h; Kiruna, Wallops, Santiago, 5 deg mask, 60 s grid. Restated here so

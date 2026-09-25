@@ -6,6 +6,9 @@ Run with:
 
     <env>/python.exe benchmarks/figures.py            # all figures
     <env>/python.exe benchmarks/figures.py ground drag # a subset, by key
+    <env>/python.exe benchmarks/figures.py solar       # solar_activity.png only (a few minutes; pymsis)
+
+Keys: ground, error, drag, hierarchy, atmosphere, access, stationkeeping, solar.
 
 This script and `frontier_plot.py` are the only places in the project that import matplotlib;
 `orbital_engine.viz` prepares every array drawn here and has no plotting dependency (see its module
@@ -44,7 +47,7 @@ a ratio of 0.9996. That closed form is derived in the code below from two factor
 to make visible: the prograde co-rotation factor f = 0.8714, and the density feedback as the orbit
 descends, which alone raises the mean rate 3.1% above the initial tangent -0.1775 km/orbit. The
 control holds altitude to 1e-04 km. Both run Cowell; the drag one falls to the NumPy path, because
-the fused compiled twin carries only point-mass gravity and J2.
+the fused compiled twin carries only point-mass gravity, J2 and the J3..J6 zonals.
 
 **5. `atmosphere.png` - caption.** The two density laws `drag.py` can be configured with, drawn
 against altitude on a log density axis, with their ratio below. The single band is matched to the
@@ -76,7 +79,7 @@ one that neither invents nor loses a pass.
 Three things the kilometre metric cannot say. First, the **discrete failures**: Kepler does not merely
 mistime its passes, it deletes five that happen and predicts four that do not, and those nine are
 scheduling decisions rather than error bars. Second, **ranking changes**: mean-seeded secular J2 is
-100x better than Kepler in kilometres (4.04 km against 607.61 km in `error_growth.png`) but only 20x
+150x better than Kepler in kilometres (4.04 km against 607.61 km in `error_growth.png`) but only 20x
 better in mean window shift, and it still drops a marginal pass - an averaged theory reproduces the
 along-track position far better than it reproduces the *elevation profile* near the horizon, which is
 where a marginal pass lives. Third, **the two secular-J2 seedings are indistinguishable in the scatter
@@ -103,6 +106,26 @@ single band anchored at the band centre: 3.431 m/s/day, **0.14 %** off. The drag
 burns. The steady rates are validated in `tests/validation/test_stationkeeping.py` against the
 orbit-averaged decay converted at `(n/2) da`, to 4e-4.
 
+**8. `solar_activity.png` - caption.** What the solar-activity assumption costs, against what the
+atmosphere-model choice costs, in station-keeping Delta-v. One 51.6 deg satellite (B = 0.05 m^2/kg)
+held in the [291, 293.5] km mean-altitude band of `station_keeping.png` for 6 days, Cowell + J2 + drag
+at dt = 30 s, two-impulse raises. The numbers are not computed here: `msis_sweep.run_msis_sweep()`
+runs `run_sweep(..., station_keeping=, delta_v_baseline="msis moderate")` on `msis_sweep.py`'s own
+five configurations, and this figure draws its `DeltaVMetrics` (steady rate, first raise excluded).
+Left, m/s/day and the signed error against the baseline: NRLMSIS 2.0 at moderate activity (F10.7 =
+F10.7a = 140, Ap = 15) **3.047, 13 raises**; quiet Sun (65, 0) 0.855, **-71.9 %**, 4 raises; active Sun
+(250, 45) 7.142, **+134.4 %**, 29 raises; Vallado's 28-band table 3.438, +12.8 %, 14 raises; the single
+band matched to the table at 355 km with H = 60 km 2.952, -3.1 %, 12 raises - `CLAUDE.md`'s recorded
+headline to every printed digit, and each within 6e-4 of the prediction in `msis_sweep.py`'s docstring.
+The solar swings are **5.6x and 10.5x** the largest atmosphere-model error (12.8 %), which is the
+"5-10x" of the headline; the shaded band is the whole spread of the model choice, 2.95 to 3.44
+m/s/day, and the two static laws straddle moderate MSIS. Right, the mechanism: the three MSIS mean
+profiles (read through the kernel's own evaluator) and the two static laws against altitude. At 292 km,
+relative to moderate MSIS: quiet 0.280, active 2.341, table 1.128, single band 0.969 - the density
+ratios of `docs/architecture.md`'s NRLMSIS table. The profiles are averages over latitude, local time
+and season, so the diurnal bulge (2.30x day/night at 400 km) is absent by construction; the ECSS
+presets are from memory, unverified.
+
 **4. `hierarchy.png` - caption.** `sun_earth_moon` over 60 days, drawn in the frame that makes the
 hierarchy visible: relative to the Earth-Moon barycentre. Neither body's `parent_indices` parent is
 the other - both are measured about the barycentre, which is itself the body carrying the
@@ -120,27 +143,32 @@ import sys
 from pathlib import Path
 from typing import Callable, Dict, List
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-from numpy.typing import NDArray
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+# This repository's own `src` first, as `msis_sweep.py` and `zonal_sweep.py` do: the package is an
+# editable install of the *main* checkout, so run from a git worktree this script would otherwise
+# draw the main checkout's engine.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orbital_engine import access, scenarios, sweep, viz
-from orbital_engine.atmosphere import (
+import matplotlib  # noqa: E402
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+from numpy.typing import NDArray  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+from orbital_engine import access, scenarios, sweep, viz  # noqa: E402
+from orbital_engine.atmosphere import (  # noqa: E402
     BASE_ALTITUDE_KM, DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, layered_density,
 )
-from orbital_engine.custom_types import PropagatorType
-from orbital_engine.database import Base
-from orbital_engine.drag import DRAG_MODEL, EARTH_OMEGA
-from orbital_engine.geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
-from orbital_engine.gravity import POINT_MASS_MODEL
-from orbital_engine.kernels import NUMBA_AVAILABLE
-from orbital_engine.reference import TRUTH_ATOL, TRUTH_RTOL, reference_for
-from orbital_engine.simulator import Simulation
+from orbital_engine.custom_types import PropagatorType  # noqa: E402
+from orbital_engine.database import Base  # noqa: E402
+from orbital_engine.drag import DRAG_MODEL, EARTH_OMEGA  # noqa: E402
+from orbital_engine.geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL  # noqa: E402
+from orbital_engine.gravity import POINT_MASS_MODEL  # noqa: E402
+from orbital_engine.kernels import NUMBA_AVAILABLE  # noqa: E402
+from orbital_engine.reference import TRUTH_ATOL, TRUTH_RTOL, reference_for  # noqa: E402
+from orbital_engine.simulator import Simulation  # noqa: E402
 
 ArrF = NDArray[np.float64]
 
@@ -895,6 +923,179 @@ def figure_station_keeping() -> None:
 
 
 # ==================================================================================================
+# 8. solar_activity.png - the solar-activity assumption against the atmosphere-model choice
+# ==================================================================================================
+
+# Colour carries the *question* a tier answers, not the tier: orange = which Sun (one model, three
+# activity levels, darker = more active), blue = which atmosphere model. Both hues are the dataviz
+# reference palette's slots 1-2, validated against each other (CVD dE 24.7, normal-vision 33.6); the
+# light orange of the low-activity curve sits under 3:1 contrast, which is why every bar carries its
+# row label and number, and the two outer density curves are labelled directly as well as in the
+# legend (the three central ones overlap too closely for direct labels to stay legible).
+SA_SOLAR = "#eb6834"
+SA_MODEL = "#2a78d6"
+SA_SOLAR_SHADES = {"msis low": "#f29a62", "msis moderate": "#eb6834", "msis high": "#9c3410"}
+SA_INK = "#0b0b0b"
+SA_MUTED = "#52514e"
+SA_STATION_KM = 292.0              # the dead band's centre, [291, 293.5] km mean altitude
+# Tier name (as `msis_sweep.build_configs` spells it) -> the row label a non-specialist can read.
+SA_ROWS = [
+    ("msis low", "Quiet Sun\nF10.7 = 65"),
+    ("msis moderate", "Moderate Sun\nF10.7 = 140"),
+    ("msis high", "Active Sun\nF10.7 = 250"),
+    ("layered", "28-band table\n(Vallado)"),
+    ("single@355", "Single exponential\n(H = 60 km)"),
+]
+
+
+def figure_solar_activity() -> None:
+    # The numbers come from the engine's own sweep, exactly as `msis_sweep.py` prints them: same
+    # scenario, same five configurations, same baseline. Nothing here re-derives a Delta-v.
+    import msis_sweep
+    from orbital_engine.msis_bridge import (
+        SOLAR_ACTIVITY_HIGH, SOLAR_ACTIVITY_LOW, SOLAR_ACTIVITY_MODERATE, msis_density, msis_profile,
+    )
+
+    results = {r.config_name: r.delta_v for r in msis_sweep.run_msis_sweep()}
+    rate: Dict[str, float] = {}
+    err: Dict[str, float] = {}
+    for name, dv in results.items():
+        assert dv is not None
+        rate[name] = dv.median_steady_rate_m_s_per_day
+        err[name] = dv.rate_error_rel
+        print(f"  {name:<15} {dv.bodies[0].n_raises:>3} raises  {rate[name]:.4f} m/s/day  "
+              f"rate error {err[name]:+.4f}")
+    base = rate[msis_sweep.BASELINE]
+    solar_swing = (err["msis low"], err["msis high"])
+    model_swing = (min(err["layered"], err["single@355"]), max(err["layered"], err["single@355"]))
+    largest_model = max(abs(e) for e in model_swing)
+    ratio_low, ratio_high = abs(solar_swing[0]) / largest_model, abs(solar_swing[1]) / largest_model
+    print(f"  solar swing {100 * solar_swing[0]:+.1f} % / {100 * solar_swing[1]:+.1f} %, model swing "
+          f"{100 * model_swing[0]:+.1f} % / {100 * model_swing[1]:+.1f} %: solar = "
+          f"{ratio_low:.1f}x / {ratio_high:.1f}x the largest model error")
+
+    # Density: the profiles the kernel reads (memoised by the sweep's configuration), evaluated
+    # through the kernel's own evaluator, and the two static laws exactly as the sweep configured them.
+    altitude = np.arange(150.0, 700.01, 1.0)
+    activity = {"msis low": SOLAR_ACTIVITY_LOW, "msis moderate": SOLAR_ACTIVITY_MODERATE,
+                "msis high": SOLAR_ACTIVITY_HIGH}
+    density: Dict[str, ArrF] = {}
+    for name, preset in activity.items():
+        msis_profile(preset["f107"], preset["f107a"], preset["ap"])
+        triple = np.tile([preset["f107"], preset["f107a"], preset["ap"]], (altitude.size, 1))
+        density[name] = msis_density(altitude, triple)
+    density["layered"] = layered_density(altitude)
+    rho355 = float(layered_density(np.array([355.0]))[0])
+    density["single@355"] = rho355 * np.exp(-(altitude - 355.0) / 60.0)
+    at_station = {n: float(np.interp(SA_STATION_KM, altitude, d)) for n, d in density.items()}
+    rel_station = {n: v / at_station["msis moderate"] for n, v in at_station.items()}
+    print("  density at 292 km / MSIS moderate: " +
+          ", ".join(f"{n} {v:.3f}" for n, v in rel_station.items()))
+
+    rc = {"font.size": 12, "axes.titlesize": 14, "axes.labelsize": 13, "xtick.labelsize": 12,
+          "ytick.labelsize": 12, "axes.edgecolor": "0.55", "axes.labelcolor": SA_INK,
+          "xtick.color": SA_MUTED, "ytick.color": SA_INK}
+    with plt.rc_context(rc):
+        fig, (ax, ax_d) = plt.subplots(
+            1, 2, figsize=(15.0, 7.6), gridspec_kw={"width_ratios": [1.45, 1.0], "wspace": 0.28})
+
+        # ---- left: the budget, in m/s per day ------------------------------------------------
+        ys = [0.0, 1.0, 2.0, 3.55, 4.55]
+        # The whole spread of the atmosphere-model choice (baseline included), as one shaded band:
+        # the solar bars run straight through it and out the other side.
+        lo = min(rate["layered"], rate["single@355"], base)
+        hi = max(rate["layered"], rate["single@355"], base)
+        ax.axvspan(lo, hi, color=SA_MODEL, alpha=0.13, lw=0, zorder=0)
+        for (name, _), y in zip(SA_ROWS, ys):
+            colour = SA_SOLAR if name.startswith("msis") else SA_MODEL
+            ax.barh(y, rate[name], height=0.62, color=colour, zorder=2)
+            label = (f"{rate[name]:.2f} m/s/day   (baseline)" if name == msis_sweep.BASELINE
+                     else f"{rate[name]:.2f} m/s/day   ({100 * err[name]:+.1f} %)")
+            # A bar ending inside the shaded band is labelled clear of it; one ending short of the
+            # band is labelled at its own end, on a white ground that masks the band and the line.
+            x_label = (hi if lo <= rate[name] <= hi else rate[name]) + 0.12
+            ax.text(x_label, y, label, va="center", ha="left", fontsize=13, zorder=4,
+                    color=SA_INK, fontweight="bold" if name in ("msis low", "msis high") else None,
+                    bbox=dict(fc="white", ec="none", pad=1.5))
+        ax.axvline(base, color=SA_INK, lw=1.2, ls="--", zorder=3)
+        ax.text(base, -0.62, "baseline", ha="center", va="bottom", fontsize=11, color=SA_MUTED)
+        ax.text(0.0, -0.95, "WHICH SUN?  one model (NRLMSIS 2.0), three activity levels",
+                fontsize=12, fontweight="bold", color=SA_SOLAR, va="bottom", zorder=4,
+                bbox=dict(fc="white", ec="none", pad=1.5))
+        ax.text(0.0, 2.72, "WHICH ATMOSPHERE MODEL?  static density laws",
+                fontsize=12, fontweight="bold", color=SA_MODEL, va="bottom", zorder=4,
+                bbox=dict(fc="white", ec="none", pad=1.5))
+        ax.text(hi + 0.12, 4.55 + 0.62, "shaded: the whole spread of the model choice",
+                fontsize=10.5, color=SA_MODEL, va="bottom", style="italic")
+        ax.set_yticks(ys)
+        ax.set_yticklabels([label for _, label in SA_ROWS])
+        ax.set_ylim(5.3, -1.25)
+        ax.set_xlim(0.0, 11.0)
+        ax.set_xlabel("station-keeping $\\Delta v$ (m/s per day)")
+        ax.grid(True, axis="x", ls=":", alpha=0.6, zorder=0)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+        ax.set_title("Propellant to hold a satellite at 292 km, 6 days", loc="left", pad=12)
+
+        # ---- right: the mechanism, density against altitude ----------------------------------
+        curves = [
+            ("msis low", "NRLMSIS, quiet Sun", SA_SOLAR_SHADES["msis low"], "-"),
+            ("msis moderate", "NRLMSIS, moderate Sun", SA_SOLAR_SHADES["msis moderate"], "-"),
+            ("msis high", "NRLMSIS, active Sun", SA_SOLAR_SHADES["msis high"], "-"),
+            ("layered", "28-band table", SA_MODEL, "-"),
+            ("single@355", "single exponential", SA_MODEL, "--"),
+        ]
+        for name, label, colour, ls in curves:
+            ax_d.semilogx(density[name], altitude, color=colour, ls=ls, lw=2.2, label=label)
+        ax_d.axhline(SA_STATION_KM, color=SA_INK, lw=1.0, ls=":")
+        ax_d.text(0.98, SA_STATION_KM + 6, "station, 292 km", transform=ax_d.get_yaxis_transform(),
+                  ha="right", va="bottom", fontsize=11, color=SA_INK)
+        # Direct labels on the two outer curves, in the empty space outside them at 450 km.
+        k = int(np.argmin(abs(altitude - 450.0)))
+        ax_d.text(density["msis low"][k] / 1.4, 450.0, "quiet Sun", color=SA_INK,
+                  fontsize=12, fontweight="bold", va="center", ha="right")
+        ax_d.text(density["msis high"][k] * 1.4, 450.0, "active Sun", color=SA_INK,
+                  fontsize=12, fontweight="bold", va="center", ha="left")
+        ax_d.set_ylim(150.0, 700.0)
+        # A decade of empty space on the left, below the quiet-Sun curve, holds the 292 km box.
+        ax_d.set_xlim(1e-15, 5e-9)
+        ax_d.set_xlabel("air density (kg/m$^3$, log scale)")
+        ax_d.set_ylabel("altitude (km)")
+        ax_d.grid(True, which="major", ls=":", alpha=0.6)
+        ax_d.spines[["top", "right"]].set_visible(False)
+        ax_d.legend(loc="upper right", fontsize=11, frameon=False)
+        ax_d.text(
+            0.02, 0.03,
+            "at 292 km, vs moderate Sun:\n"
+            f"quiet {rel_station['msis low']:.2f}x   active {rel_station['msis high']:.2f}x\n"
+            f"table {rel_station['layered']:.2f}x   single {rel_station['single@355']:.2f}x",
+            transform=ax_d.transAxes, fontsize=11, color=SA_INK, va="bottom",
+            bbox=dict(boxstyle="round", fc="white", ec="0.75"))
+        ax_d.set_title("Why: the Sun heats and inflates the air", loc="left", pad=12)
+
+        fig.suptitle(
+            f"The solar-activity assumption moves a station-keeping budget "
+            f"{ratio_low:.1f}-{ratio_high:.1f}x more than the atmosphere model does\n"
+            f"Sun: {100 * solar_swing[0]:+.0f} % to {100 * solar_swing[1]:+.0f} %.   "
+            f"Atmosphere model: {100 * model_swing[0]:+.0f} % to {100 * model_swing[1]:+.0f} %.",
+            x=0.01, ha="left", fontsize=16, fontweight="bold", color=SA_INK)
+        fig.text(
+            0.01, 0.012,
+            f"One 51.6 deg satellite, B = {msis_sweep.B} m$^2$/kg, held in a [{msis_sweep.SPEC.lower_km}, "
+            f"{msis_sweep.SPEC.upper_km}] km mean-altitude band for 6 days by two-impulse raises; "
+            f"Cowell + J2 + drag at dt = {msis_sweep.DT_S:.0f} s.\n"
+            f"Steady rate, first raise excluded, from run_sweep(..., station_keeping=, "
+            f"delta_v_baseline=\"msis moderate\") in benchmarks/msis_sweep.py. NRLMSIS 2.0 via pymsis, "
+            f"averaged over latitude, local time and season.\n"
+            f"Solar presets ECSS low / moderate / high: F10.7 = F10.7a = 65 / 140 / 250, "
+            f"Ap = 0 / 15 / 45 (from memory, unverified). Single exponential: matched to the table at "
+            f"355 km, scale height 60 km.",
+            fontsize=10, color=SA_MUTED, va="bottom")
+        fig.subplots_adjust(left=0.12, right=0.985, top=0.83, bottom=0.2)
+        _save(fig, "solar_activity.png")
+
+
+# ==================================================================================================
 
 FIGURES: Dict[str, Callable[[], None]] = {
     "ground": figure_ground_tracks,
@@ -904,6 +1105,7 @@ FIGURES: Dict[str, Callable[[], None]] = {
     "atmosphere": figure_atmosphere,
     "access": figure_access_windows,
     "stationkeeping": figure_station_keeping,
+    "solar": figure_solar_activity,
 }
 
 

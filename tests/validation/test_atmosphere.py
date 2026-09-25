@@ -588,7 +588,7 @@ def test_enable_force_model_rejects_an_unknown_density_law() -> None:
 
 def test_the_layered_law_still_disqualifies_the_fused_compiled_cowell_kernel() -> None:
     """The density law is a coefficient, not a mask bit, so it cannot change the fused plan - and
-    must not. `kernels.cowell_rk4_step` fuses `point_mass_gravity` and `j2` only; a drag bit of
+    must not. `kernels.cowell_rk4_step` fuses `point_mass_gravity`, `j2` and `zonal` only; a drag bit of
     either flavour has to send the whole Cowell set down the NumPy path, or the compiled path would
     silently drop drag altogether."""
     sim = scenarios.earth_constellation(_session(), n_sats=2, n_planes=2)
