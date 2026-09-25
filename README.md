@@ -9,14 +9,16 @@ kilometres and also in the units of the decision the model feeds:
 
 - **seconds** of contact-window shift
 - **passes** gained or lost
-- **metres per second** of station-keeping Δv
+- **metres per second** of station-keeping Δv, where the solar-activity assumption turns out to move
+  the budget [5 to 10 times more](#the-sun-against-the-atmosphere-model) than the choice of atmosphere
+  model
 
 Most astrodynamics libraries treat *running a simulation* as the primary operation. Here the main loop
 is a **sweep**: model configurations are plain data, so the effect of an assumption on accuracy and
 runtime is a measured output rather than a footnote.
 
-Python 3.10+, NumPy and SQLAlchemy 2.0. Numba (compiled kernels), SciPy (reference trajectories) and
-`sgp4` (TLE ingest) are optional.
+Python 3.10+, NumPy and SQLAlchemy 2.0. Numba (compiled kernels), SciPy (reference trajectories),
+`sgp4` (TLE ingest) and `pymsis` (NRLMSIS 2.0 density) are optional.
 
 ---
 
@@ -57,9 +59,9 @@ Two caveats:
   latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
 
 Every tier runs compiled. Cowell uses `kernels.cowell_rk4_step`, a fused twin of RK4 +
-`point_mass_gravity` + `j2`, held to the NumPy path at 1e-12 relative. The re-base that places a
-Cowell or secular-J2 body on its parent's end-of-step position is compiled too
-(`kernels.rebase_relative_states`, bit-identical to the NumPy block). Measured on the 12-satellite
+`point_mass_gravity` + `j2` (and `zonal`, J3..J6, not enabled here), held to the NumPy path at 1e-12
+relative. The re-base that places a Cowell or secular-J2 body on its parent's end-of-step position is
+compiled too (`kernels.rebase_relative_states`, bit-identical to the NumPy block). Measured on the 12-satellite
 scenario, one step costs about 6 µs for Cowell and 7 µs for secular J2 against 5 to 6 µs for Kepler;
 with the NumPy re-base those were 17 and 24 µs.
 
@@ -119,6 +121,31 @@ metric misses two things this one shows:
 The Cowell figure checks itself. A 1.88 km along-track error moves a pass by `(1.88 / 6921) / (n − ω)`
 = 0.265 s, and the measured 0.223 s is the along-track share of that error.
 
+### Does a 550 km constellation need more than J2?
+
+The same constellation, stations and mask, now against a truth that carries the EGM96 zonal harmonics
+J2 through J6, with and without the engine's `zonal` model (J3..J6) enabled
+(`benchmarks/zonal_sweep.py`):
+
+| Tier | Median error, 24 h | Mean / max \|rise shift\| | Passes lost / gained |
+|---|---|---|---|
+| Cowell + J2, 15 s step | 1.265 km | 0.070 s / 0.588 s | 0 / 0 |
+| Cowell + J2 + J3..J6, 15 s step | 0.0027 km | 0.0003 s / 0.0004 s | 0 / 0 |
+| Cowell + J2, 60 s step | 3.109 km | 0.101 s / 0.730 s | 0 / 0 |
+| Cowell + J2 + J3..J6, 60 s step | 1.877 km | 0.063 s / 0.223 s | 0 / 0 |
+
+**Yes in kilometres, no in contact windows.** At a 15 s step, where RK4's own truncation is 2.7e-3 km,
+omitting J3..J6 costs **1.26 km**, 470 times the step error. The same omission moves a rise time by
+**0.07 s on average and 0.59 s at worst**, and no pass is gained or lost, so a schedule with a 1 s pad
+does not notice it. The estimate written into the script before the first run was 1 to 2 km (J4's
+secular drift of the argument of latitude, −1.3 km, plus a per-satellite offset from the J3/J4
+short-period terms at the seed) and about 0.2 s of window shift. At a 60 s step the 1.88 km
+truncation is the larger error. J4's term is secular, so a multi-day horizon would need it.
+
+The zonal term is fused into the compiled Cowell step, so it is timed fairly: Cowell + J2 + J3..J6
+costs **1.17×** the J2-only tier (0.048 s against 0.041 s over 24 h at 15 s). On the NumPy path it
+was about 120×.
+
 ### Drag decay
 
 ![Drag decay](docs/figures/drag_decay.png)
@@ -164,6 +191,39 @@ fire once an orbit while inside the band.
 The steady rates are validated against the orbit-averaged decay converted to Δv at `(n/2) Δa`, to
 4 × 10⁻⁴.
 
+### The Sun against the atmosphere model
+
+![Solar activity against the atmosphere model](docs/figures/solar_activity.png)
+
+Both static density laws above assume one fixed state of the Sun. NRLMSIS 2.0 (`pymsis`, wrapped in
+`msis_bridge.py`) takes solar activity as input: the 10.7 cm radio flux F10.7 and the geomagnetic
+index Ap. Here they are three per-body coefficients, so solar activity is one more sweep axis. The
+same satellite and band as above, scored for 6 days by `run_sweep(..., station_keeping=spec,
+delta_v_baseline="msis moderate")` (`benchmarks/msis_sweep.py`):
+
+| Tier | Density at 292 km, vs baseline | Δv per day | vs baseline | Predicted before the run | Raises |
+|---|---|---|---|---|---|
+| NRLMSIS 2.0, moderate Sun (F10.7 = 140, Ap = 15) | 1 | 3.047 m/s | baseline | | 13 |
+| NRLMSIS 2.0, quiet Sun (65, 0) | 0.280 | 0.855 m/s | **−71.9 %** | −71.96 % | 4 |
+| NRLMSIS 2.0, active Sun (250, 45) | 2.341 | 7.142 m/s | **+134.4 %** | +134.43 % | 29 |
+| 28-band table | 1.128 | 3.438 m/s | +12.8 % | +12.88 % | 14 |
+| Single band, matched at 355 km | 0.969 | 2.952 m/s | −3.1 % | −3.11 % | 12 |
+
+**The solar-activity assumption moves the Δv budget 5 to 10 times more than the atmosphere model
+does**: a factor of 8.3 from quiet to active Sun (0.86 to 7.14 m/s per day), against 16 % across the
+models (2.95 to 3.44). Each measured rate is within 6 × 10⁻⁴ of the prediction written in the script
+before the first run, which models each law's density and local scale height, the orbit-averaged
+decay and the Hohmann transfer phase.
+
+The two static laws also *straddle* moderate MSIS. The previous section's "single band under-budgets
+by 14 %" was measured against the table, and the table itself sits 13 % above moderate MSIS at 292 km.
+Against MSIS, the single band is 3 % low.
+
+`pymsis` is never called inside a step, and never downloads anything. Each solar-activity triple is
+evaluated once at configuration time (1.3 s) into a mean profile over latitude, local time and day of
+year, which the kernel then interpolates. What that average discards is listed under
+[Known limitations](#known-limitations).
+
 ### The two parent graphs
 
 ![Hierarchy](docs/figures/hierarchy.png)
@@ -202,14 +262,18 @@ model's defining invariant drawn rather than asserted.
     parent is handled correctly.
 - **Force models** (`Simulation.enable_force_model`), composed through a per-body bitmask:
   - **`point_mass_gravity`** and **`j2`**.
-  - **`drag`**: a co-rotating atmosphere with an exponential or a 28-band piecewise density law.
+  - **`zonal`**: the J3..J6 zonal harmonics (EGM96), additive to `j2` and fused into the same compiled
+    Cowell step.
+  - **`drag`**: a co-rotating atmosphere with a choice of density law: a single exponential band, a
+    28-band piecewise table, or NRLMSIS 2.0. MSIS's solar activity (F10.7, Ap) is a per-body
+    coefficient, so the state of the Sun is a sweep axis like any model choice.
   - **`third_body`**: one named point-mass perturber.
   - **`srp`**: cannonball solar radiation pressure, with a cylindrical or conical (umbra/penumbra)
     shadow.
   - **`thrust`**: a continuous burn in the RSW frame, with propellant depletion and a dry-mass floor.
 
-  Models register configuration-time checks. For example, `j2` and `drag` refuse bodies whose parent is
-  a barycentre, and `third_body` and `srp` refuse an invalid perturber or light source.
+  Models register configuration-time checks. For example, `j2`, `zonal` and `drag` refuse bodies whose
+  parent is a barycentre, and `third_body` and `srp` refuse an invalid perturber or light source.
 - **Impulses and events.** Impulsive Δv works under *every* propagator. On an analytic body a burn
   re-derives the elements, and secular J2 also rebuilds its cached drift rates. `step()` splits at a
   scheduled burn epoch, and at any sign change of a registered event function, located by
@@ -220,16 +284,22 @@ model's defining invariant drawn rather than asserted.
     lost or gained.
   - With `external=`, it scores a propagator that runs outside the engine, such as SGP4, against the
     same truth.
+  - With `station_keeping=` and `delta_v_baseline=`, it runs a station-keeping controller under each
+    configuration and scores the **Δv budget** against a named baseline configuration (truth has no
+    drag, so the baseline is always stated, never inferred).
 - **Observation geometry** (`geometry.py`, `access.py`): elevation, azimuth, range and range rate from
   a ground station; access windows; line of sight. The **contact dataset** of windows with rise, peak
   and set samples is the export a downstream network model consumes.
 - **SGP4 bridge** (`sgp4_bridge.py`): wraps the `sgp4` package and never reimplements it. A TLE's mean
   elements never reach the engine's element conversion: vessels are seeded from SGP4's own Cartesian
   state.
+- **NRLMSIS 2.0 bridge** (`msis_bridge.py`): wraps `pymsis` and never reimplements it. It runs once per
+  solar-activity setting at configuration time, never inside a step, and never downloads space-weather
+  data: the indices are configuration, not a date lookup.
 - **Station-keeping** (`stationkeeping.py`): a dead-band altitude controller that turns the atmosphere
   choice into a Δv budget.
-- **Independent truth** (`reference.py`): Newtonian N-body integration with DOP853, optionally with J2,
-  sharing no code with the engine.
+- **Independent truth** (`reference.py`): Newtonian N-body integration with DOP853, optionally with J2
+  and J3..J6, sharing no code with the engine.
 
 **Orbital toolbox**
 
@@ -270,10 +340,10 @@ that works without the editable checkout.
 
 | | |
 |---|---|
-| Tests | 589 passing |
-| Type checking | `mypy --strict`, clean across 32 source files |
+| Tests | 696 passing |
+| Type checking | `mypy --strict`, clean across 34 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
-| Coverage | 91%, measured with Numba disabled |
+| Coverage | 92%, measured with Numba disabled (timing tests deselected) |
 | Published reference | Vallado et al. (2006) SGP4 verification vectors, all in-tolerance cases |
 
 > Measure coverage with Numba disabled. `coverage.py` traces bytecode, so a `@njit` function reads as
@@ -302,8 +372,10 @@ cleanly, plots plausibly and is wrong by a few percent. Some of what the suite p
   would miss. An early Cowell version that ignored the parent's own acceleration, found in review,
   fails it.
 - **Independent derivations.** The reference J2 field is derived in spherical coordinates, while the
-  engine uses the Cartesian form. They agree to 1.2e-15. Where the engine's model is exact, engine and
-  reference agree to 7.5e-5 km over ten days.
+  engine uses the Cartesian form. They agree to 1.2e-15. The reference J3..J6 field is typed out as
+  explicit Cartesian monomials, while the engine uses Legendre recursions; they agree to 8.9e-14 of
+  each degree's scale. Where the engine's model is exact, engine and reference agree to 7.5e-5 km
+  over ten days.
 - **Time-reversibility.** Stepping forward then backward returns the analytic arena to rounding level
   (3.4e-11 relative after 1000 steps each way). An `abs(dt)` bug planted in the compiled kernel
   passed every other test and was caught only here.
@@ -383,8 +455,11 @@ Orbit_Mechanics/
 ├── .github/workflows/       # Multi-version CI, plus a job without Numba
 ├── benchmarks/
 │   ├── bench_step.py        # Step-cost instrument: propagator comparison, scaling, breakdown
-│   ├── figures.py           # The gallery: tracks, error growth, drag, atmosphere, access, station-keeping
-│   └── frontier_plot.py     # Runs the sweep and writes docs/figures/frontier.png
+│   ├── figures.py           # The gallery: tracks, error growth, drag, atmosphere, access,
+│   │                        #   station-keeping, solar activity
+│   ├── frontier_plot.py     # Runs the sweep and writes docs/figures/frontier.png
+│   ├── msis_sweep.py        # Solar activity against the atmosphere model, in station-keeping Δv
+│   └── zonal_sweep.py       # J2 against J2..J6 truth, in km and in contact windows
 ├── docs/
 │   ├── architecture.md      # Why the engine is shaped this way
 │   ├── engineering-log.md   # Problems hit and how they were resolved
@@ -400,7 +475,9 @@ Orbit_Mechanics/
 │   ├── forces.py            # Force-model composition and the kernel contract
 │   ├── gravity.py           # point_mass_gravity
 │   ├── geopotential.py      # j2
-│   ├── drag.py, atmosphere.py  # drag and its two density laws
+│   ├── zonal.py             # zonal: J3..J6, additive to j2
+│   ├── drag.py, atmosphere.py  # drag and its density laws
+│   ├── msis_bridge.py       # NRLMSIS 2.0 via pymsis, evaluated at configuration time (optional)
 │   ├── thirdbody.py         # third_body
 │   ├── srp.py               # Solar radiation pressure, cylindrical and conical shadow
 │   ├── thrust.py            # Continuous thrust with propellant depletion
@@ -413,7 +490,7 @@ Orbit_Mechanics/
 │   ├── sgp4_bridge.py       # SGP4 wrapped: TLE ingest and an external sweep tier (sgp4, optional)
 │   ├── stationkeeping.py    # Dead-band altitude controller; atmosphere choice in Δv
 │   ├── viz.py               # Plot-data preparation: ground tracks, altitude, error curves
-│   ├── reference.py         # Independent DOP853 truth, optionally with J2 (SciPy, optional)
+│   ├── reference.py         # Independent DOP853 truth, optionally with J2..J6 (SciPy, optional)
 │   ├── scenarios.py         # Scenario builders shared by tests and benchmarks
 │   ├── frames.py            # Coordinate and state-space transformations, RSW
 │   ├── utilities.py         # Anomalies, Kepler, Barker, rotations
@@ -436,12 +513,13 @@ conda activate orbital_env
 pip install -e ".[dev,test]"
 ```
 
-`[test]` includes Numba, SciPy and `sgp4` so the full suite runs, and `[dev]` adds matplotlib for the
-figures. For a minimal install, each has its own extra:
+`[test]` includes Numba, SciPy, `sgp4` and `pymsis` so the full suite runs, and `[dev]` adds matplotlib
+for the figures. For a minimal install, each has its own extra:
 
 - `[perf]`: Numba
 - `[reference]`: SciPy
 - `[sgp4]`: `sgp4`
+- `[msis]`: `pymsis`
 
 The engine itself runs on NumPy without any of them.
 
@@ -449,7 +527,11 @@ The engine itself runs on NumPy without any of them.
 pytest                               # test suite
 mypy src/ --strict                   # type checking
 python benchmarks/frontier_plot.py   # regenerate the frontier figure (about a minute)
-python benchmarks/figures.py         # regenerate the gallery (about a minute)
+python benchmarks/figures.py         # regenerate the gallery (a few minutes)
+python benchmarks/figures.py solar   # ...or only the figures named (ground, error, drag, hierarchy,
+                                     #    atmosphere, access, stationkeeping, solar)
+python benchmarks/zonal_sweep.py     # does a 550 km constellation need more than J2?
+python benchmarks/msis_sweep.py      # solar activity against the atmosphere model, in Δv (a few minutes)
 python benchmarks/bench_step.py      # step-cost benchmarks
 ```
 
@@ -531,18 +613,28 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
   stages. That lowers convergence from fourth to first order: 2.6 km on the Moon over 30 days at a
   1-hour step, against 2.5e4 km without the model. Full N-body forces are not modelled. Cowell bodies
   must be massless, and heads and barycentres cannot use Cowell.
-- **J2 assumes a fixed spin axis.** The parent's spin axis is taken as the frame's z-axis. That is
-  exact for the Earth-centred scenarios and 23.4° off in the ecliptic Sun–Earth–Moon scenario.
+- **J2 and the higher zonals assume a fixed spin axis.** The parent's spin axis is taken as the
+  frame's z-axis. That is exact for the Earth-centred scenarios and 23.4° off in the ecliptic
+  Sun–Earth–Moon scenario. Only zonal terms exist; tesseral harmonics are not yet modelled.
+- **NRLMSIS 2.0 is averaged, by choice.** Each solar-activity setting becomes one global-mean density
+  profile, averaged over latitude, local time and day of year, with the indices held constant. That
+  discards the diurnal bulge (day/night **2.3×** at 400 km on the equator), the semi-annual season
+  (**1.6×** in the global mean at 400 km) and any
+  time variation of the indices, such as storms or the 27-day solar rotation. An orbit whose plane
+  sweeps all local times sees the mean on average; a dawn-dusk sun-synchronous orbit never does.
 - **Secular J2 is first order.** Mean seeding corrects only the semi-major axis.
 - **TEME is treated as inertial.** SGP4's output frame drifts against a true inertial frame by about
   0.31 arcsec per day, roughly 11 m per day in LEO. That is negligible over the day-scale horizons
   here, but not for months-long runs or any comparison against GCRF data, which would need `pyerfa`.
-- **Some citations are unverified.** Several textbook equation numbers (Curtis, Vallado,
-  Kozai/Brouwer) and the 28-band atmosphere table were written from memory. They are marked unverified
-  in the source, beside the self-contained derivations that the tests check. The table's internal
-  continuity check passes at every band boundary but one, at 25 km, which is asserted as a named
-  anomaly. The SGP4 vectors are the exception: they are read from the published
-  file, not from memory.
+- **Some citations and constants are unverified.** Several textbook equation numbers (Curtis,
+  Vallado, Kozai/Brouwer), the 28-band atmosphere table, the EGM96 J3..J6 coefficients and the ECSS
+  low/moderate/high solar-activity presets were written from memory. They are marked unverified in the
+  source, beside the self-contained derivations that the tests check. The table's internal continuity
+  check passes at every band boundary but one, at 25 km, which is asserted as a named anomaly. The same
+  EGM96 table reproduces the engine's J2 within its printed digits, and the atmosphere table sits
+  between 0.79 and 1.28 of moderate-activity MSIS from 150 to 1000 km: plausibility checks, not
+  verification. The SGP4 vectors are the exception: they are read from the published file, not from
+  memory.
 - **One known edge case.** When *every* input state is degenerate, `rv_to_coe` returns an array of the
   wrong shape. See `CLAUDE.md`.
 
@@ -563,16 +655,18 @@ Ordered so that each stage makes the next one safe rather than merely possible.
 5. **Model library.**
    - **Done:**
      - J2 (force model, secular propagator and reference)
+     - zonal harmonics J3..J6 (force model, compiled twin and reference)
      - Cowell RK4
      - third-body perturbations
      - drag with exponential and tabulated atmospheres
+     - NRLMSIS 2.0 through `pymsis`, with solar activity as a sweep axis
      - solar radiation pressure with shadow geometry
      - continuous and impulsive thrust
      - the SGP4 bridge
+   - **In progress:**
+     - tesseral harmonics
    - **Planned:**
      - perturbers advanced per integrator stage
-     - higher geopotential harmonics
-     - NRLMSISE through `pymsis`
      - Encke
      - symplectic integrators
      - SGP4 on the frontier plot
