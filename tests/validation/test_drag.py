@@ -283,7 +283,7 @@ def _closed_form_accel(parent_offset: ArrF) -> ArrF:
     state[1, :3] = parent_offset[:3] + _CF_R_KM
     state[1, 3:] = parent_offset[3:] + _CF_V
     params = np.zeros((2, len(DRAG_PARAM_NAMES)))
-    params[1] = _CF_PARAMS
+    params[1, :7] = _CF_PARAMS
     out = np.zeros((2, 3))
     with np.errstate(all="raise"):
         drag.drag_kernel(np.array([1], dtype=np.int64), 0.0, state, np.array([MU, 0.0]),
@@ -323,11 +323,11 @@ def test_degenerate_rows_contribute_exactly_zero_and_the_kernel_adds() -> None:
     params = np.zeros((5, len(DRAG_PARAM_NAMES)))
     # Trailing DENSITY_MODEL_EXPONENTIAL: these rows pre-date the layered law and must keep
     # selecting the single exponential, which is also what an unwritten (all-zero) row selects.
-    params[2] = [0.02, 1e-12, 0.0, 8.0, EARTH_R_EQ, EARTH_OMEGA,
+    params[2, :7] = [0.02, 1e-12, 0.0, 8.0, EARTH_R_EQ, EARTH_OMEGA,
                  DENSITY_MODEL_EXPONENTIAL]                         # root body: parent is itself
-    params[3] = [0.0, 1e-12, 500.0, 60.0, EARTH_R_EQ, EARTH_OMEGA,
+    params[3, :7] = [0.0, 1e-12, 500.0, 60.0, EARTH_R_EQ, EARTH_OMEGA,
                  DENSITY_MODEL_EXPONENTIAL]                         # B = 0
-    params[4] = [0.02, 1e-12, 500.0, 60.0, EARTH_R_EQ, 0.0,
+    params[4, :7] = [0.02, 1e-12, 500.0, 60.0, EARTH_R_EQ, 0.0,
                  DENSITY_MODEL_EXPONENTIAL]                         # valid
     parents = np.array([0, 0, 2, 0, 0], dtype=np.int32)
     out = np.full((5, 3), 1.0)
@@ -345,7 +345,7 @@ def test_degenerate_rows_contribute_exactly_zero_and_the_kernel_adds() -> None:
 def test_drag_is_registered_with_its_coefficient_layout() -> None:
     model = registry.get_force_model(DRAG_MODEL)
     assert model.param_names == ("ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega",
-                                 "density_model")
+                                 "density_model", "f107", "f107a", "ap")
     assert model.kernel is drag.drag_kernel
     assert model.validate_bodies is not None
     assert "Vallado" in model.citation

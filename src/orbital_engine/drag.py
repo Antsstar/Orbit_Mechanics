@@ -32,11 +32,22 @@ Choosing a density law
 |---|---|---|
 | `0.0` (`DENSITY_MODEL_EXPONENTIAL`, the default) | `rho0 exp(-(h - h0) / H)` | `rho0`, `h0`, `scale_height` |
 | `1.0` (`DENSITY_MODEL_LAYERED`) | piecewise exponential, 28 bands, Vallado Table 8-4 | none of those three |
+| `2.0` (`DENSITY_MODEL_MSIS`) | NRLMSIS 2.0 global-mean profile via `pymsis` (`msis_bridge.py`) | `f107`, `f107a`, `ap` |
 
 An unwritten coefficient row is all zeros, so **0.0 is the single-exponential law and every existing
-configuration keeps its previous behaviour bit for bit**. Under the layered law `rho0`, `h0` and
-`scale_height` are ignored entirely - including `scale_height <= 0`, which is a silent no-op only for
-the single-band law, since the layered law has no per-body scale height that could be missing.
+configuration keeps its previous behaviour bit for bit**. Under the layered and MSIS laws `rho0`, `h0`
+and `scale_height` are ignored entirely - including `scale_height <= 0`, which is a silent no-op only
+for the single-band law, since the other laws have no per-body scale height that could be missing.
+
+**MSIS is evaluated at configuration time, never in the kernel.** `validate_coefficients` refuses
+`density_model = 2.0` unless `f107`, `f107a` and `ap` are all given in the same call (so `pymsis` is
+never left to download them), refuses solar indices on a row whose law would ignore them, and then
+evaluates the profile for each requested triple (`msis_bridge.msis_profile`, memoised). The kernel
+only reads that memo. A solar-activity sweep is therefore coefficients alone:
+
+    ForceModelSpec("drag", {"ballistic_coeff": B, "r_ref": EARTH_R_EQ, "omega": EARTH_OMEGA,
+                            "density_model": DENSITY_MODEL_MSIS, "f107": 150.0, "f107a": 150.0,
+                            "ap": 15.0})
 
 The choice is a float coefficient rather than a second registered model, so it is one more key in a
 `sweep.ForceModelSpec`'s `coefficients` mapping and costs no mask bit:
@@ -44,8 +55,8 @@ The choice is a float coefficient rather than a second registered model, so it i
     ForceModelSpec("drag", {"ballistic_coeff": B, "r_ref": EARTH_R_EQ, "omega": EARTH_OMEGA,
                             "density_model": DENSITY_MODEL_LAYERED})
 
-`validate_coefficients` rejects any value that is not exactly one of the two selectors, so a typo in a
-sweep config raises at configuration time rather than silently rounding to the nearer law.
+`validate_coefficients` rejects any value that is not exactly one of the three selectors, so a typo in
+a sweep config raises at configuration time rather than silently rounding to the nearer law.
 
 Citations
 ---------
@@ -77,7 +88,13 @@ Every coefficient follows its usual convention, and the kernel works in engine u
 | `scale_height`  | 3 | km     |
 | `r_ref`         | 4 | km     |
 | `omega`         | 5 | rad/s, signed, about the frame's +z |
-| `density_model` | 6 | selector, dimensionless: 0.0 single exponential, 1.0 layered |
+| `density_model` | 6 | selector, dimensionless: 0.0 single exponential, 1.0 layered, 2.0 MSIS |
+| `f107`          | 7 | sfu, previous-day F10.7 - read only under MSIS |
+| `f107a`         | 8 | sfu, 81-day mean F10.7 - read only under MSIS |
+| `ap`            | 9 | daily Ap, 0..400 - read only under MSIS |
+
+Columns 7-9 are read only on MSIS rows, so a legacy 7-column parameter array still evaluates the
+first two laws unchanged.
 
 `rho [kg/m^3] * B [m^2/kg]` has units of 1/m, and the engine needs 1/km. **The only unit conversion is
 `_PER_M_TO_PER_KM = 1e3`**, applied once to `rho * B`. Then `(1/km) * (km/s)^2 = km/s^2`. Scale height
@@ -126,9 +143,9 @@ Limitations
   more above 500 km). One band is accurate over a few scale heights around `h0`; a decaying orbit that
   crosses several bands is not. `DENSITY_MODEL_LAYERED` is the answer to that, and
   `tests/validation/test_atmosphere.py` measures what the choice costs in predicted decay.
-- Neither law models solar or geomagnetic activity, the day/night bulge or winds. Those effects are
-  what `pymsis` would add, and they matter more for real prediction than the choice of density law
-  does - see `atmosphere.py`'s "Not modelled".
+- The two static laws model no solar or geomagnetic activity. `DENSITY_MODEL_MSIS` adds activity as
+  constant indices, but it too averages away the day/night bulge, seasons and latitude, and none of
+  the three has winds - see `msis_bridge.py` for the sizes of what the average discards.
 - Nothing stops the orbit when it reaches `h < 0`. The density grows exponentially, and the RK4 step
   eventually fails.
 """
@@ -140,8 +157,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .atmosphere import (
-    DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, exponential_density, layered_density,
+    DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, DENSITY_MODEL_MSIS, DENSITY_MODELS,
+    exponential_density, layered_density,
 )
+from .msis_bridge import MSIS_SOLAR_COEFFICIENTS, check_solar_activity, msis_density, msis_profile
 from .custom_types import ScalarSeconds
 from .geopotential import barycentre_parented
 from .registry import register_force_model
@@ -151,12 +170,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DRAG_MODEL", "DRAG_PARAM_NAMES", "EARTH_OMEGA", "drag_kernel",
-    "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED",
+    "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED", "DENSITY_MODEL_MSIS",
 ]
 
 DRAG_MODEL: Final[str] = "drag"
 DRAG_PARAM_NAMES: Final = (
     "ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega", "density_model",
+    "f107", "f107a", "ap",
 )
 _B_COL: Final[int] = 0
 _RHO0_COL: Final[int] = 1
@@ -165,6 +185,7 @@ _SCALE_HEIGHT_COL: Final[int] = 3
 _R_REF_COL: Final[int] = 4
 _OMEGA_COL: Final[int] = 5
 _DENSITY_MODEL_COL: Final[int] = 6
+_SOLAR_COLS: Final = slice(7, 10)          # f107, f107a, ap - MSIS_SOLAR_COEFFICIENTS, in order
 
 # rho [kg/m^3] * B [m^2/kg] is 1/m; the engine wants 1/km. This is the model's only unit conversion.
 _PER_M_TO_PER_KM: Final[float] = 1.0e3
@@ -185,40 +206,83 @@ def _reject_barycentre_parents(sim: "Simulation", bodies: NDArray[np.int64]) -> 
         )
 
 
-_DENSITY_MODELS: Final = (DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED)
-
-
-def _reject_unknown_density_model(
+def _validate_density_coefficients(
     sim: "Simulation", bodies: NDArray[np.int64], coefficients: Mapping[str, float],
 ) -> None:
     """
-    `validate_coefficients` hook for `"drag"`: `density_model` must be exactly one of the two
-    selectors in `atmosphere.py`.
+    `validate_coefficients` hook for `"drag"`, run before any bit or coefficient is written:
 
-    The kernel dispatches on `>= 0.5`, so an unrecognised value such as `2.0` would otherwise pick
-    the layered law silently - a config typo that changes the physics and raises nothing, which is
-    precisely the failure mode `CLAUDE.md`'s item 5 exists to catch. Omitting the coefficient is
-    still legal and still means the single exponential, so no existing call site is affected.
+    1. `density_model` must be exactly one of `atmosphere.DENSITY_MODELS`. The kernel dispatches on
+       half-way thresholds, so `3.0` would otherwise pick MSIS silently - a config typo that changes
+       the physics and raises nothing, precisely the failure mode `CLAUDE.md`'s item 5 exists to
+       catch. Omitting it is still legal and keeps the row's current law (0.0 on a fresh row).
+    2. Asking for MSIS requires `f107`, `f107a` and `ap` **in the same call**. `pymsis` would fetch
+       missing indices from the network by date; here they are configuration data, never looked up.
+       (`ap = 0` is a legitimate value, so an unwritten column cannot be told from a deliberate zero -
+       hence "in the same call" rather than "non-zero".) Later calls may update single indices on a
+       row that is already MSIS.
+    3. Solar indices on a row whose law is not MSIS are refused: they would be silently ignored, and
+       a sweep over them would measure nothing.
+    4. For every distinct `(f107, f107a, ap)` the call leaves on an MSIS row, the indices are
+       range-checked and the NRLMSIS 2.0 profile is **evaluated now** (`msis_profile`, memoised) -
+       this is the configuration-time boundary; the kernel only reads the memo.
     """
     requested = coefficients.get("density_model")
-    if requested is not None and float(requested) not in _DENSITY_MODELS:
+    if requested is not None and float(requested) not in DENSITY_MODELS:
         raise ValueError(
             f"force model '{DRAG_MODEL}': density_model={requested!r} is not a known density law; "
-            f"use atmosphere.DENSITY_MODEL_EXPONENTIAL ({DENSITY_MODEL_EXPONENTIAL}) or "
-            f"atmosphere.DENSITY_MODEL_LAYERED ({DENSITY_MODEL_LAYERED})."
+            f"use atmosphere.DENSITY_MODEL_EXPONENTIAL ({DENSITY_MODEL_EXPONENTIAL}), "
+            f"DENSITY_MODEL_LAYERED ({DENSITY_MODEL_LAYERED}) or DENSITY_MODEL_MSIS "
+            f"({DENSITY_MODEL_MSIS})."
         )
+
+    existing = sim.force_model_params.get(DRAG_MODEL)
+    if requested is not None:
+        law = np.full(bodies.size, float(requested))
+    elif existing is not None:
+        law = existing[bodies, _DENSITY_MODEL_COL]
+    else:
+        law = np.zeros(bodies.size)
+    on_msis = law == DENSITY_MODEL_MSIS
+
+    given = [key for key in MSIS_SOLAR_COEFFICIENTS if key in coefficients]
+    if given and not np.all(on_msis):
+        raise ValueError(
+            f"force model '{DRAG_MODEL}': {given} are read only under density_model="
+            f"DENSITY_MODEL_MSIS ({DENSITY_MODEL_MSIS}); slot(s) "
+            f"{bodies[~on_msis].tolist()} would silently ignore them."
+        )
+    if requested is not None and float(requested) == DENSITY_MODEL_MSIS and len(given) < 3:
+        missing = [key for key in MSIS_SOLAR_COEFFICIENTS if key not in coefficients]
+        raise ValueError(
+            f"force model '{DRAG_MODEL}': density_model=DENSITY_MODEL_MSIS needs f107, f107a and ap "
+            f"given explicitly (missing {missing}). Solar activity is configuration data here and is "
+            f"never looked up or downloaded - see msis_bridge.SOLAR_ACTIVITY_* for presets."
+        )
+    if not np.any(on_msis):
+        return
+
+    activity = (existing[bodies][:, _SOLAR_COLS].copy() if existing is not None
+                else np.zeros((bodies.size, 3)))
+    for column, key in enumerate(MSIS_SOLAR_COEFFICIENTS):
+        if key in coefficients:
+            activity[:, column] = float(coefficients[key])
+    for f107, f107a, ap in np.unique(activity[on_msis], axis=0):
+        check_solar_activity(float(f107), float(f107a), float(ap))
+        msis_profile(float(f107), float(f107a), float(ap))
 
 
 @register_force_model(
     DRAG_MODEL,
     param_names=DRAG_PARAM_NAMES,
     validate_bodies=_reject_barycentre_parents,
-    validate_coefficients=_reject_unknown_density_model,
+    validate_coefficients=_validate_density_coefficients,
     citation=(
         "Vallado, Fundamentals of Astrodynamics and Applications, 4th ed., Sec. 8.6.2, Eq. 8-28/8-29 "
         "(drag, v_rel = v - w x r), Eq. 8-33 (exponential density) and Table 8-4 (the piecewise "
-        "table in atmosphere.py); Montenbruck & Gill, Satellite Orbits, Eq. 3.97/3.98. Equation and "
-        "table numbers from memory, unverified."
+        "table in atmosphere.py); Montenbruck & Gill, Satellite Orbits, Eq. 3.97/3.98; NRLMSIS 2.0 "
+        "(Emmert et al. 2021, Earth and Space Science 8, e2020EA001321) via pymsis, averaged at "
+        "configuration time (msis_bridge.py). Equation and table numbers from memory, unverified."
     ),
 )
 def drag_kernel(
@@ -235,9 +299,11 @@ def drag_kernel(
     against each body's Keplerian parent and `w = omega z_hat`.
 
     `rho(h)` is whichever law the row's `density_model` coefficient selects - `atmosphere.py`'s
-    single exponential (0.0, the default) or its 28-band piecewise table (1.0). Both laws are
-    evaluated for every row and masked, which keeps the kernel branch-free over a mixed arena where
-    different bodies have been configured with different atmospheres.
+    single exponential (0.0, the default), its 28-band piecewise table (1.0), or the NRLMSIS 2.0
+    profile memoised at configuration time for the row's `(f107, f107a, ap)` (2.0). Each law is
+    evaluated on its own masked rows and the three are summed, which keeps the kernel branch-free over
+    a mixed arena where different bodies have been configured with different atmospheres. The MSIS
+    term never calls `pymsis`; it raises `LookupError` if a row's profile was never evaluated.
 
     Coefficient units and the single conversion (`_PER_M_TO_PER_KM`) are in the module docstring.
     `t` and `mu_array` are unused: the atmosphere is steady in the frame co-rotating with the parent.
@@ -258,20 +324,27 @@ def drag_kernel(
 
     altitude = np.sqrt(r2) - coeff[:, _R_REF_COL]
 
-    # Which density law each row uses. The two masks partition the rows, so exactly one of the two
+    # Which density law each row uses. The three masks partition the rows, so exactly one of the
     # terms below is non-zero per row and the sum is a branchless select - no `np.where` over a
-    # freshly allocated pair, and no `if np.any(...)` guard (`CLAUDE.md`, Conventions).
+    # freshly allocated pair, and no `if np.any(...)` guard (`CLAUDE.md`, Conventions). For a row on
+    # the first two laws the masks are the same booleans they were before MSIS existed and the MSIS
+    # term is exactly +0.0, so those rows are bit-identical to the two-law kernel.
     #
     # Rows with no separation contribute exactly zero under either law, and a row with no scale
     # height contributes zero under the single-band law only (an unconfigured row, H = 0). Neither
     # exponential is evaluated on an excluded row, so a root body (r = 0, altitude = -r_ref, which
     # would overflow `exp`) can neither divide by zero nor overflow.
     separated = r2 > 0.0
-    use_layered = coeff[:, _DENSITY_MODEL_COL] >= 0.5
+    selector = coeff[:, _DENSITY_MODEL_COL]
+    beyond_exponential = selector >= 0.5          # the two-law kernel's `use_layered`, verbatim
+    use_exponential = ~beyond_exponential         # so even a NaN selector keeps its old meaning
+    use_msis = selector >= 1.5
+    use_layered = beyond_exponential & ~use_msis
     density = (                                                                       # kg/m^3
         exponential_density(altitude, coeff[:, _RHO0_COL], coeff[:, _H0_COL], scale_height,
-                            separated & ~use_layered & (scale_height > 0.0))
+                            separated & use_exponential & (scale_height > 0.0))
         + layered_density(altitude, separated & use_layered)
+        + msis_density(altitude, coeff[:, _SOLAR_COLS], separated & use_msis)
     )
 
     # 0.5 * rho [kg/m^3] * B [m^2/kg] * 1e3 -> 1/km; times |v_rel| [km/s] times v_rel [km/s].
