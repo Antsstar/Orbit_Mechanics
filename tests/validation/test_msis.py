@@ -599,3 +599,32 @@ def test_decay_has_the_size_the_densities_predict(decay: DecayRun) -> None:
 
     density_ratio = float(_engine_rho(LOW, np.array([H_START_KM]))[0]) / rho0
     assert decay.first_orbit[1] / decay.first_orbit[0] == pytest.approx(density_ratio, rel=0.01)
+
+
+def test_profiles_differing_only_in_ap_are_distinct_and_each_exact_at_a_node() -> None:
+    """
+    The memo is keyed on the whole `(f107, f107a, ap)` triple. Every preset differs in F10.7, so in
+    review a memo that matched on `(f107, f107a)` alone passed all 48 MSIS tests - and a sweep
+    comparing quiet against storm-time conditions at the same F10.7 would then silently reuse the first
+    profile for both. Here two triples differ **only** in Ap.
+
+    Expected: at a grid node (400 km; 2 km spacing above 200 km) the log-linear evaluation is exact, so
+    each profile equals a direct `msis_mean_density` of its own triple to float64 rounding of the same
+    float32 MSIS output (1e-12 relative is generous). And the two must differ: geomagnetic heating at
+    Ap = 50 against Ap = 0 raises 400 km density by tens of percent at moderate F10.7 (the
+    quiet/storm contrast is the reason Ap is an input at all); assert more than 10 %, which a units or
+    column error would not mimic and a shared profile (ratio exactly 1) cannot pass.
+    """
+    node = np.array([400.0])
+    assert node[0] in msis_bridge.MSIS_ALTITUDE_GRID_KM
+    quiet = (140.0, 140.0, 0.0)
+    storm = (140.0, 140.0, 50.0)
+    msis_bridge.msis_profile(*quiet)
+    msis_bridge.msis_profile(*storm)
+    rho_quiet = float(msis_bridge.msis_density(node, np.array([quiet]))[0])
+    rho_storm = float(msis_bridge.msis_density(node, np.array([storm]))[0])
+    direct_quiet = float(msis_bridge.msis_mean_density(node, *quiet)[0])
+    direct_storm = float(msis_bridge.msis_mean_density(node, *storm)[0])
+    assert rho_quiet == pytest.approx(direct_quiet, rel=1e-12)
+    assert rho_storm == pytest.approx(direct_storm, rel=1e-12)
+    assert rho_storm / rho_quiet > 1.10, (rho_quiet, rho_storm)
