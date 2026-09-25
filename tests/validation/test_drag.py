@@ -396,8 +396,8 @@ def test_drag_composes_with_point_mass_and_j2() -> None:
 
 
 def test_cowell_bodies_with_drag_fall_back_to_the_numpy_path() -> None:
-    """`kernels.cowell_rk4_step` is fused for `point_mass_gravity` and `j2` only. A drag bit must
-    disqualify it, or the compiled path would silently drop drag."""
+    """`kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2` and `zonal` only. A drag bit
+    must disqualify it, or the compiled path would silently drop drag."""
     sim = scenarios.earth_constellation(_session(), n_sats=2, n_planes=2)
     sats = _sat_slots(sim)
     sim.set_propagator(sats, PropagatorType.COWELL)

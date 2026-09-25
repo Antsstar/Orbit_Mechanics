@@ -25,20 +25,25 @@ Nothing here asserts. Thresholds belong in the test suite; this is the instrumen
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Callable
 
-import numpy as np
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+# This repository's own `src` first: the package is an editable install of the *main* checkout, so
+# run from a git worktree this script would otherwise silently time the main checkout's code.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from orbital_engine import geopotential, kernels, scenarios, zonal
-from orbital_engine.benchmark import measure
-from orbital_engine.custom_types import PropagatorType
-from orbital_engine.database import Base
-from orbital_engine.integrators import RK4Integrator
-from orbital_engine.propagators import KeplerianPropagator
-from orbital_engine.simulator import Simulation
+import numpy as np  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+from orbital_engine import geopotential, kernels, scenarios, zonal  # noqa: E402
+from orbital_engine.benchmark import measure  # noqa: E402
+from orbital_engine.custom_types import PropagatorType  # noqa: E402
+from orbital_engine.database import Base  # noqa: E402
+from orbital_engine.integrators import RK4Integrator  # noqa: E402
+from orbital_engine.propagators import KeplerianPropagator  # noqa: E402
+from orbital_engine.simulator import Simulation  # noqa: E402
 
 DT = 3600.0
 

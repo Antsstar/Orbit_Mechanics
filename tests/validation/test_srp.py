@@ -749,7 +749,7 @@ def test_a_body_orbiting_the_source_may_have_srp_without_a_shadow() -> None:
 
 
 def test_srp_is_registered_with_a_citation_and_is_foreign_to_the_fused_cowell_plan() -> None:
-    """`kernels.cowell_rk4_step` fuses only `point_mass_gravity` and `j2`, so an `"srp"` body sends
+    """`kernels.cowell_rk4_step` fuses only `point_mass_gravity`, `j2` and `zonal`, so an `"srp"` body sends
     the whole Cowell set down the NumPy `RK4Integrator` path. Asserted, not assumed."""
     model = registry.get_force_model(SRP_MODEL)
     assert model.param_names == (

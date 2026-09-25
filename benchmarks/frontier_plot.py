@@ -19,17 +19,18 @@ a full multi-plane constellation.
 - Kepler (`PropagatorType.KEPLERIAN`), compiled.
 - Secular J2, osculating-seeded (`PropagatorType.SECULAR_J2`, `mean_seed=False`), compiled.
 - Secular J2, mean-seeded (`mean_seed=True`), compiled.
-- Cowell + `point_mass_gravity` + `j2`, compiled through the fused twin `kernels.cowell_rk4_step`,
-  swept over several step sizes to trace a fidelity/cost curve.
+- Cowell + `point_mass_gravity` + `j2`, compiled through the fused twin `kernels.cowell_rk4_step`
+  (which also fuses `zonal`, not enabled here), swept over several step sizes to trace a
+  fidelity/cost curve.
 
 **Axes.** Error (log) against wall time (log), both from `sweep.SweepResult` - median position error
 over the 12 satellites, and minimum-of-batches wall time for the propagation alone (truth generation
 and `Simulation` construction excluded, per `sweep.run_sweep`).
 
 **The implementation caveat.** With numba installed every tier runs compiled: Kepler and secular J2
-through their kernels, Cowell through `kernels.cowell_rk4_step`, which fuses RK4 with exactly the
-`point_mass_gravity` + `j2` combination this script sweeps (any other model would fall back to the
-NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied). Without numba,
+through their kernels, Cowell through `kernels.cowell_rk4_step`, which fuses RK4 with
+`point_mass_gravity`, `j2` and `zonal` - this script sweeps the first two (any model outside those
+three would fall back to the NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied). Without numba,
 Kepler and secular J2 run as interpreted Python and Cowell as vectorised NumPy, so the horizontal axis
 then measures implementation as much as model - printed here, on the figure itself and in
 `README.md`. The re-base each Cowell and secular-J2 body needs after `calc_global()` also runs compiled
@@ -87,7 +88,7 @@ TIMING_WARMUP = 1
 
 CAVEAT_COMPILED = (
     "All tiers run compiled (numba): Kepler and secular J2 through their kernels, Cowell through the\n"
-    "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2). Wall time is the model, not the\n"
+    "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2 [+ zonal]). Wall time is the model, not the\n"
     "implementation: the per-step re-base of Cowell and secular-J2 rows is compiled too (bit-identical twin).\n"
     "Kepler and secular J2 are closed-form, so they reach the 24 h horizon in a single step; Cowell must step."
 )
