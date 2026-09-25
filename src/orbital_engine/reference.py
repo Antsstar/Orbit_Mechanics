@@ -123,6 +123,40 @@ rounding level). The price is cancellation between monomials - up to `sum_k |c_k
 times the field's natural scale at n = 6 - so this route is a few hundred eps less accurate than the
 recursion. That is far below any DOP853 tolerance, and this is not anyone's fast path.
 
+Tesseral and sectoral harmonics (optional)
+------------------------------------------
+Passed explicitly like the others: `reference_for(..., tesseral={"Earth": (r_eq, omega, theta0,
+{(2, 2): (c22, s22), ...})})`, unnormalised `C_nm`/`S_nm` for `2 <= n <= 4`, `1 <= m <= n` (m = 0
+belongs to `oblateness=` / `zonal=` and is refused). The field is fixed in the body and turns about
+the frame's +z at `omega`, with prime-meridian angle `theta0 + omega * t` at absolute simulation time
+`t` - `tesseral.py`'s convention; `reference_for` shifts `theta0` by `omega * sim.t` so a truth started
+mid-run is in phase. Omitted (or all-zero), the right-hand side is bit-identical to a truth that never
+had the option. Same reaction convention: the body carrying the field receives the equal and opposite
+force, so linear momentum is conserved. **Energy and h_z are not** - a rotating non-axisymmetric body
+does work on the system and exerts a z-torque. What is conserved is the Jacobi-type combination
+`E - omega L_z` (the field depends on time only through a rigid rotation about z, so
+`dE/dt = omega dL_z/dt`), and when a tesseral body is present `energy_drift` reports the drift of that
+quantity instead (NaN if two tesseral bodies rotate at different rates, where no such integral exists).
+
+*The field, from a different starting point than the engine.* `tesseral.tesseral_kernel` rotates each
+position into the body frame, climbs Cunningham's V/W recursions and rotates back. Here there is no
+recursion and no rotation matrix. With `w = (x + i y) e^{-i theta}` (the body-fixed `x_b + i y_b`, by
+complex phase rather than by matrix), `cos(phi)^m e^{i m lambda} = w^m / r^m`, so each term's
+potential per unit `gm` is a short sum over the explicit polynomial `P_n^(m)(s) = sum_k c_k s^k`,
+
+    U_nm / gm = R^n sum_k c_k z^k r^-(n+m+k+1) [C Re(w^m) + S Im(w^m)]
+
+    d/ds P_2 = 3 s;                    d2/ds2 P_2 = 3
+    d/ds P_3 = (15 s^2 - 3)/2;         d2 P_3 = 15 s;            d3 P_3 = 15
+    d/ds P_4 = (35 s^3 - 15 s)/2;      d2 P_4 = (105 s^2 - 15)/2; d3 P_4 = 105 s;  d4 P_4 = 105
+
+and each is differentiated in inertial Cartesian components directly: with `D = m w^(m-1) e^{-i theta}`,
+`d(w^m)/dx = D` and `d(w^m)/dy = i D`, and the `z^k r^-q` factor as in the zonal monomials. The field
+is `+grad U` (geodesy sign). The typed table, the complex phasing and the per-monomial gradient share
+nothing with the kernel's recursion or its rotation, so a wrong recursion coefficient, a transposed
+C/S, an order off by one or a rotation in the wrong sense shows up as a disagreement
+(`tests/validation/test_tesseral.py`).
+
 References
 ----------
 Hairer, Norsett & Wanner, *Solving Ordinary Differential Equations I*, 2nd ed., section II.5
@@ -130,6 +164,7 @@ Hairer, Norsett & Wanner, *Solving Ordinary Differential Equations I*, 2nd ed., 
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, cast
 
@@ -142,6 +177,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ReferenceTrajectory", "nbody_acceleration", "j2_field", "oblateness_acceleration",
     "zonal_field", "zonal_potential", "zonal_acceleration", "ZONAL_TRUTH_DEGREES",
+    "tesseral_field", "tesseral_potential", "tesseral_acceleration", "TESSERAL_TRUTH_PAIRS", "TesseralTruth",
     "integrate_nbody", "reference_for",
     "DEFAULT_RTOL", "DEFAULT_ATOL", "TRUTH_RTOL", "TRUTH_ATOL",
 ]
@@ -177,7 +213,9 @@ class ReferenceTrajectory:
     `positions` and `velocities` have shape `(n_times, n_bodies, 3)`, ordered to match `names`.
     `j2` and `r_eq` record the oblateness the truth was integrated with, per body (zeros when none),
     so a stored result carries its own model configuration. `zonal` does the same for the higher
-    zonals, shape `(n_bodies, 5)`, columns `(r_eq, j3, j4, j5, j6)`.
+    zonals, shape `(n_bodies, 5)`, columns `(r_eq, j3, j4, j5, j6)`. `tesseral` likewise, shape
+    `(n_bodies, 21)`, columns `(r_eq, omega, theta0, c21, s21, ..., c44, s44)` with `theta0` referred
+    to this trajectory's `times[0]`.
     """
 
     names: List[str]
@@ -189,6 +227,7 @@ class ReferenceTrajectory:
     j2: Optional[NDArray[np.float64]] = None
     r_eq: Optional[NDArray[np.float64]] = None
     zonal: Optional[NDArray[np.float64]] = None
+    tesseral: Optional[NDArray[np.float64]] = None
 
     def index_of(self, name: str) -> int:
         try:
@@ -375,6 +414,150 @@ def _zonal_energy(
     return total
 
 
+# Tesseral/sectoral terms: entry (c, k) of pair (n, m) is the term c s^k of d^m P_n / ds^m, typed from
+# the closed forms in the module docstring, deliberately not generated by a recursion.
+TESSERAL_TRUTH_PAIRS: Tuple[Tuple[int, int], ...] = (
+    (2, 1), (2, 2), (3, 1), (3, 2), (3, 3), (4, 1), (4, 2), (4, 3), (4, 4),
+)
+_TESSERAL_MONOMIALS: Dict[Tuple[int, int], Tuple[Tuple[float, int], ...]] = {
+    (2, 1): ((3.0, 1),),
+    (2, 2): ((3.0, 0),),
+    (3, 1): ((15.0 / 2.0, 2), (-3.0 / 2.0, 0)),
+    (3, 2): ((15.0, 1),),
+    (3, 3): ((15.0, 0),),
+    (4, 1): ((35.0 / 2.0, 3), (-15.0 / 2.0, 1)),
+    (4, 2): ((105.0 / 2.0, 2), (-15.0 / 2.0, 0)),
+    (4, 3): ((105.0, 1),),
+    (4, 4): ((105.0, 0),),
+}
+_TESSERAL_COLUMNS = 3 + 2 * len(TESSERAL_TRUTH_PAIRS)
+
+# One body's tesseral truth: (r_eq km, omega rad/s, theta0 rad at sim time 0, {(n, m): (C, S)}).
+TesseralTruth = Tuple[float, float, float, Mapping[Tuple[int, int], Tuple[float, float]]]
+
+
+def _check_pair(pair: Tuple[int, int]) -> None:
+    if pair not in _TESSERAL_MONOMIALS:
+        raise ValueError(
+            f"tesseral pair {pair} is not one of {TESSERAL_TRUTH_PAIRS}; m = 0 terms are passed "
+            f"through oblateness= (n = 2) or zonal= (n >= 3)")
+
+
+def _tesseral_terms(
+    rel: NDArray[np.float64], theta: float, r_eq: float,
+    coefficients: Mapping[Tuple[int, int], Tuple[float, float]], gradient: bool,
+) -> NDArray[np.float64]:
+    """Shared body of `tesseral_field` (gradient=True, `(m,3)`) and `tesseral_potential` (`(m,1)`)."""
+    x, y, z = rel[:, 0], rel[:, 1], rel[:, 2]
+    r = np.sqrt(np.einsum("ij,ij->i", rel, rel))
+    phase = complex(math.cos(theta), -math.sin(theta))          # e^{-i theta}
+    w = (x + 1j * y) * phase                                    # body-fixed x_b + i y_b
+    result = np.zeros((rel.shape[0], 3 if gradient else 1), dtype=np.float64)
+    for pair, (c_nm, s_nm) in coefficients.items():
+        _check_pair(pair)
+        if c_nm == 0.0 and s_nm == 0.0:
+            continue
+        n, m = pair
+        w_m = w ** m
+        a_ang = c_nm * w_m.real + s_nm * w_m.imag              # C Re(w^m) + S Im(w^m)
+        d = m * w ** (m - 1) * phase                            # d(w^m)/dx; d/dy is i*d
+        da_dx = c_nm * d.real + s_nm * d.imag
+        da_dy = -c_nm * d.imag + s_nm * d.real
+        for c, k in _TESSERAL_MONOMIALS[pair]:
+            q = n + m + k + 1
+            radial = c * z ** k * r ** (-q)                     # c z^k r^-q
+            if not gradient:
+                result[:, 0] += r_eq ** n * radial * a_ang
+                continue
+            grad_radial = (-q * c * z ** k * r ** (-(q + 2)))[:, np.newaxis] * rel
+            if k > 0:
+                grad_radial[:, 2] += k * c * z ** (k - 1) * r ** (-q)
+            term = grad_radial * a_ang[:, np.newaxis]
+            term[:, 0] += radial * da_dx
+            term[:, 1] += radial * da_dy
+            result += r_eq ** n * term
+    return result
+
+
+def tesseral_field(
+    rel: NDArray[np.float64], theta: float, r_eq: float,
+    coefficients: Mapping[Tuple[int, int], Tuple[float, float]],
+) -> NDArray[np.float64]:
+    """
+    Tesseral acceleration **per unit gm of the body carrying the field** at inertial positions `rel`
+    `(m,3)` relative to it, 1/km^2, when its prime meridian is at angle `theta` from inertial +x.
+    `coefficients` maps `(n, m)` to unnormalised `(C_nm, S_nm)`; absent or zero pairs add nothing.
+    Complex-phase, monomial-by-monomial gradient - see the module docstring. Every row non-zero.
+    """
+    return _tesseral_terms(rel, theta, r_eq, coefficients, gradient=True)
+
+
+def tesseral_potential(
+    rel: NDArray[np.float64], theta: float, r_eq: float,
+    coefficients: Mapping[Tuple[int, int], Tuple[float, float]],
+) -> NDArray[np.float64]:
+    """Potential energy per unit mass per unit gm, **physicist's sign** (`Phi = -U`, so the field is
+    `-grad Phi`, matching `zonal_potential`), 1/km. Used for the `energy_drift` self-check."""
+    out: NDArray[np.float64] = -_tesseral_terms(rel, theta, r_eq, coefficients, gradient=False)[:, 0]
+    return out
+
+
+def _tesseral_row(row: NDArray[np.float64]) -> Tuple[float, float, float, Dict[Tuple[int, int], Tuple[float, float]]]:
+    """Unpack one `(r_eq, omega, theta0, c21, s21, ...)` row."""
+    coefficients = {
+        pair: (float(row[3 + 2 * j]), float(row[4 + 2 * j])) for j, pair in enumerate(TESSERAL_TRUTH_PAIRS)
+    }
+    return float(row[0]), float(row[1]), float(row[2]), coefficients
+
+
+def _tesseral_rows(tesseral: NDArray[np.float64]) -> NDArray[np.int64]:
+    rows: NDArray[np.int64] = np.flatnonzero(np.any(tesseral[:, 3:] != 0.0, axis=1))
+    return rows
+
+
+def tesseral_acceleration(
+    positions: NDArray[np.float64], mu: NDArray[np.float64], tesseral: NDArray[np.float64], t: float,
+) -> NDArray[np.float64]:
+    """
+    Tesseral accelerations on every body from every body with a non-zero tesseral row at time `t`
+    (seconds from `theta0`'s epoch), `(n,3)`, km/s^2. `tesseral` is `(n,21)`, columns `(r_eq, omega,
+    theta0, c21, s21, ..., c44, s44)`. Same reaction convention as `oblateness_acceleration`.
+    """
+    n = positions.shape[0]
+    accel = np.zeros((n, 3), dtype=np.float64)
+    for j in _tesseral_rows(tesseral):
+        others = np.arange(n) != j
+        r_eq, omega, theta0, coefficients = _tesseral_row(tesseral[j])
+        field = tesseral_field(positions[others] - positions[j], theta0 + omega * t, r_eq, coefficients)
+        accel[others] += mu[j] * field
+        accel[j] -= np.einsum("i,ij->j", mu[others], field)
+    return accel
+
+
+def _tesseral_energy(
+    positions: NDArray[np.float64], velocities: NDArray[np.float64], mu: NDArray[np.float64],
+    tesseral: NDArray[np.float64], t: float,
+) -> float:
+    """
+    The tesseral pair potential energy minus `omega L_z` (per unit G, mu-weighted), so that adding it
+    to the point-mass (+ J2 + zonal) energy gives the conserved Jacobi-type integral - see the module
+    docstring. NaN when tesseral bodies rotate at different rates.
+    """
+    rows = _tesseral_rows(tesseral)
+    omegas = {float(tesseral[j, 1]) for j in rows}
+    if len(omegas) > 1:
+        return float("nan")
+    n = positions.shape[0]
+    total = 0.0
+    for j in rows:
+        others = np.arange(n) != j
+        r_eq, omega, theta0, coefficients = _tesseral_row(tesseral[j])
+        phi = tesseral_potential(positions[others] - positions[j], theta0 + omega * t, r_eq, coefficients)
+        total += float(mu[j] * np.sum(mu[others] * phi))
+    l_z = float(np.sum(mu * (positions[:, 0] * velocities[:, 1] - positions[:, 1] * velocities[:, 0])))
+    return total - omegas.pop() * l_z
+
+
 def _specific_energy(
     positions: NDArray[np.float64], velocities: NDArray[np.float64], mu: NDArray[np.float64]
 ) -> float:
@@ -423,6 +606,7 @@ def integrate_nbody(
     j2: Optional[NDArray[np.float64]] = None,
     r_eq: Optional[NDArray[np.float64]] = None,
     zonal: Optional[NDArray[np.float64]] = None,
+    tesseral: Optional[NDArray[np.float64]] = None,
 ) -> ReferenceTrajectory:
     """
     Integrate an isolated N-body system with DOP853 and sample it at `times`.
@@ -436,6 +620,11 @@ def integrate_nbody(
     `zonal`, shape `(n, 5)` or `None`, gives each body's higher zonals as `(r_eq, j3, j4, j5, j6)`;
     an all-zero row (or `None`) means none. Its `r_eq` is separate from the J2 one because the two
     options are independent, as `"j2"` and `"zonal"` are in the engine.
+
+    `tesseral`, shape `(n, 21)` or `None`, gives each body's tesseral field as `(r_eq, omega, theta0,
+    c21, s21, ..., c44, s44)`, unnormalised, with `theta0` the prime-meridian angle at `times[0]` = 0;
+    an all-zero coefficient row (or `None`) means none. With it present `energy_drift` is the drift of
+    `E - omega L_z` (see the module docstring).
 
     Raises `RuntimeError` if the integrator fails, rather than returning a partial trajectory. A
     truncated reference silently compared against a full engine run would report enormous
@@ -475,7 +664,31 @@ def integrate_nbody(
         raise ValueError("every body with a non-zero zonal J_n needs a positive r_eq")
     has_zonal = bool(np.any(zonal_rows))
 
-    if has_zonal:
+    tess_arr = np.zeros((n, _TESSERAL_COLUMNS)) if tesseral is None else np.asarray(tesseral, dtype=np.float64)
+    if tess_arr.shape != (n, _TESSERAL_COLUMNS):
+        raise ValueError(f"tesseral must have shape ({n}, {_TESSERAL_COLUMNS}), got {tess_arr.shape}")
+    if not np.all(np.isfinite(tess_arr)):
+        raise ValueError("tesseral coefficients must be finite")
+    tess_rows = np.any(tess_arr[:, 3:] != 0.0, axis=1)
+    if np.any(tess_rows & ~(tess_arr[:, 0] > 0.0)):
+        raise ValueError("every body with a non-zero tesseral C_nm/S_nm needs a positive r_eq")
+    has_tesseral = bool(np.any(tess_rows))
+
+    if has_tesseral:
+        # The only time-dependent right-hand side: the field turns with the body. Everything else is
+        # summed in the same order as the has_zonal branch below, and the tesseral term added last.
+        # (The parameter keeps the other branches' name `_t` for mypy; here it is read.)
+        def rhs(_t: float, y: NDArray[np.float64]) -> NDArray[np.float64]:
+            r = y[: 3 * n].reshape(n, 3)
+            v = y[3 * n:].reshape(n, 3)
+            accel = nbody_acceleration(r, mu)
+            if oblate:
+                accel = accel + oblateness_acceleration(r, mu, j2_arr, r_eq_arr)
+            if has_zonal:
+                accel = accel + zonal_acceleration(r, mu, zonal_arr)
+            accel = accel + tesseral_acceleration(r, mu, tess_arr, float(_t))
+            return np.concatenate([v.ravel(), accel.ravel()])
+    elif has_zonal:
         # The point-mass (+ J2) sum is formed first, in the same order as the branches below, and
         # the zonal term added to it last.
         def rhs(_t: float, y: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -524,6 +737,9 @@ def integrate_nbody(
     if has_zonal:
         e0 += _zonal_energy(pos[0], mu, zonal_arr)
         e1 += _zonal_energy(pos[-1], mu, zonal_arr)
+    if has_tesseral:
+        e0 += _tesseral_energy(pos[0], vel[0], mu, tess_arr, float(times[0]))
+        e1 += _tesseral_energy(pos[-1], vel[-1], mu, tess_arr, float(times[-1]))
     drift = abs((e1 - e0) / e0) if e0 != 0.0 else abs(e1 - e0)
 
     return ReferenceTrajectory(
@@ -536,6 +752,7 @@ def integrate_nbody(
         j2=j2_arr,
         r_eq=r_eq_arr,
         zonal=zonal_arr,
+        tesseral=tess_arr,
     )
 
 
@@ -547,6 +764,7 @@ def reference_for(
     atol: float = DEFAULT_ATOL,
     oblateness: Optional[Mapping[str, Tuple[float, float]]] = None,
     zonal: Optional[Mapping[str, Tuple[float, Mapping[int, float]]]] = None,
+    tesseral: Optional[Mapping[str, TesseralTruth]] = None,
 ) -> ReferenceTrajectory:
     """
     Integrate the physical bodies of a built `Simulation` from its current state.
@@ -568,6 +786,12 @@ def reference_for(
     `{"Earth": (6378.137, {3: -2.5326564853e-6, 4: -1.6196215914e-6})}` - read the same way, with the
     same `KeyError` for a name that is not an integrated body, and a `ValueError` for a degree outside
     3..6 (degree 2 belongs to `oblateness`, so it cannot be given twice).
+
+    `tesseral` maps body name to `(r_eq_km, omega_rad_s, theta0_rad, {(n, m): (C_nm, S_nm)})`,
+    unnormalised, `2 <= n <= 4`, `1 <= m <= n` (a `ValueError` otherwise - m = 0 has its own doors),
+    with `theta0` the prime-meridian angle at **absolute simulation time 0** (`tesseral.py`'s and
+    `geometry.py`'s convention). It is shifted here by `omega * sim.t`, so a truth started from a
+    simulation that has already run stays in phase with the engine.
     """
     physical = sim.active_mask & ~sim.is_system
     slots = np.flatnonzero(physical)
@@ -599,6 +823,22 @@ def reference_for(
                 _check_degree(degree)
                 zonal_arr[k, degree - 2] = j_n
 
+    tess_arr: Optional[NDArray[np.float64]] = None
+    if tesseral is not None:
+        tess_arr = np.zeros((len(names), _TESSERAL_COLUMNS))
+        for name, (tess_r_eq, omega, theta0, pairs) in tesseral.items():
+            if name not in names:
+                raise KeyError(f"tesseral given for '{name}', which is not an integrated body; have {names}")
+            k = names.index(name)
+            tess_arr[k, 0] = tess_r_eq
+            tess_arr[k, 1] = omega
+            tess_arr[k, 2] = theta0 + omega * float(sim.t)
+            for pair, (c_nm, s_nm) in pairs.items():
+                _check_pair(pair)
+                j = TESSERAL_TRUTH_PAIRS.index(pair)
+                tess_arr[k, 3 + 2 * j] = c_nm
+                tess_arr[k, 4 + 2 * j] = s_nm
+
     return integrate_nbody(
         sim.mu_array[physical].copy(),
         sim.global_states[physical, :3].copy(),
@@ -610,4 +850,5 @@ def reference_for(
         j2=j2,
         r_eq=r_eq,
         zonal=zonal_arr,
+        tesseral=tess_arr,
     )
