@@ -79,7 +79,7 @@ one that neither invents nor loses a pass.
 Three things the kilometre metric cannot say. First, the **discrete failures**: Kepler does not merely
 mistime its passes, it deletes five that happen and predicts four that do not, and those nine are
 scheduling decisions rather than error bars. Second, **ranking changes**: mean-seeded secular J2 is
-100x better than Kepler in kilometres (4.04 km against 607.61 km in `error_growth.png`) but only 20x
+150x better than Kepler in kilometres (4.04 km against 607.61 km in `error_growth.png`) but only 20x
 better in mean window shift, and it still drops a marginal pass - an averaged theory reproduces the
 along-track position far better than it reproduces the *elevation profile* near the horizon, which is
 where a marginal pass lives. Third, **the two secular-J2 seedings are indistinguishable in the scatter

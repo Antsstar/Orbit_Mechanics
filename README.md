@@ -622,7 +622,7 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
   (**1.6×** in the global mean at 400 km) and any
   time variation of the indices, such as storms or the 27-day solar rotation. An orbit whose plane
   sweeps all local times sees the mean on average; a dawn-dusk sun-synchronous orbit never does.
-- **Secular J2 is first order.** Mean seeding corrects only the semi-major axis.
+- **Secular J2 is first order.** Mean seeding corrects only the semi-latus rectum `p` (and so the mean motion), never `e` or `i`.
 - **TEME is treated as inertial.** SGP4's output frame drifts against a true inertial frame by about
   0.31 arcsec per day, roughly 11 m per day in LEO. That is negligible over the day-scale horizons
   here, but not for months-long runs or any comparison against GCRF data, which would need `pyerfa`.
