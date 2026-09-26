@@ -411,7 +411,7 @@ def _extract(times: ArrayFloat, margin: ArrayFloat, ranges: ArrayFloat) -> _Edge
     # Closest approach: flatten every run's range samples into one array of contiguous segments,
     # take each segment's minimum with `reduceat`, and keep the first sample that attains it.
     n_windows = pair.size
-    peak = np.zeros(n_windows, dtype=np.int64)
+    peak: NDArray[np.int64] = np.zeros(n_windows, dtype=np.int64)
     if n_windows:
         lengths = i1 - i0 + 1
         offsets = np.concatenate(([0], np.cumsum(lengths)[:-1])).astype(np.int64)
@@ -422,7 +422,7 @@ def _extract(times: ArrayFloat, margin: ArrayFloat, ranges: ArrayFloat) -> _Edge
         hit = np.flatnonzero(vals == np.repeat(seg_min, lengths))
         seg_of_hit = np.repeat(np.arange(n_windows, dtype=np.int64), lengths)[hit]
         _, first = np.unique(seg_of_hit, return_index=True)
-        peak = cols[hit[first]]
+        peak = np.asarray(cols[hit[first]], dtype=np.int64)
 
     return _Edges(
         pair=pair, i0=i0, i1=i1, rise=np.asarray(rise, dtype=np.float64),
