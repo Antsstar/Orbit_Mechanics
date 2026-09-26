@@ -132,8 +132,8 @@ together.
 Composition
 -----------
 The `"thrust"` bit is foreign to `Simulation._refresh_cowell_plan`, whose fused compiled kernel
-covers `point_mass_gravity`, `j2` and `zonal` only. A Cowell body carrying thrust therefore sends the **whole**
-Cowell set down the NumPy `RK4Integrator` path, exactly as `"drag"` and `"third_body"` do
+covers `point_mass_gravity`, `j2`, `drag` and `zonal` only. A Cowell body carrying thrust therefore sends the
+**whole** Cowell set down the NumPy `RK4Integrator` path, exactly as `"srp"` and `"third_body"` do
 (`tests/validation/test_thrust.py` asserts it). There is deliberately no compiled twin.
 
 Limitations

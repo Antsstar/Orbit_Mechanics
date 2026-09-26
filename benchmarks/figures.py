@@ -46,8 +46,8 @@ is large against RK4 drift. Measured drop 3.6586 km against the orbit-averaged c
 a ratio of 0.9996. That closed form is derived in the code below from two factors this figure exists
 to make visible: the prograde co-rotation factor f = 0.8714, and the density feedback as the orbit
 descends, which alone raises the mean rate 3.1% above the initial tangent -0.1775 km/orbit. The
-control holds altitude to 1e-04 km. Both run Cowell; the drag one falls to the NumPy path, because
-the fused compiled twin carries only point-mass gravity, J2 and the J3..J6 zonals.
+control holds altitude to 1e-04 km. Both run Cowell on the fused compiled twin, which carries drag
+(every density law) as well as point-mass gravity, J2 and the J3..J6 zonals.
 
 **5. `atmosphere.png` - caption.** The two density laws `drag.py` can be configured with, drawn
 against altitude on a log density axis, with their ratio below. The single band is matched to the

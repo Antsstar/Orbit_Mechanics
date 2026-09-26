@@ -10,7 +10,8 @@ Reports five things, because they answer five different questions:
 1. **Reference against compiled kernel** - the headline. Both compute the same thing, to within the
    tolerance asserted in `tests/validation/test_kernel_equivalence.py`, so the ratio is pure cost.
    Keplerian propagation, then the fused Cowell RK4 step per force-model set (point mass, + j2,
-   + J3..J6 zonal), with the full `step()` cost alongside so the kernel's share is visible.
+   + J3..J6 zonal, + drag under each density law), with the full `step()` cost alongside so the
+   kernel's share is visible.
 2. **Cost per step by scenario** - what a performance regression would show up in.
 3. **Cost per step against body count** - separates per-body cost from fixed per-step overhead. A
    flat line means the engine is dispatch-bound rather than arithmetic-bound.
@@ -37,7 +38,8 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from orbital_engine import geopotential, kernels, scenarios, zonal  # noqa: E402
+from orbital_engine import drag, geopotential, kernels, scenarios, zonal  # noqa: E402
+from orbital_engine.atmosphere import DENSITY_MODEL_LAYERED  # noqa: E402
 from orbital_engine.benchmark import measure  # noqa: E402
 from orbital_engine.custom_types import PropagatorType  # noqa: E402
 from orbital_engine.database import Base  # noqa: E402
@@ -111,12 +113,34 @@ def bench_propagators() -> None:
 
 COWELL_DT = 60.0
 
-# Cowell force-model sets the fused kernel implements, cheapest first. "zonal" is J3..J6 on top of j2.
+# Cowell force-model sets the fused kernel implements, cheapest first. "zonal" is J3..J6 on top of j2;
+# "drag:<law>" is drag under that density law (B = 0.05 m^2/kg, co-rotating) on top of j2.
 COWELL_MODEL_SETS: list[tuple[str, tuple[str, ...]]] = [
     ("pm", ("point_mass_gravity",)),
     ("pm+j2", ("point_mass_gravity", "j2")),
     ("pm+j2+zonal", ("point_mass_gravity", "j2", "zonal")),
+    ("pm+j2+drag:exp", ("point_mass_gravity", "j2", "drag:exp")),
+    ("pm+j2+drag:tab", ("point_mass_gravity", "j2", "drag:tab")),
+    ("pm+j2+drag:msis", ("point_mass_gravity", "j2", "drag:msis")),
 ]
+
+_DRAG_COMMON = {"ballistic_coeff": 0.05, "r_ref": geopotential.EARTH_R_EQ, "omega": drag.EARTH_OMEGA}
+
+
+def _coefficients(model: str) -> tuple[str, dict[str, float]]:
+    """`(registered name, coefficients)` for one entry of `COWELL_MODEL_SETS`."""
+    if model == "drag:exp":
+        return drag.DRAG_MODEL, {**_DRAG_COMMON, "rho0": 6.967e-13, "h0": 500.0, "scale_height": 63.822}
+    if model == "drag:tab":
+        return drag.DRAG_MODEL, {**_DRAG_COMMON, "density_model": DENSITY_MODEL_LAYERED}
+    if model == "drag:msis":
+        from orbital_engine.msis_bridge import SOLAR_ACTIVITY_MODERATE, msis_coefficients
+        return drag.DRAG_MODEL, {**_DRAG_COMMON, **msis_coefficients(SOLAR_ACTIVITY_MODERATE)}
+    return model, {
+        "point_mass_gravity": {},
+        "j2": {"j2": geopotential.EARTH_J2, "r_eq": geopotential.EARTH_R_EQ},
+        "zonal": {"r_eq": geopotential.EARTH_R_EQ, **zonal.EARTH_ZONALS},
+    }[model]
 
 
 def build_cowell(n_sats: int, models: tuple[str, ...]) -> tuple[Simulation, np.ndarray]:
@@ -125,24 +149,24 @@ def build_cowell(n_sats: int, models: tuple[str, ...]) -> tuple[Simulation, np.n
     sats = np.asarray(
         [i for n, i in sim.name_to_index.items() if n.startswith("SAT-")], dtype=np.int64)
     sim.set_propagator(sats, PropagatorType.COWELL)
-    coefficients: dict[str, dict[str, float]] = {
-        "point_mass_gravity": {},
-        "j2": {"j2": geopotential.EARTH_J2, "r_eq": geopotential.EARTH_R_EQ},
-        "zonal": {"r_eq": geopotential.EARTH_R_EQ, **zonal.EARTH_ZONALS},
-    }
     for model in models:
-        sim.enable_force_model(model, sats.tolist(), **coefficients[model])
+        name, coefficients = _coefficients(model)
+        sim.enable_force_model(name, sats.tolist(), **coefficients)
     return sim, sats
 
 
 def bench_cowell() -> None:
     rule("Cowell RK4 step: NumPy RK4Integrator against fused kernels.cowell_rk4_step")
-    print(f"{'models':<14}{'sats':>6}{'reference':>12}{'kernel':>10}{'speedup':>10}{'us/body':>10}"
+    print(f"{'models':<16}{'sats':>6}{'reference':>12}{'kernel':>10}{'speedup':>10}{'us/body':>10}"
           f"{'full step':>11}")
 
     for n_sats in (12, 60):
         for label, models in COWELL_MODEL_SETS:
-            sim, sats = build_cowell(n_sats, models)
+            try:
+                sim, sats = build_cowell(n_sats, models)
+            except ImportError:
+                print(f"{label:<16}{n_sats:>6}   (skipped: the [msis] extra is not installed)")
+                continue
             assert sim._cowell_fused_ok, f"{label} must qualify for the fused kernel"
             primaries = sim.parent_indices[sats]
             integrator = RK4Integrator(sim.max_capacity)
@@ -150,17 +174,22 @@ def bench_cowell() -> None:
             def reference() -> None:
                 integrator.step(sim.accelerations, sim.t, sim.global_states, COWELL_DT, sats, primaries)
 
+            tables = sim._cowell_drag_tables
+
             def kernel() -> None:
                 kernels.cowell_rk4_step(
                     COWELL_DT, sim.global_states, sim.mu_array, sim.parent_indices, sats,
                     sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
-                    sim._cowell_has_zonal, sim._cowell_zonal_params, sim._cowell_rel,
+                    sim._cowell_has_zonal, sim._cowell_zonal_params,
+                    sim._cowell_has_drag, sim._cowell_drag_params, sim._cowell_drag_table_of,
+                    tables.altitude_km, tables.density_kg_m3, tables.scale_height_km,
+                    tables.n_nodes, tables.activity, sim._cowell_rel,
                 )
 
             ref = measure(reference, inner=50).best
             ker = measure(kernel, inner=200).best
             full = measure(lambda: sim.step(COWELL_DT), inner=50).best
-            print(f"{label:<14}{n_sats:>6}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x"
+            print(f"{label:<16}{n_sats:>6}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x"
                   f"{ker / n_sats:>10.3f}{full:>10.1f}u")
 
 

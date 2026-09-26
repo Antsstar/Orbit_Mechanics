@@ -5,11 +5,14 @@ The drag acceleration on a body moving through an atmosphere that co-rotates rig
 Keplerian parent, using a single-exponential density profile. It is the dominant non-gravitational
 perturbation in LEO, and it composes additively with `point_mass_gravity` and `j2` on Cowell bodies.
 
-Reference implementation only. Like `j2_kernel`, this runs on every enabled body at every RK4 stage,
-so under `CLAUDE.md`'s two-implementation rule it wants a compiled twin in `kernels.py`. That twin is
-**deliberately not written**. `Simulation._refresh_cowell_plan` treats any mask bit other than
-`point_mass_gravity`, `j2` and `zonal` as foreign, so a Cowell body carrying `"drag"` sends the whole Cowell set
-down the NumPy `RK4Integrator` path (`tests/validation/test_drag.py` asserts this).
+This is the reference implementation. Like `j2_kernel`, it runs on every enabled body at every RK4
+stage, so under `CLAUDE.md`'s two-implementation rule it has a compiled twin: the drag block of
+`kernels._cowell_accel`, fused into `kernels.cowell_rk4_step` with `point_mass_gravity`, `j2` and
+`zonal` behind a per-body `has_drag` flag, all three density laws included. The twin is the same
+arithmetic in the same order, held to this kernel at 1e-12 relative by
+`tests/validation/test_kernel_equivalence.py`. The layered table and each MSIS profile reach it as
+stacked arrays built at configuration time by `density_tables` below; the density law and every other
+coefficient are read live from `force_model_params["drag"]`, as here.
 
 Model
 -----
@@ -151,16 +154,19 @@ Limitations
 """
 from __future__ import annotations
 
-from typing import Final, Mapping, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Final, Mapping, Tuple, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .atmosphere import (
-    DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, DENSITY_MODEL_MSIS, DENSITY_MODELS,
-    exponential_density, layered_density,
+    BASE_ALTITUDE_KM, BASE_DENSITY_KG_M3, DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED,
+    DENSITY_MODEL_MSIS, DENSITY_MODELS, SCALE_HEIGHT_KM, exponential_density, layered_density,
 )
-from .msis_bridge import MSIS_SOLAR_COEFFICIENTS, check_solar_activity, msis_density, msis_profile
+from .msis_bridge import (
+    MSIS_SOLAR_COEFFICIENTS, cached_msis_profile, check_solar_activity, msis_density, msis_profile,
+)
 from .custom_types import ScalarSeconds
 from .geopotential import barycentre_parented
 from .registry import register_force_model
@@ -169,7 +175,7 @@ if TYPE_CHECKING:
     from .simulator import Simulation
 
 __all__ = [
-    "DRAG_MODEL", "DRAG_PARAM_NAMES", "EARTH_OMEGA", "drag_kernel",
+    "DRAG_MODEL", "DRAG_PARAM_NAMES", "EARTH_OMEGA", "drag_kernel", "DensityTables", "density_tables",
     "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED", "DENSITY_MODEL_MSIS",
 ]
 
@@ -186,6 +192,9 @@ _R_REF_COL: Final[int] = 4
 _OMEGA_COL: Final[int] = 5
 _DENSITY_MODEL_COL: Final[int] = 6
 _SOLAR_COLS: Final = slice(7, 10)          # f107, f107a, ap - MSIS_SOLAR_COEFFICIENTS, in order
+#: Public names for the two column positions `Simulation._refresh_cowell_plan` reads to find MSIS rows.
+DENSITY_MODEL_COL: Final[int] = _DENSITY_MODEL_COL
+SOLAR_COLS: Final = _SOLAR_COLS
 
 # rho [kg/m^3] * B [m^2/kg] is 1/m; the engine wants 1/km. This is the model's only unit conversion.
 _PER_M_TO_PER_KM: Final[float] = 1.0e3
@@ -353,3 +362,63 @@ def drag_kernel(
     out[indices, 0] -= k * vrx
     out[indices, 1] -= k * vry
     out[indices, 2] -= k * vrz
+
+
+# ==================================================================================================
+# Density tables for the compiled twin
+# ==================================================================================================
+
+@dataclass(frozen=True)
+class DensityTables:
+    """
+    Every piecewise-exponential density table the compiled drag term can read, stacked row-wise and
+    right-padded to one width so `@njit` code can index them without Python objects:
+
+    - row `kernels.LAYERED_TABLE_ROW` (0) is `atmosphere.py`'s Vallado table (28 bands);
+    - each further row is one memoised NRLMSIS 2.0 profile (`msis_bridge.MsisProfile`, 601 nodes).
+
+    `n_nodes[row]` is the row's real length - the band search never reads the padding. `activity[row]`
+    is the `(f107, f107a, ap)` the row was built from, NaN on the table's row so no MSIS body can ever
+    match it; the compiled step compares it with each MSIS body's live indices to detect a stale plan.
+    """
+    altitude_km: NDArray[np.float64]            # (P, N)
+    density_kg_m3: NDArray[np.float64]          # (P, N)
+    scale_height_km: NDArray[np.float64]        # (P, N)
+    n_nodes: NDArray[np.int64]                  # (P,)
+    activity: NDArray[np.float64]               # (P, 3)
+
+
+def density_tables(activity: NDArray[np.float64]) -> Tuple[DensityTables, NDArray[np.int64]]:
+    """
+    The stacked tables for a set of MSIS rows, and each row's table index - **configuration time
+    only**, called by `Simulation._refresh_cowell_plan`, never in a step.
+
+    `activity` is `(m, 3)`: the `(f107, f107a, ap)` of each Cowell drag row whose law is MSIS. One table
+    row is added per distinct triple, each read from the memo through `msis_bridge.cached_msis_profile`,
+    which **raises `LookupError`** for a triple never evaluated - exactly what `drag_kernel` would raise
+    at step time, so the caller can fall back to the reference path and let it raise there. The copies
+    are the same float64 values `drag_kernel` reads from the profile, so the twin's densities are the
+    reference's to rounding.
+    """
+    keys, which = (np.unique(activity, axis=0, return_inverse=True) if activity.shape[0] > 0
+                   else (np.empty((0, 3)), np.empty(0, dtype=np.int64)))
+    profiles = [cached_msis_profile(float(f107), float(f107a), float(ap)) for f107, f107a, ap in keys]
+    lengths = [BASE_ALTITUDE_KM.size] + [p.altitude_km.size for p in profiles]
+    n_rows, width = len(lengths), max(lengths)
+    alt = np.zeros((n_rows, width))
+    rho = np.zeros((n_rows, width))
+    scale = np.ones((n_rows, width))
+    table_activity = np.full((n_rows, 3), np.nan)
+    alt[0, :BASE_ALTITUDE_KM.size] = BASE_ALTITUDE_KM
+    rho[0, :BASE_ALTITUDE_KM.size] = BASE_DENSITY_KG_M3
+    scale[0, :BASE_ALTITUDE_KM.size] = SCALE_HEIGHT_KM
+    for row, profile in enumerate(profiles, start=1):
+        n = profile.altitude_km.size
+        alt[row, :n] = profile.altitude_km
+        rho[row, :n] = profile.density_kg_m3
+        scale[row, :n] = profile.scale_height_km
+        table_activity[row] = (profile.f107, profile.f107a, profile.ap)
+    tables = DensityTables(altitude_km=alt, density_kg_m3=rho, scale_height_km=scale,
+                           n_nodes=np.asarray(lengths, dtype=np.int64), activity=table_activity)
+    rows: NDArray[np.int64] = np.asarray(which, dtype=np.int64).reshape(-1) + 1
+    return tables, rows

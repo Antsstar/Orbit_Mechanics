@@ -209,9 +209,9 @@ def test_model_is_registered_with_its_parameters() -> None:
 
 def test_thrust_bit_is_foreign_to_the_fused_cowell_plan(db_session: Session) -> None:
     """
-    `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2` and `zonal` only, so a Cowell body with
-    thrust must send the **whole** Cowell set down the NumPy `RK4Integrator` path - as `"drag"` and
-    `"third_body"` do. Nothing else in this file is meaningful if the compiled path silently ran and
+    `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2`, `drag` and `zonal` only, so a Cowell
+    body with thrust must send the **whole** Cowell set down the NumPy `RK4Integrator` path - as `"srp"`
+    and `"third_body"` do. Nothing else in this file is meaningful if the compiled path silently ran and
     ignored the thrust term.
     """
     sim = scenarios.powered_vessel(db_session, n_vessels=2, n_powered=1, thrust_n=1.0)
