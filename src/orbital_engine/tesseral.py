@@ -69,7 +69,8 @@ Mechanics* 2, 207-216. **Section and equation numbers are from memory and unveri
 the kernel is `tests/validation/test_tesseral.py`: against `reference.tesseral_field` (explicit
 `d^m P_n/ds^m` polynomials times complex powers `((x + i y) e^{-i theta})^m`, differentiated
 monomial by monomial - no recursion, no rotation matrix), against a finite-differenced potential
-built on a third evaluation (`scipy.special.lpmv`), and against a closed-form equatorial value.
+built on a third evaluation (`numpy.polynomial.legendre` derivatives times `cos(phi)^m`), and against
+a closed-form equatorial value.
 
 Coefficients
 ------------
@@ -89,10 +90,11 @@ pair alone; pair them with `geopotential.EARTH_R_EQ` and `drag.EARTH_OMEGA`, nev
 
 Expected magnitudes
 -------------------
-Per term, the natural scale is `mu |C_nm, S_nm| R^n / r^(n+2)`. At LEO (r = 6921 km) the (2,2) term is
-~3.8e-8 km/s^2 (J2's is 1.1e-5..2.3e-5); at GEO (r = 42164 km) it is ~2.4e-11 km/s^2 horizontally, and
-its tangential component there, `-(mu / a^2)(R / a)^2 6 J22 sin 2(lambda - lambda22)`, is what drives
-the longitude drift: `lambda_ddot = -3 a_S / a = +18 n^2 (R/a)^2 J22 sin 2(lambda - lambda22)`, at most
+Per term, the natural scale is `mu |C_nm, S_nm| R^n / r^(n+2)`, and `|a_nm|` reaches up to ~9x it for
+(2,2) and ~500x for (4,4) (`P_nm` itself does). At LEO (r = 6921 km) the (2,2) scale is 1.3e-8 km/s^2
+(J2's field is 1.1e-5..2.3e-5); at GEO (r = 42165 km) its equatorial tangential component,
+`-(mu / a^2)(R / a)^2 6 J22 sin 2(lambda - lambda22)`, peaks at 5.6e-11 km/s^2 and is what drives the
+longitude drift: `lambda_ddot = -3 a_S / a = +18 n^2 (R/a)^2 J22 sin 2(lambda - lambda22)`, at most
 3.98e-15 rad/s^2 = 1.70e-3 deg/day^2 and 1.76 m/s per year of east-west station keeping.
 
 Design decisions

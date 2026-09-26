@@ -793,9 +793,9 @@ def geostationary_radius_km(
     w = EARTH_OMEGA if omega is None else float(omega)
     k2 = EARTH_J2 if j2 is None else float(j2)
     big_r = EARTH_R_EQ if r_eq is None else float(r_eq)
-    r = (mu / (w * w)) ** (1.0 / 3.0)
+    r = math.pow(mu / (w * w), 1.0 / 3.0)
     for _ in range(50):     # contraction by ~J2 (R/r)^2 per pass: converged after two or three
-        r_next = (mu * (1.0 + 1.5 * k2 * (big_r / r) ** 2) / (w * w)) ** (1.0 / 3.0)
+        r_next = math.pow(mu * (1.0 + 1.5 * k2 * (big_r / r) ** 2) / (w * w), 1.0 / 3.0)
         if r_next == r:
             break
         r = r_next
