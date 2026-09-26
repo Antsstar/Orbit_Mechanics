@@ -1312,6 +1312,24 @@ missing term was already in this log (the previous entry): RK4's truncation of t
 itself, 1.9e-4 of the drag rate at 30 s. With it the budget is 4.8e-4. The fix was to the
 derivation, not to the tolerance.
 
+## `access_grid` rounds the interval count, so a horizon that is not a multiple of `h` unlocks a phase-locked edge
+
+`access.access_grid(horizon, h)` uses `np.linspace` with `round(horizon / h)` intervals, so that the
+horizon is hit exactly. The price is that the spacing is only *close* to `h`: `access_grid(20_000, 120)`
+has 167 intervals of **119.76 s**. The ISL second-order test phase-locks a rise to 1/3 of a 120 s
+bracket (so `a b` scales by exactly 4 per halving); on that grid the lock was gone after 50 intervals
+and the measured edge error was 0.3028 s against a derived 0.2745 s - 10 % off, which looked like a
+missing `O(h^3)` term. Evaluating the closed form's own linear interpolation on an exact 120 s grid gave
+0.2759 s and exposed the grid. Fix: choose horizons that are multiples of every `h` in the test
+(20 160 s). The sweep itself is not affected - `sample_dt_s` divisibility is checked against the
+*actual* spacing - but any test that reasons about where a crossing falls inside its bracket must.
+
+**Also found on the way:** `geometry.access_windows`' docstring wrote the edge bias as
+`+(f''/(2 f')) a b`, the opposite sign to its own (correct) conclusion that a convex horizon reads rises
+early; `test_geometry.py` had it right. Corrected to `-(f''/(2 f')) a b`. The ISL clearance is concave
+at its crossing, so there the same formula reads rises *late* - a sign a reader copying the old text
+would have got backwards twice.
+
 ---
 
 ## Conventions that emerged

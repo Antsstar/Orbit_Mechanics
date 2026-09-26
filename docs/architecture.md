@@ -43,6 +43,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `manoeuvres.py` | Impulsive Delta-v in RSW, applied now or scheduled at an epoch `step()` splits for. The first physics that is neither a force model nor a propagator, and the first that every propagator can use | **new** |
 | `geometry.py` | Observation geometry: ground-station look angles, interpolated access windows, and the spherical line-of-sight test. Pure functions of position arrays, like `viz.py`'s transforms — the primitive layer under a future access-based error metric | **new** |
 | `access.py` | The sweep-level access metric built on `geometry.py`: model contact windows matched to truth's by time overlap, then differenced into rise/set shift, duration error, total contact error and **passes gained or lost**. Consumed by `sweep.run_sweep(access=...)`, which gains one optional field and changes nothing else | **new** |
+| `isl.py` | Inter-satellite link visibility: pair windows cut on `geometry.segment_clearance`, the contact dataset's satellite-to-satellite half, and `run_sweep(isl=...)` - scored by `access.py`'s own matcher and statistics | **new** |
 | `events.py` | Event-driven step splitting: a step cut where a continuous function of the arena state changes sign, located by a bracketed root find over trial propagations. The second thing `step()` splits for, after a scheduled manoeuvre — and the first that has to *find* its own epoch | **new** |
 | `zonal.py` | `zonal`: the J3..J6 zonal harmonics of the parent, additive to `j2`, with a matching truth option in `reference.py` written from a different derivation | **new** |
 
@@ -1103,6 +1104,129 @@ stations or bodies — `station_index` and `body_index` partition the problem, a
 saw is not a pass another saw however well the intervals line up. `peak_elevation_rad` is not
 differenced: `geometry.py` samples it rather than refining it, so it is a lower bound, and it appears
 here only where the *tests* choose a mask angle with it.
+
+## Inter-satellite links: the contact dataset's second half
+
+`access.py` exports ground contacts. The downstream network repository (routing, handover, link
+budgets) also needs **satellite-to-satellite** contacts, and the boundary is `README.md`'s: visibility,
+windows, range and range rate are properties of orbits and live here; anything that needs an antenna or
+a graph lives there. `isl.py` is that half. It adds no physics, no registry entry and nothing to
+`step()`.
+
+**Why a segment clearance, and why continuous.** Two satellites see each other when the straight
+*segment* between them clears the body by a grazing altitude `h_graze_km` - the atmosphere and
+refraction margin a crosslink keeps (~100 km is common), a required `IslSpec` field so no spec can
+silently assume a bare-surface link. `geometry.line_of_sight` already had the geometry, including the
+`[0, 1]` clamp that keeps two radially stacked satellites from reading as occulted (the infinite line
+through them passes through the centre; the segment does not). But a boolean on a grid can only snap a
+window edge to a sample, a quantisation of up to one sample interval. `geometry.segment_clearance` is
+the same test as a signed distance in km - `min |r1 + tau (r2 - r1)| - (R + h_graze)` over the clamped
+`tau` - so edges are inverse-interpolated exactly as elevation is. It is continuous with a continuous
+first derivative across the clamp switch, which is all second-order interpolation needs. An optional
+`max_range_km` is folded in as `min(clearance, max_range - range)`, still one continuous margin.
+
+**Why reuse access matching rather than write a second one.** The metric question is identical -
+pair each model window with the truth window it *is*, then difference the edges - and `access.py`'s
+answer to it (overlap only, greedy largest-first, orphans counted as lost or gained and never given a
+fictional shift, clipped edges excluded from shifts but not from contact time) is the part of that
+module most worth not re-deriving. So `IslWindow` adapts to `AccessWindow` (`station_index <- a`,
+`body_index <- b`, `peak_elevation_rad = nan`, which the matcher never reads) and `access.compare_windows`
+does the rest; `SweepResult.isl` *is* an `AccessMetrics`, grouped per pair. The dataset types are thin
+siblings rather than re-uses: an ISL has no station and its peak is a closest approach, not an
+elevation, and a range stored in a field named `peak_elevation_rad` is the kind of plausible mis-read
+this engine's docs spend most of their effort preventing. `access.ContactSample` *is* re-used unchanged
+(range, range rate **positive = opening**).
+
+**The edge bias has the opposite sign.** `geometry.access_windows`' linear interpolation carries the
+bias `t_hat - t* = -(f''/(2 f')) a b`. (Its docstring had the sign of that expression flipped relative
+to its own - correct - conclusion that convex elevation reads rises early; fixed alongside this work.)
+Elevation is convex at the horizon; the ISL clearance is **concave** at its crossing - a maximum at
+conjunction, falling away on both sides - so ISL rises read **late**, sets **early**, windows **short**.
+On `scenarios.coplanar_satellites` at 550 / 1200 km, `h_graze = 100 km`, every rise and set is
+closed-form (tangent angle `psi* = acos(rho/r1) + acos(rho/r2)` = 52.047 deg, window 13 152.4 s every
+45 485.9 s) and `|f''/(2 f')| = 8.58e-5 /s`: 0.077 s worst case at `h = 60 s`. Each measured edge equals
+`-(f''/(2f')) a b` for its own bracket offsets within the `O(h^3)` remainder, and a phase-locked edge
+halves by 4.00. Truth and model share one grid, so the bias cancels to `C Delta h` exactly as for ground
+access.
+
+**Wiring.** `run_sweep(..., isl=IslSpec(...))` is `access=`'s twin: the same divisibility rule (factored
+into `sweep._sample_grid`, one message for both), one dense truth per sweep - **the access truth itself**
+when both are on and their grids coincide, so turning on ISL beside access costs no truth integration
+at all - and one extra propagation per configuration. `ErrorStats` and `access` are bit-identical with it
+on (tested), and `score_external` scores an `ExternalTier` (SGP4) on ISL windows the same way it scores
+access, refusing a spec centred on a different body from the tier's positions. When the ISL grid differs
+from access's, the ISL truth is a separate `reference_for` call; a test asserts every truth call in a
+sweep receives identical model keywords, so a new truth option threaded into one call and not the other
+fails loudly instead of scoring ISL against a different model.
+
+### What it measures, on the tiers that exist
+
+12 satellites, 550 km / 53 deg, **3 planes of 4** (not the access figure's single plane of 12, in which
+every pair keeps a fixed phase and a link is always up or never), 24 h, truth J2..J6, `h_graze = 100 km`,
+all 66 pairs, 60 s grid; the ground columns are the same sweep's three stations at a 5 deg mask
+(`python benchmarks/isl_sweep.py`, ~14 s). In-plane neighbours are 90 deg apart, beyond the 41.55 deg the
+grazing sphere allows, so only the 48 cross-plane pairs link: 366 windows, 251-981 s long.
+
+| Tier | km (median) | ISL mean / max \|rise\| | ISL mean / max \|set\| | ISL lost / gained | ISL contact error | ground mean / max \|rise\| | ground lost / gained |
+|---|---|---|---|---|---|---|---|
+| Kepler | 906.4 | 20.61 / 41.56 s | 32.93 / 75.55 s | 0 / 0 | +4310 s | 55.75 / 163.66 s | 7 / 6 |
+| Secular J2, mean-seeded | 6.33 | 0.323 / 0.767 s | 0.304 / 0.575 s | 0 / 0 | +92.4 s | 2.069 / 12.54 s | 1 / 0 |
+| Cowell + j2, 60 s | 2.01 | 0.125 / 0.347 s | 0.124 / 0.338 s | 0 / 0 | +1.4 s | 0.107 / 0.730 s | 0 / 0 |
+| Cowell + j2 + zonal, 60 s | 1.877 | 0.082 / 0.226 s | 0.097 / 0.261 s | 0 / 0 | -5.1 s | 0.082 / 0.255 s | 0 / 0 |
+
+The estimate written before the run (`benchmarks/isl_sweep.py`'s docstring) rested on three facts: an ISL
+cannot see a common rotation of the constellation; an along-track error common to both ends is a pure
+time translation of the pair geometry, `-delta_s / v` = 0.132 s per km; radial error enters at
+`0.467 (dr_a + dr_b) / |c'|`, with `|c'|` estimated at 1.3-2.2 km/s (measured afterwards at the truth's
+edges: 1.65-1.71 km/s). Against it:
+
+- **Cowell + j2 + zonal, 60 s** - RK4's common phase lag and nothing else: predicted 0.094 s mean,
+  0.25 s max, every window early. Measured 0.082 / 0.226 s rise, signed mean -0.081 s (equal to the
+  mean-abs: every window moves the same way). The duration error, -0.018 s, was predicted as ~0 and is
+  not: the pre-run decomposition also showed a *common radial* error of -0.023 km at 24 h, which closes
+  the link margin at both ends by `2 x 0.467 x 0.023 / 1.69` ~ 0.013 s - the right size, and a term the
+  estimate listed in its table but did not carry through.
+- **Cowell + j2, 60 s** adds the missing J3..J6: predicted ~0.15 / 0.4 s, measured 0.125 / 0.347 s.
+- **Secular J2, mean-seeded** - predicted ~1.5-2 s mean, measured **0.32 s**: a 5x over-estimate, and
+  the reason is instructive. The estimate scaled each satellite's day-mean radial short-period error
+  (3.3 km) as if the two ends were independent; at the link edges their radial errors are strongly
+  *anti*-correlated (J2's short-period radius goes as `cos 2u`, and a cross-plane pair crossing the
+  grazing sphere sits at arguments of latitude that nearly cancel it), and the measured pair sum there is
+  **0.93 km**, not ~4.7. The linearised shift `-delta_c / c'` evaluated at the truth's edges reproduces
+  the measurement (0.314 s against 0.313 s, the mean of rise and set).
+- **Kepler** - predicted ~30 s mean / ~110 s max, about half its ground error or less; measured 20.6 /
+  41.6 s rise, 32.9 / 75.6 s set, ground 55.7 s: **0.37x** the ground error at the rise, 0.59x at the
+  set. The magnitude and the ratio held; the mechanism in the estimate (half the pairs cancelling
+  alternating-sign seed errors) did not - every Kepler ISL window is *late* (signed mean = mean-abs), so
+  at the edges the along-track errors act as a common lag. The linearised `-delta_c / c'` again reproduces
+  it (26.7 s against 26.8 s, the mean of rise and set). The nodal regression Kepler omits (4.5 deg in a
+  day) moves no ISL window at all - a tested invariance - though it is only part of Kepler's km error
+  (rotating the Kepler solution by it takes the median from 906 to 861 km; the rest is seed-dependent
+  along-track drift).
+
+**Does a tier that is fine for ground contacts stay fine for ISLs?** Yes, and at this horizon the
+converse holds too: **the ISL windows are no harder than the ground ones for any tier**, and markedly
+easier for the analytic ones. The two Cowell tiers score within 20 % of their ground figures (same mean,
+smaller worst case), because their error is almost entirely a common along-track lag, which shifts a
+ground pass and a link window by the same `delta_s / v`. The analytic tiers do much better on links -
+secular J2 6.4x, Kepler 2.7x - because the ISL is blind to the common rotation and partly blind to
+errors correlated between the two ends, and **no tier loses or gains a single ISL window** where Kepler
+loses 7 ground passes and invents 6. The ISL windows are robust in count because none of them is
+marginal: losing one takes a shift comparable to its length, and the shortest here is 251 s, whereas a
+ground pass whose peak elevation sits just above the mask disappears under a small cross-track error. So for a 24 h link schedule, mean-seeded secular J2 (sub-second, nothing lost) is already
+adequate where it is not for ground passes (2 s mean, 12.5 s worst, one pass lost); for ground
+contacts Cowell + J2 remains the first tier under the 1 s pad.
+
+**How this feeds the downstream repository.** `isl_contacts_from_simulation(sim, bodies, times, spec)`
+(or `isl_contacts` on sampled states) is the export: per pair, `IslContact(window, rise, peak, set)`
+with range and range rate at each, the same `ContactSample` the ground dataset carries, so a consumer
+builds one contact graph from both. Everything a link budget needs beyond that (antennas, pointing,
+Doppler as a carrier offset, data rate) is a property of hardware and stays downstream.
+
+**Deliberately not built.** No link budget, no pointing or antenna constraints, no Sun-exclusion angle
+for optical links (a geometric constraint that would fit here later, as a second `min` term in the
+margin, once a consumer needs it), no ellipsoid or atmosphere model beyond the constant grazing
+altitude, and no inter-pair matching - a pair's windows are matched only to the same pair's.
 
 ## Station-keeping: the atmosphere model in the units of propellant
 
