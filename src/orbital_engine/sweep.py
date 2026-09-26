@@ -80,7 +80,7 @@ from .stationkeeping import (
     MIN_SAMPLES_PER_ORBIT, BodyDeltaV, DeltaVMetrics, StationKeepingSpec, delta_v_metrics,
     run_station_keeping, window_period_s,
 )
-from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, reference_for
+from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, TesseralTruth, reference_for
 from .benchmark import measure
 from .simulator import Simulation
 
@@ -497,6 +497,7 @@ def run_sweep(
     truth_atol: float = TRUTH_ATOL,
     oblateness: Optional[Mapping[str, Tuple[float, float]]] = None,
     zonal: Optional[Mapping[str, Tuple[float, Mapping[int, float]]]] = None,
+    tesseral: Optional[Mapping[str, TesseralTruth]] = None,
     timing_batches: int = 5,
     timing_warmup: int = 2,
     access: Optional[AccessSpec] = None,
@@ -519,6 +520,8 @@ def run_sweep(
     wrong reference (see `reference.py`'s module docstring on why this argument is never inferred from
     a `Simulation`'s own configuration). `zonal` is forwarded the same way (J3..J6, see
     `reference.reference_for`); omitting it leaves truth bit-identical to a sweep without the option.
+    `tesseral` (orders m >= 1 of degrees 2..4, `reference.TesseralTruth` per body) is forwarded the
+    same way, to both the endpoint and the access truth.
 
     `access`, when given, adds `SweepResult.access` - contact-window error against the same truth
     model (see `access.py`). It costs **one** extra `reference_for` call for the whole sweep, on the
@@ -559,6 +562,7 @@ def run_sweep(
     times = np.array([0.0, horizon_s], dtype=np.float64)
     truth = reference_for(
         truth_sim, times, rtol=truth_rtol, atol=truth_atol, oblateness=oblateness, zonal=zonal,
+        tesseral=tesseral,
     )
 
     access_truth: Optional[ReferenceTrajectory] = None
@@ -566,6 +570,7 @@ def run_sweep(
         access_truth = reference_for(
             build_scenario(), access_grid(horizon_s, access.sample_dt_s),
             rtol=truth_rtol, atol=truth_atol, oblateness=oblateness, zonal=zonal,
+            tesseral=tesseral,
         )
 
     budgets: dict[str, Tuple[BodyDeltaV, ...]] = {}

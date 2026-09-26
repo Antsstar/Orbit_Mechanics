@@ -38,6 +38,7 @@ __all__ = [
     "ground_station_pass", "eclipsed_satellite", "station_keeping_satellites",
     "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
     "tle_satellites", "zonal_twins", "zonal_twin_name",
+    "geostationary_satellites", "geostationary_radius_km", "geo_satellite_name",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -773,6 +774,108 @@ def station_keeping_satellites(
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, sats)
     sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    return sim
+
+
+def geostationary_radius_km(
+    omega: Optional[float] = None, *, j2: Optional[float] = None, r_eq: Optional[float] = None,
+    mu: float = MU_EARTH,
+) -> float:
+    """
+    Radius at which a circular equatorial orbit under point mass + J2 co-rotates at `omega`:
+    `omega^2 r^3 = mu (1 + (3/2) J2 (R/r)^2)` (J2's equatorial pull is `(3/2) mu J2 R^2 / r^4` inward).
+    Defaults are `drag.EARTH_OMEGA`, `geopotential.EARTH_J2` and `EARTH_R_EQ`: 42164.695 km, 0.522 km
+    above the Keplerian 42164.173 km. Pass `j2=0.0` for the Keplerian radius.
+    """
+    from .drag import EARTH_OMEGA
+    from .geopotential import EARTH_J2, EARTH_R_EQ
+
+    w = EARTH_OMEGA if omega is None else float(omega)
+    k2 = EARTH_J2 if j2 is None else float(j2)
+    big_r = EARTH_R_EQ if r_eq is None else float(r_eq)
+    r = math.pow(mu / (w * w), 1.0 / 3.0)
+    for _ in range(50):     # contraction by ~J2 (R/r)^2 per pass: converged after two or three
+        r_next = math.pow(mu * (1.0 + 1.5 * k2 * (big_r / r) ** 2) / (w * w), 1.0 / 3.0)
+        if r_next == r:
+            break
+        r = r_next
+    return r
+
+
+def geo_satellite_name(k: int) -> str:
+    """Name of satellite `k` in `geostationary_satellites` - `GEO-00`, `GEO-01`, ..."""
+    return f"GEO-{k:02d}"
+
+
+def geostationary_satellites(
+    session: Session,
+    *,
+    longitudes_deg: Sequence[float] = (75.0, -105.0),
+    theta0: float = 0.0,
+    omega: Optional[float] = None,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth plus one massless Cowell satellite per entry of `longitudes_deg` (`geo_satellite_name(k)`),
+    each **at rest in the frame rotating at `omega`**: equatorial, at `geostationary_radius_km(omega)`,
+    with inertial velocity exactly `omega x r`, at body-fixed east longitude `longitudes_deg[k]` when
+    the prime meridian is at `theta0` (so inertial longitude `longitude + theta0` at t = 0, the
+    convention `tesseral.py` and `geometry.py` share). Every satellite carries `point_mass_gravity` and
+    `j2` (Earth values) and nothing else: the tesseral field is the thing being compared, so the
+    caller enables it (on some satellites only, if a co-located control is wanted).
+
+    Built for the GEO longitude-drift validation of `tesseral.py`. Rest is set by the Cartesian state,
+    not the elements: the vessel is seeded on a circular Keplerian orbit at that radius and then given
+    the prograde `omega r - sqrt(mu / r)` (+5.7 cm/s) through `apply_delta_v`, because the Keplerian
+    circular speed is not the co-rotating one once J2 is on. The seed balances point mass and J2
+    only; a tesseral field's own radial pull (for J22, `9 mu J22 R^2 / r^4`, 3.7e-7 of gravity) leaves
+    an eccentricity of the same order, a once-per-sidereal-day longitude wobble of ~8e-7 rad.
+    """
+    from .drag import EARTH_OMEGA
+    from .geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
+
+    if not longitudes_deg:
+        raise ValueError("longitudes_deg must name at least one satellite")
+    w = EARTH_OMEGA if omega is None else float(omega)
+    radius = geostationary_radius_km(w)
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names = [geo_satellite_name(k) for k in range(len(longitudes_deg))]
+    for name, lon in zip(names, longitudes_deg):
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=VESSEL_FUEL_MASS, drag_area=4.0,
+            p=radius, e=0.0, i=0.0, raan=0.0, arg_pe=0.0,
+            theta=math.remainder(math.radians(lon) + theta0, 2.0 * math.pi),
+        ))
+    session.commit()
+
+    sim = Simulation(
+        body_names=["Earth"] + names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+    sats = np.array([sim.name_to_index[n] for n in names], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, sats)
+    sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    sim.apply_delta_v(sats, [0.0, w * radius - math.sqrt(MU_EARTH / radius), 0.0])
     return sim
 
 

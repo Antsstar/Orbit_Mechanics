@@ -1403,6 +1403,94 @@ down the NumPy path.
 
 ---
 
+## Tesseral harmonics: the first force that reads the clock
+
+`tesseral.py` registers `"tesseral"`: orders m >= 1 of degrees 2..4 - (2,1), (2,2), (3,1)..(3,3),
+(4,1)..(4,4) - relative to the Keplerian parent, unnormalised `C_nm`/`S_nm` on the perturbed body's row
+after `(r_eq, omega, theta0)`. `EARTH_TESSERALS` (EGM96, from memory; its normalisation checked against
+an independently remembered JGM-3 unnormalised table to <= 1.5e-3) and `EARTH_J22`. J2..J6 cannot move a
+geostationary satellite in longitude; this is the field that does.
+
+**Additive, for the zonal model's reasons.** A 4x4 field is `"j2"` + `"zonal"` (J3, J4) + `"tesseral"`.
+An m = 0 term here would either double-count J2 or replace the fused Cowell kernel's one fast path; the
+truth mirrors the split (`reference_for(..., tesseral=...)` refuses m = 0 - it has its own two doors).
+
+**Time.** The field is fixed in the body, so in inertial space it turns at `omega`: the prime meridian
+sits at `theta = theta0 + omega * t`, **t = absolute simulation time** - `geometry.elevation_azimuth`'s
+convention with its default `epoch_s = 0`, not `viz.ground_track`'s. That makes it the first kernel whose
+output depends on the `t` it is handed, and so the first to test a contract that had never been
+exercised: that `RK4Integrator` hands its four stages `t, t + h/2, t + h/2, t + h`, that
+`Simulation._advance` hands the integrator `self.t`, and that a step cut by a manoeuvre or an event
+starts its second half at the cut's time. Reading the code said all three hold; the tests prove it.
+Cowell + pm + tesseral on an exaggerated, fast-turning field (EGM96 x 1000 at 10x Earth rate) converges
+on tesseral truth at ratios 17.1 and 16.6; the same run with every stage handed the step's start time
+converges at 1.995 and sits 4.2e6x further off. A zero-Delta-v manoeuvre cutting 64 steps at 40 % moves
+the result 3.2e-6 km (a restart at the step's start time would be ~1e-3). Mutating stage 4 to
+`t + h/2` is caught by five tesseral tests - and by **nothing else in the suite**, since no other kernel
+reads `t`. The truth reads the clock too: `reference_for` shifts `theta0` by `omega * sim.t`, so a truth
+started mid-run is in phase.
+
+**The truth's derivation.** The kernel is Cunningham's V/W recursion in body-fixed Cartesian
+coordinates with explicit rotation matrices. `reference.tesseral_field` has neither: it writes
+`cos(phi)^m e^{i m lambda} = w^m / r^m` with `w = (x + i y) e^{-i theta}` - the body-fixed longitude
+by complex phase - times the typed polynomial `d^m P_n / ds^m`, and differentiates monomial by monomial
+in inertial coordinates. They agree to <= 1.5e-12 of each pair's scale over 80 points and 5 angles; a
+Legendre-series finite difference agrees to <= 8.3e-10. A rotating non-axisymmetric body does work, so
+the truth's `energy_drift` reports the Jacobi-type integral `E - omega L_z` (the field depends on `t`
+only through a rigid rotation about z, so `dE/dt = omega dL_z/dt`): held to 1.4e-13 with a massive
+rotating primary, while `E` alone drifts 2.3e-2.
+
+**GEO: the decision-relevant result.** Satellites seeded at rest in the rotating frame
+(`scenarios.geostationary_satellites`), 6 sidereal days, drift acceleration from a quadratic fit to
+whole-day means of longitude minus a pm + J2 control's (RK4's Kepler energy drift, `(3/2) n (nh)^6 /
+(36 h)` - predicted 3.5041e-17 rad/s^2, measured 3.5059e-17). Gauss gives `lambda_ddot = -3 a_S / a`,
+so for J22 alone `lambda_ddot = +18 n^2 (R/a)^2 J22 sin 2(lambda - lambda22)` with `lambda22 = (1/2)
+atan2(S22, C22)` = -14.93 deg the long axis - **plus**, not the minus sign often quoted, which with this
+`lambda22` would make the long axis stable. Engine against the first-order pendulum passed through the
+same estimator: <= 8.2e-5 of `K = 3.976e-15 rad/s^2 = 1.70e-3 deg/day^2` over 14 longitudes, and the
+right sign either side of all four equilibria. Holding a slot costs `a |lambda_ddot| / 3`
+(`benchmarks/tesseral_sweep.py`, 24 slots, measured within 1.3e-4 K of the closed forms):
+
+| | stable slots | unstable | worst slot | worst Delta-v |
+|---|---|---|---|---|
+| J22 alone | 75.07 E, 104.93 W | 14.93 W, 165.07 E | lambda22 +- 45 deg (30 E, 120 E, 60 W, 150 W) | 1.764 m/s/yr (all four equal) |
+| 4x4 EGM96 | 74.94 E, 105.09 W | 11.52 W, 161.90 E | 117.4 E | 2.066 m/s/yr (others 1.87, 1.71, 1.48) |
+
+The 4x4 stable points are verified dynamically (zero crossing between satellites at +-1 deg, within
+2e-3 deg of the closed-form roots) and *compared* with the published 75.1 E / 105.3 W: -0.16 and +0.21
+deg, inside a 0.4 deg allowance for degree >= 5 (Kaula: up to ~0.1 deg), the published rounding and
+the field used. J33 does most of the reshaping - its equatorial term is 14 % of J22's - which is why
+the four worst slots stop being equal and the worst one costs 17 % more than J22 alone predicts. The
+literature's "roughly 1.7-2 m/s per year" is the J22 figure and the 4x4 worst case. Not modelled here,
+and the larger part of a real GEO budget: lunisolar inclination drift (north-south station keeping,
+typically quoted at ~45-50 m/s/yr, an order above east-west), and SRP's eccentricity drift. The J22 run cannot show a full libration (816 days at 10 deg amplitude) - the tests show the first
+quarter of it: acceleration toward the stable points and away from the unstable ones.
+
+**LEO: yes, it moves contact windows.** The zonal sweep's setup (12 satellites, 550 km / 53 deg, 24 h,
+three stations, 189 passes) against a truth with J2 + J3..J6 + 4x4 tesseral, both tiers Cowell + j2 +
+zonal at 15 s (`benchmarks/tesseral_sweep.py --leo`, 93 s):
+
+| Tier | median km | rms km | max km | mean \|rise\| | max \|rise\| | lost / gained |
+|---|---|---|---|---|---|---|
+| without `"tesseral"` | 3.819 | 5.707 | 9.046 | 0.288 s | 1.150 s | 0 / 0 |
+| with `"tesseral"` | 0.0027 | 0.0027 | 0.0027 | 0.000 s | 0.000 s | 0 / 0 |
+
+Omitting the 4x4 tesserals costs **3x what omitting J3..J6 does** (3.8 km against 1.26 km), and the
+worst rise shift passes the 1 s pad; no pass is gained or lost. The estimate written first was ~1 km:
+right mechanism, magnitude 3x low. The shared osculating seed sits at a different *mean* semi-major
+axis under each model (J22's and J31's short-period terms in `a`, which are the same size at LEO). The
+first-orbit mean-`a` offset, up to 0.068 km, predicts each satellite's 24 h along-track error as
+`(3/2) n t da` with correlation 0.9992 and 0.44 km rms residual - the bounded daily term. The tesseral
+tier reproduces the zonal tier's RK4 truncation (2.7e-3 km) exactly: the model error is gone and only
+the step remains.
+
+**Cost.** No compiled twin: `kernels._cowell_accel` has no `t`, so a Cowell body with `"tesseral"` sends
+the whole Cowell set down the NumPy path (`_cowell_fused_ok`). The LEO tesseral tier took 21.4 s
+against 0.066 s fused (~320x); the 49-satellite GEO scan runs in ~3 s at a 598 s step. It wants a
+`kernel-twin` job before it is timed against the analytic tiers.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.

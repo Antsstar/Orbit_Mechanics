@@ -1314,6 +1314,38 @@ derivation, not to the tolerance.
 
 ---
 
+## Tesseral harmonics: three things that cost time
+
+1. **`scipy.special.lpmv` is ill-conditioned near the poles for a finite-difference check.** It builds
+   `P_nm(s)` from `s` alone, so `cos(phi)` is recovered as `sqrt(1 - s^2)`, which loses
+   `eps / cos^2(phi)` relative - 7e-11 at 89.9 deg - and the central difference then divides by
+   `h/r = 3e-4`. The (2,1) check failed at 5e-9 against a 7e-11 bound. The fix was to the reference,
+   not the tolerance: `cos(phi)^m` from `sqrt(x^2 + y^2) / r` and `d^m P_n / ds^m` from
+   `numpy.polynomial.legendre.legder` / `legval`. Any `P_nm` evaluated from `sin(phi)` alone has this
+   problem; the kernel (Cunningham's V/W in Cartesian `x, y, z`) and the truth (powers of `x + i y`)
+   do not.
+2. **The GEO drift formula's sign depends on which axis `lambda22` names.** With `lambda22 = (1/2)
+   atan2(S22, C22)` - the equator's *long* axis, the potential maximum - the derivation gives
+   `lambda_ddot = +18 n^2 (R/a)^2 J22 sin 2(lambda - lambda22)`. The design brief had a minus sign,
+   which with the same `lambda22` would make the long axis stable. Measured: +3.9764e-15 rad/s^2 at
+   `lambda22 + 45 deg`. Check which longitude a quoted formula's reference angle means before
+   copying its sign.
+3. **A quadratic fit's curvature is not a point value.** Fitting `lambda(t)` over 16 days put up to
+   2.6e-4 of the local drift into the quadratic coefficient through the quartic term,
+   `lambda'''' (T/2)^2 / 14`, near the equilibria. Comparing against the first-order theory evaluated at
+   the fit's centre longitude therefore looked like a 1e-4 physics residual that was not there. The
+   test now integrates the theory's own pendulum and passes it through the *same* estimator, so the
+   estimator's approximations cancel exactly (`test_tesseral.py`, `_theory_fit`).
+
+Also a miss in a pre-run estimate: omitting the 4x4 tesserals at 550 km was estimated at ~1 km
+median along-track over 24 h, from J22's short-period offset of each seed's mean `a`. Measured 3.8 km
+median, 9.0 km max. The mechanism was right - the first-orbit mean-`a` offset predicts each satellite's
+along-track error with correlation 0.9992 - but the offset reaches 0.068 km, not 0.02: J31 alone has the
+same `C (R/a)^n` as J22 at LEO, and the pairs add. Budget every term of the same order, not the
+famous one.
+
+---
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
