@@ -41,7 +41,7 @@ __all__ = [
     "NUMBA_AVAILABLE", "kepler_propagate", "calc_global_states",
     "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate", "cowell_rk4_step",
     "rebase_relative_states", "DRAG_LAW_EXPONENTIAL", "DRAG_LAW_LAYERED", "DRAG_LAW_MSIS",
-    "LAYERED_TABLE_ROW",
+    "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -462,6 +462,10 @@ DRAG_LAW_LAYERED = 1
 DRAG_LAW_MSIS = 2
 # Row of the stacked density tables that holds Vallado's layered table (`drag.density_tables`).
 LAYERED_TABLE_ROW = 0
+# Columns of `drag.DensityTables.meta`: each table row's node count (as a float), then the MSIS
+# `(f107, f107a, ap)` it was built from (NaN on the layered row, which no MSIS body may match).
+TABLE_N_NODES_COL = 0
+TABLE_F107_COL = 1
 
 
 @njit
@@ -479,78 +483,46 @@ def _drag_law(selector: float) -> int:
 
 
 @njit
-def _piecewise_density(
-    h: float,
-    table_alt: NDArray[np.float64],
-    table_rho: NDArray[np.float64],
-    table_scale: NDArray[np.float64],
-    table: int,
-    n_nodes: int,
-) -> float:
+def _piecewise_density(h: float, tables: NDArray[np.float64], table: int, n_nodes: int) -> float:
     """
-    `atmosphere.piecewise_exponential_density` for one altitude on row `table` of the stacked tables,
-    whose first `n_nodes` entries are that table's bands: `rho_k exp(-(h - h_k) / H_k)`, kg/m^3.
+    `atmosphere.piecewise_exponential_density` for one altitude on row `table` of the stacked tables
+    (`tables[0]` base altitudes, `[1]` base densities, `[2]` scale heights), whose first `n_nodes`
+    entries are that table's bands: `rho_k exp(-(h - h_k) / H_k)`, kg/m^3.
 
     The band is found by a scalar binary search that reproduces `np.searchsorted(..., side="right")
     - 1`: `lo` ends as the count of base altitudes `<= h`, so an `h` exactly on a base altitude selects
     the band *starting* there. Clipping to `[0, n_nodes - 1]` extrapolates the bottom band below the
-    first base altitude and the top band above the last, as the reference's `np.clip` does. (A NaN `h`
-    lands in band 0 here and in the top band there; both then produce a NaN density, so the band is
-    immaterial - and the caller only reaches this on a separated row.)
+    first base altitude and the top band above the last, as the reference's `np.clip` does (`lo` never
+    exceeds `n_nodes`, so only the lower clip can bind). A NaN `h` lands in band 0 here and in the top
+    band there; both then produce a NaN density, so the band is immaterial.
     """
     lo = 0
     hi = n_nodes
     while lo < hi:
         mid = (lo + hi) // 2
-        if table_alt[table, mid] <= h:
+        if tables[0, table, mid] <= h:
             lo = mid + 1
         else:
             hi = mid
     band = lo - 1
     if band < 0:
         band = 0
-    exponent = (h - table_alt[table, band]) / table_scale[table, band]
-    density: float = table_rho[table, band] * math.exp(-exponent)
+    exponent = (h - tables[0, table, band]) / tables[2, table, band]
+    density: float = tables[1, table, band] * math.exp(-exponent)
     return density
 
 
 @njit
-def _cowell_accel(
+def _gravity_accel(
     px: float, py: float, pz: float,
     cx: float, cy: float, cz: float,
-    pvx: float, pvy: float, pvz: float,
-    cvx: float, cvy: float, cvz: float,
     mu_total: float, mu_par: float,
     has_point_mass: bool, has_j2: bool, j2: float, r_eq: float,
-    has_drag: bool, drag_law: int, drag_b: float, drag_rho0: float, drag_h0: float,
-    drag_scale_height: float, drag_r_ref: float, drag_omega: float, drag_table: int,
-    table_alt: NDArray[np.float64], table_rho: NDArray[np.float64],
-    table_scale: NDArray[np.float64], table_len: NDArray[np.int64],
-    has_zonal: bool, zonal_params: NDArray[np.float64], row: int,
 ) -> tuple[float, float, float]:
     """
-    Acceleration on one body at candidate state `(cx, cy, cz, cvx, cvy, cvz)` with its parent at
-    `(px, py, pz, pvx, pvy, pvz)`: the sum `forces.compose_accelerations` would build from
-    `gravity.point_mass_gravity_kernel`, `geopotential.j2_kernel`, `drag.drag_kernel` and
-    `zonal.zonal_kernel`, with each term's arithmetic written in the same order as its NumPy reference
-    so the two agree to rounding. A disabled term contributes exactly `0.0`, as an absent model does.
-
-    **Composition order matters with several terms.** IEEE addition is commutative but not associative,
-    so `(pm + j2) + zonal` and `pm + (j2 + zonal)` may differ in the last bit. The terms are added here
-    in registration order - `point_mass_gravity`, `j2`, `drag`, `zonal` (bits 0, 1, 2, 6) - which is
-    the order `forces.resolve_force_models` walks `registry.all_force_models()` and therefore the order
-    `compose_accelerations` accumulates them into `out`. Were the registration order ever different,
-    the two would differ by an ulp of the sum per evaluation, still far inside the 1e-12 bound.
-
-    **Drag is the only term that reads the velocity.** The caller passes each RK4 stage's own candidate
-    velocity, rebuilt as `parent_v + stage_v` exactly as `RK4Integrator` writes `state[indices, 3:]`
-    before each provider call, and the term takes `cv - pv` back off it as `drag.drag_kernel` does.
-    The drag coefficients are scalars read once per body per step by the caller (nothing writes them
-    inside a step); `drag_table` is the stacked-table row of the body's density law - `LAYERED_TABLE_ROW`
-    under the table, the body's own MSIS profile row under MSIS, unread under the single exponential.
-
-    `zonal_params[row]` is read only behind `has_zonal`, so a one-row dummy is safe when no body has
-    the zonal bit - the same convention as `j2_params` in `cowell_rk4_step`.
+    `point_mass_gravity` then `j2` at candidate position `(cx, cy, cz)` with the parent at `(px, py,
+    pz)`, summed into a running total starting at 0.0 - the first two terms of `_cowell_accel`. Scalars
+    only, so the compiler inlines it into the stage loop.
     """
     ax = 0.0
     ay = 0.0
@@ -583,87 +555,164 @@ def _cowell_accel(
             ay += k * y * (five_s2 - 1.0)
             az += k * z * (five_s2 - 3.0)
 
+    return ax, ay, az
+
+
+@njit
+def _drag_term(
+    ax: float, ay: float, az: float,
+    px: float, py: float, pz: float,
+    cx: float, cy: float, cz: float,
+    pvx: float, pvy: float, pvz: float,
+    cvx: float, cvy: float, cvz: float,
+    drag_law: int, drag_b: float, drag_rho0: float, drag_h0: float,
+    drag_scale_height: float, drag_r_ref: float, drag_omega: float, drag_table: int,
+    tables: NDArray[np.float64], n_nodes: int,
+) -> tuple[float, float, float]:
+    """
+    `(ax, ay, az)` minus the drag acceleration at candidate state `(c, cv)` with the parent at `(p, pv)`
+    - `drag.drag_kernel` one row at a time, its `out -= k v_rel` applied to the running sum. The drag
+    coefficients are scalars the caller read once per body per step (nothing writes them inside a
+    step); `drag_table` / `n_nodes` are the stacked-table row of the body's density law and its length,
+    unread under the single exponential.
+
+    **Velocity.** This is the only fused term that reads it. `cowell_rk4_step` passes each RK4 stage's
+    own candidate velocity, rebuilt as `pv + v_k` exactly as `RK4Integrator` writes `state[indices, 3:]`
+    before each provider call, and `cv - pv` is taken back off it here as `drag_kernel` does.
+    """
+    # rel points from the primary to the body. v_rel = v - w x r with w = omega z_hat, i.e.
+    # (vx + omega y, vy - omega x, vz).
+    x = cx - px
+    y = cy - py
+    z = cz - pz
+    vx = cvx - pvx
+    vy = cvy - pvy
+    vz = cvz - pvz
+    r2 = x * x + y * y + z * z
+    vrx = vx + drag_omega * y
+    vry = vy - drag_omega * x
+    vrz = vz
+    speed = math.sqrt(vrx * vrx + vry * vry + vrz * vrz)
+    altitude = math.sqrt(r2) - drag_r_ref
+
+    # The reference sums three masked terms, exactly one of which can be non-zero per row:
+    # `rho0 * factor` (factor 0.0 off the exponential law, or without separation or scale height),
+    # then `+ layered` and `+ msis` (each exactly +0.0 off its own law or without separation). The
+    # same sum is formed here, so even an exponential row's `+ 0.0 + 0.0` is reproduced.
+    separated = r2 > 0.0
+    exp_factor = 0.0
+    if separated and drag_law == DRAG_LAW_EXPONENTIAL and drag_scale_height > 0.0:
+        exp_factor = math.exp(-((altitude - drag_h0) / drag_scale_height))
+    layered = 0.0
+    msis = 0.0
+    if separated and drag_law == DRAG_LAW_LAYERED:
+        layered = _piecewise_density(altitude, tables, drag_table, n_nodes)
+    elif separated and drag_law == DRAG_LAW_MSIS:
+        msis = _piecewise_density(altitude, tables, drag_table, n_nodes)
+    density = drag_rho0 * exp_factor + layered + msis                                # kg/m^3
+
+    # 0.5 * rho [kg/m^3] * B [m^2/kg] * 1e3 -> 1/km; times |v_rel| [km/s] times v_rel [km/s].
+    k = 0.5 * density * drag_b * _DRAG_PER_M_TO_PER_KM * speed
+    ax -= k * vrx
+    ay -= k * vry
+    az -= k * vrz
+    return ax, ay, az
+
+
+@njit
+def _zonal_term(
+    ax: float, ay: float, az: float,
+    px: float, py: float, pz: float,
+    cx: float, cy: float, cz: float,
+    mu_par: float, zonal_params: NDArray[np.float64], row: int,
+) -> tuple[float, float, float]:
+    """
+    `(ax, ay, az)` plus the J3..J6 acceleration: equation (Z) of zonal.py, the same two Legendre
+    recursions in the same order as `zonal.zonal_kernel`, one scalar at a time. rel points from the
+    primary to the body; mu is the parent's alone. The reference's zero-separation row adds an exact
+    0.0 through inv_r = 0; here the guard skips it, which adds nothing either.
+    """
+    x = cx - px
+    y = cy - py
+    z = cz - pz
+    r2 = x * x + y * y + z * z
+    if r2 > 0.0:
+        inv_r2 = 1.0 / r2
+        inv_r = math.sqrt(inv_r2)
+        s = z * inv_r
+        rho = zonal_params[row, 0] * inv_r                           # R / r
+
+        p_prev = 1.0              # P_0
+        p_curr = s                # P_1
+        dp_curr = 1.0             # P_1'
+        rho_n = rho               # (R/r)^1
+        radial = 0.0
+        axial = 0.0
+        for n in range(2, _ZONAL_MAX_DEGREE + 2):
+            p_next = ((2 * n - 1) * s * p_curr - (n - 1) * p_prev) / n      # P_n
+            dp_next = n * p_curr + s * dp_curr                              # P_n'
+            # dp_next is P_n': the radial term of degree n - 1 and the axial term of degree n.
+            # J_m sits in column m - 2.
+            if n >= 4:
+                radial += zonal_params[row, n - 3] * rho_n * dp_next
+            rho_n = rho_n * rho                                             # (R/r)^n
+            if 3 <= n <= _ZONAL_MAX_DEGREE:
+                axial += zonal_params[row, n - 2] * rho_n * dp_next
+            p_prev = p_curr
+            p_curr = p_next
+            dp_curr = dp_next
+
+        k = mu_par * inv_r2                                                 # mu / r^2
+        ax += k * radial * x * inv_r
+        ay += k * radial * y * inv_r
+        az += k * (radial * s - axial)
+    return ax, ay, az
+
+
+@njit
+def _cowell_accel(
+    px: float, py: float, pz: float,
+    cx: float, cy: float, cz: float,
+    pvx: float, pvy: float, pvz: float,
+    cvx: float, cvy: float, cvz: float,
+    mu_total: float, mu_par: float,
+    has_point_mass: bool, has_j2: bool, j2: float, r_eq: float,
+    has_drag: bool, drag_law: int, drag_b: float, drag_rho0: float, drag_h0: float,
+    drag_scale_height: float, drag_r_ref: float, drag_omega: float, drag_table: int,
+    tables: NDArray[np.float64], n_nodes: int,
+    has_zonal: bool, zonal_params: NDArray[np.float64], row: int,
+) -> tuple[float, float, float]:
+    """
+    Acceleration on one body at candidate state `(cx, cy, cz, cvx, cvy, cvz)` with its parent at
+    `(px, py, pz, pvx, pvy, pvz)`: the sum `forces.compose_accelerations` would build from
+    `gravity.point_mass_gravity_kernel`, `geopotential.j2_kernel`, `drag.drag_kernel` and
+    `zonal.zonal_kernel`, with each term's arithmetic written in the same order as its NumPy reference
+    so the two agree to rounding. A disabled term contributes exactly `0.0`, as an absent model does.
+
+    **Composition order matters with several terms.** IEEE addition is commutative but not associative,
+    so `(pm + j2) + zonal` and `pm + (j2 + zonal)` may differ in the last bit. The terms are added here
+    in registration order - `point_mass_gravity`, `j2`, `drag`, `zonal` (bits 0, 1, 2, 6) - which is
+    the order `forces.resolve_force_models` walks `registry.all_force_models()` and therefore the order
+    `compose_accelerations` accumulates them into `out`. Were the registration order ever different,
+    the two would differ by an ulp of the sum per evaluation, still far inside the 1e-12 bound.
+
+    **This is the composition `cowell_rk4_step` performs**, stage by stage, from the same three pieces
+    in the same order - it calls them itself rather than this function only so that the density tables
+    and zonal row are never passed through a per-stage call for a body that does not use them (measured:
+    doing so tripled the per-body cost of the pm and j2 tiers). The field-level equivalence tests call
+    this function; `test_cowell_*` hold the step to the same reference.
+
+    `zonal_params[row]` is read only behind `has_zonal`, and the drag table only behind `has_drag`, so
+    one-row dummies are safe when no body has those bits - the same convention as `j2_params` in
+    `cowell_rk4_step`.
+    """
+    ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, has_point_mass, has_j2, j2, r_eq)
     if has_drag:
-        # drag: `drag.drag_kernel` one row at a time. rel points from the primary to the body; the
-        # velocity is the stage candidate's, relative to the parent. v_rel = v - w x r with w = omega
-        # z_hat, i.e. (vx + omega y, vy - omega x, vz).
-        x = cx - px
-        y = cy - py
-        z = cz - pz
-        vx = cvx - pvx
-        vy = cvy - pvy
-        vz = cvz - pvz
-        r2 = x * x + y * y + z * z
-        vrx = vx + drag_omega * y
-        vry = vy - drag_omega * x
-        vrz = vz
-        speed = math.sqrt(vrx * vrx + vry * vry + vrz * vrz)
-        altitude = math.sqrt(r2) - drag_r_ref
-
-        # The reference sums three masked terms, exactly one of which can be non-zero per row:
-        # `rho0 * factor` (factor 0.0 off the exponential law, or without separation or scale height),
-        # then `+ layered` and `+ msis` (each exactly +0.0 off its own law or without separation). The
-        # same sum is formed here, so even an exponential row's `+ 0.0 + 0.0` is reproduced.
-        separated = r2 > 0.0
-        exp_factor = 0.0
-        if separated and drag_law == DRAG_LAW_EXPONENTIAL and drag_scale_height > 0.0:
-            exp_factor = math.exp(-((altitude - drag_h0) / drag_scale_height))
-        layered = 0.0
-        msis = 0.0
-        if separated and drag_law == DRAG_LAW_LAYERED:
-            layered = _piecewise_density(altitude, table_alt, table_rho, table_scale,
-                                         drag_table, table_len[drag_table])
-        elif separated and drag_law == DRAG_LAW_MSIS:
-            msis = _piecewise_density(altitude, table_alt, table_rho, table_scale,
-                                      drag_table, table_len[drag_table])
-        density = drag_rho0 * exp_factor + layered + msis                            # kg/m^3
-
-        # 0.5 * rho [kg/m^3] * B [m^2/kg] * 1e3 -> 1/km; times |v_rel| [km/s] times v_rel [km/s].
-        k = 0.5 * density * drag_b * _DRAG_PER_M_TO_PER_KM * speed
-        ax -= k * vrx
-        ay -= k * vry
-        az -= k * vrz
-
+        ax, ay, az = _drag_term(ax, ay, az, px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz,
+                                drag_law, drag_b, drag_rho0, drag_h0, drag_scale_height, drag_r_ref,
+                                drag_omega, drag_table, tables, n_nodes)
     if has_zonal:
-        # zonal J3..J6: equation (Z) of zonal.py, the same two Legendre recursions in the same order
-        # as `zonal.zonal_kernel`, one scalar at a time. rel points from the primary to the body; mu is
-        # the parent's alone. The reference's zero-separation row adds an exact 0.0 through inv_r = 0;
-        # here the guard skips it, which adds nothing either.
-        x = cx - px
-        y = cy - py
-        z = cz - pz
-        r2 = x * x + y * y + z * z
-        if r2 > 0.0:
-            inv_r2 = 1.0 / r2
-            inv_r = math.sqrt(inv_r2)
-            s = z * inv_r
-            rho = zonal_params[row, 0] * inv_r                           # R / r
-
-            p_prev = 1.0              # P_0
-            p_curr = s                # P_1
-            dp_curr = 1.0             # P_1'
-            rho_n = rho               # (R/r)^1
-            radial = 0.0
-            axial = 0.0
-            for n in range(2, _ZONAL_MAX_DEGREE + 2):
-                p_next = ((2 * n - 1) * s * p_curr - (n - 1) * p_prev) / n      # P_n
-                dp_next = n * p_curr + s * dp_curr                              # P_n'
-                # dp_next is P_n': the radial term of degree n - 1 and the axial term of degree n.
-                # J_m sits in column m - 2.
-                if n >= 4:
-                    radial += zonal_params[row, n - 3] * rho_n * dp_next
-                rho_n = rho_n * rho                                             # (R/r)^n
-                if 3 <= n <= _ZONAL_MAX_DEGREE:
-                    axial += zonal_params[row, n - 2] * rho_n * dp_next
-                p_prev = p_curr
-                p_curr = p_next
-                dp_curr = dp_next
-
-            k = mu_par * inv_r2                                                 # mu / r^2
-            ax += k * radial * x * inv_r
-            ay += k * radial * y * inv_r
-            az += k * (radial * s - axial)
-
+        ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, row)
     return ax, ay, az
 
 
@@ -682,11 +731,8 @@ def cowell_rk4_step(
     has_drag: NDArray[np.bool_],
     drag_params: NDArray[np.float64],
     drag_table_of: NDArray[np.int64],
-    table_alt: NDArray[np.float64],
-    table_rho: NDArray[np.float64],
-    table_scale: NDArray[np.float64],
-    table_len: NDArray[np.int64],
-    table_activity: NDArray[np.float64],
+    density_tables: NDArray[np.float64],
+    density_meta: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> int:
     """
@@ -698,19 +744,20 @@ def cowell_rk4_step(
 
     **Why fused rather than dispatched.** The NumPy path composes an arbitrary list of Python force
     kernels; numba cannot call into that list. This kernel therefore hard-codes the one combination
-    the fidelity sweep runs (`_cowell_accel`), and `Simulation._refresh_cowell_plan` selects it only
-    when every Cowell body's mask is a subset of `{point_mass_gravity, j2, drag, zonal}` - any other
-    model falls back to the NumPy path, so the fallback is data (`Simulation._cowell_fused_ok`), not a
-    branch on a model name inside the step.
+    the fidelity sweep runs (`_cowell_accel`'s composition), and `Simulation._refresh_cowell_plan`
+    selects it only when every Cowell body's mask is a subset of `{point_mass_gravity, j2, drag,
+    zonal}` - any other model falls back to the NumPy path, so the fallback is data
+    (`Simulation._cowell_fused_ok`), not a branch on a model name inside the step.
 
     **Drag's density tables** are data the plan stacks at configuration time (`drag.density_tables`):
-    row `LAYERED_TABLE_ROW` is Vallado's table, and each further row one memoised NRLMSIS profile, all
-    padded to one width with `table_len[row]` the row's real node count. `drag_table_of[s]` is the MSIS
-    row of body `s` (-1 where it has none), and `table_activity[row]` the `(f107, f107a, ap)` it was
-    built from. The kernel reads the `density_model` selector and every other drag coefficient *live*,
-    as `drag.drag_kernel` does, so the only thing the plan can hold stale is the MSIS row choice.
+    `density_tables` is `(3, rows, width)` - base altitudes, base densities, scale heights - with row
+    `LAYERED_TABLE_ROW` Vallado's table and each further row one memoised NRLMSIS profile, padded to one
+    width; `density_meta[row]` is the row's real node count and the `(f107, f107a, ap)` it was built
+    from. `drag_table_of[s]` is body `s`'s MSIS row (-1 where it has none). The kernel reads the
+    `density_model` selector and every other drag coefficient *live*, as `drag.drag_kernel` does, so
+    the only thing the plan can hold stale is the MSIS row choice.
 
-    **Return value.** Before touching any state, every Cowell drag row whose live selector says MSIS is
+    **Return value.** Before touching any state, every drag body whose live selector says MSIS is
     checked against its plan row's triple. On a mismatch - a profile never planned, or indices written
     straight into `force_model_params` after the plan was built - the kernel returns that slot and
     writes nothing, and `Simulation.step` re-plans and retries (or falls back to the reference, which
@@ -727,13 +774,13 @@ def cowell_rk4_step(
     so a Cowell body whose parent is itself in `indices` is excluded by the caller's plan.
 
     Per-body flags rather than one global set so a mixed arena - some satellites with J2, some
-    without, some with J3..J6 - stays on the compiled path. `j2_params` is `force_model_params["j2"]`
-    when any body has the J2 bit, and a one-row dummy otherwise; a row is only ever read behind its
-    body's `has_j2`. `zonal_params` / `has_zonal` and `drag_params` / `has_drag` follow the same
-    convention for `force_model_params["zonal"]` and `["drag"]`. `t` is not a parameter: no fused model
-    depends on time (drag's atmosphere is steady in the frame co-rotating with the parent). Scalar stage
-    values live in registers, so unlike `RK4Integrator` this needs no stage scratch and allocates
-    nothing.
+    without, some with J3..J6 or drag - stays on the compiled path. `j2_params` is
+    `force_model_params["j2"]` when any body has the J2 bit, and a one-row dummy otherwise; a row is
+    only ever read behind its body's `has_j2`. `zonal_params` / `has_zonal` and `drag_params` /
+    `has_drag` follow the same convention for `force_model_params["zonal"]` and `["drag"]`. `t` is not
+    a parameter: no fused model depends on time (drag's atmosphere is steady in the frame co-rotating
+    with the parent). Scalar stage values live in registers, so unlike `RK4Integrator` this needs no
+    stage scratch and allocates nothing.
     """
     half_dt = 0.5 * dt
     sixth_dt = dt / 6.0
@@ -747,7 +794,7 @@ def cowell_rk4_step(
             if row < 0:
                 return int(s)
             for c in range(3):
-                if not (drag_params[s, _DRAG_F107_COL + c] == table_activity[row, c]):
+                if not (drag_params[s, _DRAG_F107_COL + c] == density_meta[row, TABLE_F107_COL + c]):
                     return int(s)
 
     for k in range(n):
@@ -782,6 +829,7 @@ def cowell_rk4_step(
             law = _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL])
             if law == DRAG_LAW_MSIS:
                 table = drag_table_of[s]
+        n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
 
         px = state[par, 0]
         py = state[par, 1]
@@ -790,24 +838,30 @@ def cowell_rk4_step(
         pvy = state[par, 4]
         pvz = state[par, 5]
 
-        # Initial relative state y0 = state[s] - state[par]; stage 1 is evaluated on the committed row.
+        # Initial relative state y0 = state[s] - state[par]; stage 1 is evaluated on the committed row,
+        # velocity included (drag reads it).
         cx = state[s, 0]
         cy = state[s, 1]
         cz = state[s, 2]
-        r0x = cx - px
-        r0y = cy - py
-        r0z = cz - pz
-        v0x = state[s, 3] - pvx
-        v0y = state[s, 4] - pvy
-        v0z = state[s, 5] - pvz
         cvx = state[s, 3]
         cvy = state[s, 4]
         cvz = state[s, 5]
+        r0x = cx - px
+        r0y = cy - py
+        r0z = cz - pz
+        v0x = cvx - pvx
+        v0y = cvy - pvy
+        v0z = cvz - pvz
 
-        a1x, a1y, a1z = _cowell_accel(
-            px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz, mu_total, mu_par, pm, jj, j2, r_eq,
-            dd, law, b, rho0, h0, scale_height, r_ref, omega, table,
-            table_alt, table_rho, table_scale, table_len, zz, zonal_params, s)
+        # Each stage below is `_cowell_accel`'s composition - gravity, then drag, then zonal, in
+        # registration order - written out so that only a body with drag or zonal passes their tables.
+        a1x, a1y, a1z = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            a1x, a1y, a1z = _drag_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, pvx, pvy, pvz,
+                                       cvx, cvy, cvz, law, b, rho0, h0, scale_height, r_ref, omega,
+                                       table, density_tables, n_nodes)
+        if zz:
+            a1x, a1y, a1z = _zonal_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
         v1x = v0x + half_dt * a1x
         v1y = v0y + half_dt * a1y
         v1z = v0z + half_dt * a1z
@@ -821,10 +875,13 @@ def cowell_rk4_step(
         cvx = pvx + v1x
         cvy = pvy + v1y
         cvz = pvz + v1z
-        a2x, a2y, a2z = _cowell_accel(
-            px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz, mu_total, mu_par, pm, jj, j2, r_eq,
-            dd, law, b, rho0, h0, scale_height, r_ref, omega, table,
-            table_alt, table_rho, table_scale, table_len, zz, zonal_params, s)
+        a2x, a2y, a2z = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            a2x, a2y, a2z = _drag_term(a2x, a2y, a2z, px, py, pz, cx, cy, cz, pvx, pvy, pvz,
+                                       cvx, cvy, cvz, law, b, rho0, h0, scale_height, r_ref, omega,
+                                       table, density_tables, n_nodes)
+        if zz:
+            a2x, a2y, a2z = _zonal_term(a2x, a2y, a2z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
         v2x = v0x + half_dt * a2x
         v2y = v0y + half_dt * a2y
         v2z = v0z + half_dt * a2z
@@ -836,10 +893,13 @@ def cowell_rk4_step(
         cvx = pvx + v2x
         cvy = pvy + v2y
         cvz = pvz + v2z
-        a3x, a3y, a3z = _cowell_accel(
-            px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz, mu_total, mu_par, pm, jj, j2, r_eq,
-            dd, law, b, rho0, h0, scale_height, r_ref, omega, table,
-            table_alt, table_rho, table_scale, table_len, zz, zonal_params, s)
+        a3x, a3y, a3z = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            a3x, a3y, a3z = _drag_term(a3x, a3y, a3z, px, py, pz, cx, cy, cz, pvx, pvy, pvz,
+                                       cvx, cvy, cvz, law, b, rho0, h0, scale_height, r_ref, omega,
+                                       table, density_tables, n_nodes)
+        if zz:
+            a3x, a3y, a3z = _zonal_term(a3x, a3y, a3z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
         v3x = v0x + dt * a3x
         v3y = v0y + dt * a3y
         v3z = v0z + dt * a3z
@@ -851,10 +911,13 @@ def cowell_rk4_step(
         cvx = pvx + v3x
         cvy = pvy + v3y
         cvz = pvz + v3z
-        a4x, a4y, a4z = _cowell_accel(
-            px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz, mu_total, mu_par, pm, jj, j2, r_eq,
-            dd, law, b, rho0, h0, scale_height, r_ref, omega, table,
-            table_alt, table_rho, table_scale, table_len, zz, zonal_params, s)
+        a4x, a4y, a4z = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            a4x, a4y, a4z = _drag_term(a4x, a4y, a4z, px, py, pz, cx, cy, cz, pvx, pvy, pvz,
+                                       cvx, cvy, cvz, law, b, rho0, h0, scale_height, r_ref, omega,
+                                       table, density_tables, n_nodes)
+        if zz:
+            a4x, a4y, a4z = _zonal_term(a4x, a4y, a4z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
 
         # Weighted combination on the relative state, then back onto the parent's start-of-step row.
         rnx = r0x + sixth_dt * (v0x + 2.0 * v1x + 2.0 * v2x + v3x)

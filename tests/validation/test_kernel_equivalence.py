@@ -491,8 +491,7 @@ def _fused_plan_args(sim: Simulation) -> tuple[object, ...]:
         sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
         sim._cowell_has_zonal, sim._cowell_zonal_params,
         sim._cowell_has_drag, sim._cowell_drag_params, sim._cowell_drag_table_of,
-        tables.altitude_km, tables.density_kg_m3, tables.scale_height_km, tables.n_nodes,
-        tables.activity,
+        tables.tables, tables.meta,
     )
 
 
@@ -794,12 +793,12 @@ def _fused_accel(
     has_drag = drag_row is not None
     d = np.zeros(len(drag.DRAG_PARAM_NAMES)) if drag_row is None else drag_row
     law = kernels._drag_law(float(d[drag.DENSITY_MODEL_COL]))
+    table = drag_table if law == kernels.DRAG_LAW_MSIS else kernels.LAYERED_TABLE_ROW
     return kernels._cowell_accel(
         px, py, pz, cx, cy, cz, pv[0], pv[1], pv[2], cv[0], cv[1], cv[2], mu, mu,
         False, False, 0.0, 0.0,
         has_drag, law, float(d[0]), float(d[1]), float(d[2]), float(d[3]), float(d[4]), float(d[5]),
-        drag_table if law == kernels.DRAG_LAW_MSIS else kernels.LAYERED_TABLE_ROW,
-        tables.altitude_km, tables.density_kg_m3, tables.scale_height_km, tables.n_nodes,
+        table, tables.tables, int(tables.n_nodes[table]),
         has_zonal, zp, row)
 
 

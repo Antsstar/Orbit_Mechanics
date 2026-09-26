@@ -371,21 +371,36 @@ def drag_kernel(
 @dataclass(frozen=True)
 class DensityTables:
     """
-    Every piecewise-exponential density table the compiled drag term can read, stacked row-wise and
-    right-padded to one width so `@njit` code can index them without Python objects:
+    Every piecewise-exponential density table the compiled drag term can read, stacked and right-padded
+    to one width so `@njit` code can index them without Python objects. `tables` is `(3, P, N)`:
+    `tables[0]` base altitudes (km), `[1]` base densities (kg/m^3), `[2]` scale heights (km), and
 
     - row `kernels.LAYERED_TABLE_ROW` (0) is `atmosphere.py`'s Vallado table (28 bands);
     - each further row is one memoised NRLMSIS 2.0 profile (`msis_bridge.MsisProfile`, 601 nodes).
 
-    `n_nodes[row]` is the row's real length - the band search never reads the padding. `activity[row]`
-    is the `(f107, f107a, ap)` the row was built from, NaN on the table's row so no MSIS body can ever
-    match it; the compiled step compares it with each MSIS body's live indices to detect a stale plan.
+    `meta` is `(P, 4)`: the row's real length (`kernels.TABLE_N_NODES_COL`; the band search never reads
+    the padding) and the `(f107, f107a, ap)` it was built from (`kernels.TABLE_F107_COL` on), NaN on
+    the table's row so no MSIS body can ever match it - the compiled step compares these with each MSIS
+    body's live indices to detect a stale plan. Two arrays rather than five because each array argument
+    costs the compiled step's dispatch ~0.1 us.
     """
-    altitude_km: NDArray[np.float64]            # (P, N)
-    density_kg_m3: NDArray[np.float64]          # (P, N)
-    scale_height_km: NDArray[np.float64]        # (P, N)
-    n_nodes: NDArray[np.int64]                  # (P,)
-    activity: NDArray[np.float64]               # (P, 3)
+    tables: NDArray[np.float64]                 # (3, P, N)
+    meta: NDArray[np.float64]                   # (P, 4)
+
+    @property
+    def altitude_km(self) -> NDArray[np.float64]:
+        out: NDArray[np.float64] = self.tables[0]
+        return out
+
+    @property
+    def n_nodes(self) -> NDArray[np.int64]:
+        out: NDArray[np.int64] = self.meta[:, 0].astype(np.int64)
+        return out
+
+    @property
+    def activity(self) -> NDArray[np.float64]:
+        out: NDArray[np.float64] = self.meta[:, 1:]
+        return out
 
 
 def density_tables(activity: NDArray[np.float64]) -> Tuple[DensityTables, NDArray[np.int64]]:
@@ -405,20 +420,20 @@ def density_tables(activity: NDArray[np.float64]) -> Tuple[DensityTables, NDArra
     profiles = [cached_msis_profile(float(f107), float(f107a), float(ap)) for f107, f107a, ap in keys]
     lengths = [BASE_ALTITUDE_KM.size] + [p.altitude_km.size for p in profiles]
     n_rows, width = len(lengths), max(lengths)
-    alt = np.zeros((n_rows, width))
-    rho = np.zeros((n_rows, width))
-    scale = np.ones((n_rows, width))
-    table_activity = np.full((n_rows, 3), np.nan)
-    alt[0, :BASE_ALTITUDE_KM.size] = BASE_ALTITUDE_KM
-    rho[0, :BASE_ALTITUDE_KM.size] = BASE_DENSITY_KG_M3
-    scale[0, :BASE_ALTITUDE_KM.size] = SCALE_HEIGHT_KM
+    stacked = np.zeros((3, n_rows, width))
+    stacked[2] = 1.0                            # padding is never read; a unit scale height is inert
+    meta = np.full((n_rows, 4), np.nan)
+    meta[:, 0] = lengths
+    n = BASE_ALTITUDE_KM.size
+    stacked[0, 0, :n] = BASE_ALTITUDE_KM
+    stacked[1, 0, :n] = BASE_DENSITY_KG_M3
+    stacked[2, 0, :n] = SCALE_HEIGHT_KM
     for row, profile in enumerate(profiles, start=1):
         n = profile.altitude_km.size
-        alt[row, :n] = profile.altitude_km
-        rho[row, :n] = profile.density_kg_m3
-        scale[row, :n] = profile.scale_height_km
-        table_activity[row] = (profile.f107, profile.f107a, profile.ap)
-    tables = DensityTables(altitude_km=alt, density_kg_m3=rho, scale_height_km=scale,
-                           n_nodes=np.asarray(lengths, dtype=np.int64), activity=table_activity)
+        stacked[0, row, :n] = profile.altitude_km
+        stacked[1, row, :n] = profile.density_kg_m3
+        stacked[2, row, :n] = profile.scale_height_km
+        meta[row, 1:] = (profile.f107, profile.f107a, profile.ap)
+    tables = DensityTables(tables=stacked, meta=meta)
     rows: NDArray[np.int64] = np.asarray(which, dtype=np.int64).reshape(-1) + 1
     return tables, rows

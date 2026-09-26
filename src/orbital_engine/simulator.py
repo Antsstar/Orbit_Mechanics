@@ -1725,8 +1725,7 @@ class Simulation:
             self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
             self._cowell_has_zonal, self._cowell_zonal_params,
             self._cowell_has_drag, self._cowell_drag_params, self._cowell_drag_table_of,
-            tables.altitude_km, tables.density_kg_m3, tables.scale_height_km, tables.n_nodes,
-            tables.activity, self._cowell_rel,
+            tables.tables, tables.meta, self._cowell_rel,
         ))
 
     def _rebase(self, indices: NDArray[np.int64], rel: NDArray[np.float64]) -> None:

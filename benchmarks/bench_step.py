@@ -182,8 +182,7 @@ def bench_cowell() -> None:
                     sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
                     sim._cowell_has_zonal, sim._cowell_zonal_params,
                     sim._cowell_has_drag, sim._cowell_drag_params, sim._cowell_drag_table_of,
-                    tables.altitude_km, tables.density_kg_m3, tables.scale_height_km,
-                    tables.n_nodes, tables.activity, sim._cowell_rel,
+                    tables.tables, tables.meta, sim._cowell_rel,
                 )
 
             ref = measure(reference, inner=50).best
