@@ -146,6 +146,46 @@ The zonal term is fused into the compiled Cowell step, so it is timed fairly: Co
 costs **1.17×** the J2-only tier (0.048 s against 0.041 s over 24 h at 15 s). On the NumPy path it
 was about 120×.
 
+### ...and more than the zonal field? The tesserals do matter
+
+The zonal terms are axisymmetric. The longitude-dependent field, the tesseral harmonics (here to
+degree and order 4, EGM96, rotating with the Earth), is modelled by `tesseral` and carried by the
+truth through an independent derivation. The same 24 h, 12-satellite, 3-station run, now against a
+truth with J2..J6 **and** the 4×4 tesserals, both tiers Cowell + J2 + J3..J6 at 15 s
+(`benchmarks/tesseral_sweep.py --leo`):
+
+| Tier | Median / max error, 24 h | Mean / max \|rise shift\| | Passes lost / gained |
+|---|---|---|---|
+| Without `tesseral` | 3.819 km / 9.05 km | 0.288 s / **1.150 s** | 0 / 0 |
+| With `tesseral` | 0.0027 km / 0.0027 km | 0.000 s / 0.000 s | 0 / 0 |
+
+Omitting the tesserals costs **three times what omitting J3..J6 does**, and the worst rise shift
+crosses the 1 s pad that J3..J6 stayed inside. The mechanism is each satellite's starting state: the
+tesseral short-period terms shift the *mean* semi-major axis of an osculating seed by up to 0.068 km,
+which predicts each satellite's along-track error with correlation 0.9992. The estimate written
+before the run was about 1 km. The mechanism was right; the magnitude was three times low, because it
+budgeted J22 alone when J31's term is the same size at LEO.
+
+### Holding a geostationary slot
+
+The zonal field cannot move a geostationary satellite in longitude; the tesseral field does, towards
+two stable points, and every GEO slot's east-west station-keeping budget comes from it. With J22
+alone the stable points are at exactly λ22 + 90° and λ22 + 270°, which is 75.07°E and 104.93°W. The
+full 4×4 field moves them to **74.94°E and 105.09°W**, against the published 75.1°E and 105.3°W. That
+is a comparison, not a verification: both the coefficients and the published figure carry
+uncertainty, and degree 5 and above is not modelled.
+
+Holding a slot costs `a |λ̈| / 3` per unit time, where λ̈ is the longitude acceleration. The engine
+measures λ̈ by fitting the drift of a Cowell GEO satellite, and the costs agree with the closed form:
+
+| Field | Worst slot, closed form | Worst slot, measured |
+|---|---|---|
+| J22 alone | 1.7635 m/s per year | 1.7637 m/s per year |
+| 4×4 | 2.0659 m/s per year (117.36°E) | 2.0660 m/s per year |
+
+Under J22 alone the four worst slots cost the same. Under the 4×4 field they do not (2.07, 1.87, 1.71
+and 1.48 m/s per year), and most of that reshaping comes from J33.
+
 ### Drag decay
 
 ![Drag decay](docs/figures/drag_decay.png)
@@ -264,6 +304,9 @@ model's defining invariant drawn rather than asserted.
   - **`point_mass_gravity`** and **`j2`**.
   - **`zonal`**: the J3..J6 zonal harmonics (EGM96), additive to `j2` and fused into the same compiled
     Cowell step.
+  - **`tesseral`**: the longitude-dependent harmonics to degree and order 4 (EGM96), rotating with
+    the Earth. It is the engine's first force that depends on time, so it is also the test that each
+    Runge-Kutta stage sees its own time.
   - **`drag`**: a co-rotating atmosphere with a choice of density law: a single exponential band, a
     28-band piecewise table, or NRLMSIS 2.0. MSIS's solar activity (F10.7, Ap) is a per-body
     coefficient, so the state of the Sun is a sweep axis like any model choice.
@@ -340,10 +383,10 @@ that works without the editable checkout.
 
 | | |
 |---|---|
-| Tests | 696 passing |
-| Type checking | `mypy --strict`, clean across 34 source files |
+| Tests | 716 passing |
+| Type checking | `mypy --strict`, clean across 35 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
-| Coverage | 92%, measured with Numba disabled (timing tests deselected) |
+| Coverage | 92%, measured with Numba disabled at 696 tests (timing tests deselected) |
 | Published reference | Vallado et al. (2006) SGP4 verification vectors, all in-tolerance cases |
 
 > Measure coverage with Numba disabled. `coverage.py` traces bytecode, so a `@njit` function reads as
@@ -459,6 +502,7 @@ Orbit_Mechanics/
 │   │                        #   station-keeping, solar activity
 │   ├── frontier_plot.py     # Runs the sweep and writes docs/figures/frontier.png
 │   ├── msis_sweep.py        # Solar activity against the atmosphere model, in station-keeping Δv
+│   ├── tesseral_sweep.py    # GEO slot longitudes in m/s per year; --leo for contact windows
 │   └── zonal_sweep.py       # J2 against J2..J6 truth, in km and in contact windows
 ├── docs/
 │   ├── architecture.md      # Why the engine is shaped this way
@@ -476,6 +520,7 @@ Orbit_Mechanics/
 │   ├── gravity.py           # point_mass_gravity
 │   ├── geopotential.py      # j2
 │   ├── zonal.py             # zonal: J3..J6, additive to j2
+│   ├── tesseral.py          # tesseral: orders m >= 1 to degree 4, rotating with the Earth
 │   ├── drag.py, atmosphere.py  # drag and its density laws
 │   ├── msis_bridge.py       # NRLMSIS 2.0 via pymsis, evaluated at configuration time (optional)
 │   ├── thirdbody.py         # third_body
@@ -531,6 +576,7 @@ python benchmarks/figures.py         # regenerate the gallery (a few minutes)
 python benchmarks/figures.py solar   # ...or only the figures named (ground, error, drag, hierarchy,
                                      #    atmosphere, access, stationkeeping, solar)
 python benchmarks/zonal_sweep.py     # does a 550 km constellation need more than J2?
+python benchmarks/tesseral_sweep.py  # GEO east-west cost by slot longitude (--leo adds the LEO sweep)
 python benchmarks/msis_sweep.py      # solar activity against the atmosphere model, in Δv (a few minutes)
 python benchmarks/bench_step.py      # step-cost benchmarks
 ```
@@ -615,7 +661,9 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
   must be massless, and heads and barycentres cannot use Cowell.
 - **J2 and the higher zonals assume a fixed spin axis.** The parent's spin axis is taken as the
   frame's z-axis. That is exact for the Earth-centred scenarios and 23.4° off in the ecliptic
-  Sun–Earth–Moon scenario. Only zonal terms exist; tesseral harmonics are not yet modelled.
+  Sun–Earth–Moon scenario. The geopotential stops at degree 6 for the zonal terms and degree and
+  order 4 for the tesseral ones. The tesseral model runs on the NumPy path, with no compiled twin yet,
+  so its timings are not comparable with the fused tiers.
 - **NRLMSIS 2.0 is averaged, by choice.** Each solar-activity setting becomes one global-mean density
   profile, averaged over latitude, local time and day of year, with the indices held constant. That
   discards the diurnal bulge (day/night **2.3×** at 400 km on the equator), the semi-annual season
@@ -656,6 +704,7 @@ Ordered so that each stage makes the next one safe rather than merely possible.
    - **Done:**
      - J2 (force model, secular propagator and reference)
      - zonal harmonics J3..J6 (force model, compiled twin and reference)
+     - tesseral harmonics to degree and order 4 (force model and reference)
      - Cowell RK4
      - third-body perturbations
      - drag with exponential and tabulated atmospheres
@@ -663,9 +712,8 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - solar radiation pressure with shadow geometry
      - continuous and impulsive thrust
      - the SGP4 bridge
-   - **In progress:**
-     - tesseral harmonics
    - **Planned:**
+     - a compiled twin for the tesseral model
      - perturbers advanced per integrator stage
      - Encke
      - symplectic integrators
