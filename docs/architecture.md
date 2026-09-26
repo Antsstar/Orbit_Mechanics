@@ -316,14 +316,14 @@ accidents.
 
 **The compiled twin is fused, not composed.** `kernels.cowell_rk4_step` is the second-implementation
 half of this propagator: one scalar loop per body doing all four RK4 stages with `point_mass_gravity`,
-`j2` and `zonal` (J3..J6) inlined (`kernels._cowell_accel`, each term's arithmetic in the same order
+`j2`, `drag` (all three density laws) and `zonal` (J3..J6) inlined (`kernels._cowell_accel`, each term's arithmetic in the same order
 as its NumPy kernel, and the terms added in registration order, as `compose_accelerations` adds
 them), selected by `use_compiled_kernel` exactly like the Keplerian and secular twins. It cannot
 call `forces.compose_accelerations` - numba does not dispatch over a list of Python callables - so
 instead of a general compiled composition layer it hard-codes the one combination the fidelity sweep
-runs, with per-body flags so a mixed arena (some satellites with J2, some with J2..J6, some without)
-still qualifies. `Simulation._refresh_cowell_plan` decides at configuration time, from the mask alone,
-whether every Cowell body's models are a subset of those three and no Cowell body is parented by another Cowell body
+runs, with per-body flags so a mixed arena (some satellites with J2, some with J2..J6 or drag, some
+without) still qualifies. `Simulation._refresh_cowell_plan` decides at configuration time, from the mask alone,
+whether every Cowell body's models are a subset of those four and no Cowell body is parented by another Cowell body
 (the kernel reads a parent's row as fixed across the stages, where `RK4Integrator` would see its stage
 candidates); if not, the whole Cowell set runs the NumPy path. The plan is rebuilt by both
 `_refresh_active_indices` and `resolve_force_models`, so it tracks `set_propagator` and
@@ -458,8 +458,9 @@ atmosphere. The reasons are the same: one setter, and per-body sweeps in a singl
 stored, so `B` is an explicit coefficient for now.
 
 **What it does not do.** Spherical altitude `|r| - r_ref`, no diurnal bulge, and solar and
-geomagnetic activity only as constant indices under the MSIS law (see "NRLMSIS 2.0" below). The fused compiled Cowell twin does not include drag, so enabling it on any Cowell body
-sends the whole Cowell set down the NumPy path.
+geomagnetic activity only as constant indices under the MSIS law (see "NRLMSIS 2.0" below). Drag is
+fused into the compiled Cowell twin (see "Drag in the fused Cowell twin" below), so a Cowell body with
+drag stays on the compiled path.
 
 ---
 
@@ -519,8 +520,8 @@ draft of the test asserted a monotone divergence in both directions and was wron
 **Still not modelled** by these two laws: solar and geomagnetic activity, the diurnal bulge, winds,
 seasonal and latitudinal variation. Real density at 400 km swings by more than an order of magnitude
 over a solar cycle, which is larger than the gap between the two laws. The next section adds activity
-through `pymsis`, as a third value of the same selector. No compiled twin: drag is not in the fused
-plan, so a compiled density law would have nothing to plug into.
+through `pymsis`, as a third value of the same selector. All three laws are in drag's fused compiled
+term (see "Drag in the fused Cowell twin" below).
 
 ---
 
@@ -1398,8 +1399,74 @@ against 6.8 us at 12 satellites (1.16x), 18.4 against 12.8 at 60 (1.44x). In the
 
 J3..J6 now cost **1.10-1.17x** the `j2`-only tier at the same step, down from ~120x (130x as first
 recorded) - the remaining difference is physics, not implementation. A zonal body that also carries
-a model outside the fused set (`drag`, `srp`, `third_body`, `thrust`) still sends the whole Cowell set
-down the NumPy path.
+a model outside the fused set (`srp`, `third_body`, `thrust`) still sends the whole Cowell set down
+the NumPy path; drag has since been fused as well ("Drag in the fused Cowell twin").
+
+---
+
+## Drag in the fused Cowell twin
+
+Every station-keeping, MSIS and Delta-v sweep runs Cowell + drag, and until this a drag bit sent the
+whole Cowell set down the NumPy `RK4Integrator` path - ~100x the fused tiers' step cost, so drag tiers'
+wall times were not comparable with anything else in a sweep. `kernels._drag_term` is now
+`drag.drag_kernel` one row at a time inside `cowell_rk4_step`, behind a per-body `has_drag` flag, and
+`"drag"` is in `_refresh_cowell_plan`'s accepted set.
+
+**Same arithmetic, same order.** `v_rel = (vx + w y, vy - w x, vz)`, `|v_rel|` summed left to right,
+`h = sqrt(r^2) - r_ref`, the reference's three masked density terms summed in its order (`rho0 * factor
++ layered + msis`, the absent two exactly +0.0), `k = ((0.5 rho) B) 1e3 |v_rel|` subtracted component
+by component, composed between `j2` and `zonal` (registration bits 1, 2, 6). The zero-contribution rules
+are the reference's: no separation, or `scale_height <= 0` under the single band, gives exactly 0.0
+without evaluating `exp`. What can differ: `r^2` (einsum there, `x*x + y*y + z*z` here - half an ulp of
+`r`, turned into `dh/H` of density: <= 1e-13 at the smallest scale height in the tables, 5.38 km) and
+`exp` (NumPy's SIMD loop against the C library's, under an ulp each). Bound 1e-12 relative.
+
+**Velocity is new to the fused kernel.** No earlier fused term read it. Each RK4 stage passes its own
+candidate velocity `pv + v_k` (k = 0 committed, then v1, v2, v3) exactly as `RK4Integrator` writes
+`state[indices, 3:]` before each provider call, and the term takes `pv` back off. A twin that evaluated
+every stage at `v0` is caught by 24 of the equivalence tests (mutation below).
+
+**The density tables are plan data.** `drag.density_tables` stacks, at configuration time, Vallado's
+table as row 0 and one row per distinct MSIS `(f107, f107a, ap)` among the Cowell drag bodies (read from
+the memo through `cached_msis_profile`, so an unevaluated triple raises `LookupError` there and the plan
+falls back to the reference, which raises it at step time exactly as before). Two arrays: `(3, P, N)`
+altitudes / densities / scale heights, and `(P, 4)` node count plus the triple. A scalar binary search
+reproduces `np.searchsorted(side="right") - 1` and its clip, so an altitude exactly on a base altitude
+takes the band starting there and both terminal bands extrapolate. The selector and every other
+coefficient are read **live** from `force_model_params["drag"]`, as the reference reads them; the only
+thing the plan can hold stale is an MSIS body's profile row, so the kernel first checks each MSIS body's
+live triple against its row and, on a mismatch, returns the slot having written nothing - `step()`
+re-plans and retries once, or falls back.
+
+**Measured** (`tests/validation/test_kernel_equivalence.py`). Field level against `drag_kernel`, every
+band edge exactly and an ulp either side, the 200 km MSIS grid change, both extrapolated regions, all
+zero-contribution rows, origin and heliocentric parents: max 1.7e-14 of `|a_drag|` under each law (228 of
+240 non-zero rows bit-identical), zero rows exactly zero. State: bit-identical after 1 step, <= 1.1e-14
+elementwise at 50, <= 1.6e-13 by norm over 500 steps (drag lowering `a` by 7.8-20 km). Mutations
+applied to the real source: the co-rotation sign fails 26 tests, the band-search side 2 (the field-level
+edge rows - the state tests never land on an edge), stage velocity frozen at `v0` 24, MSIS bodies reading
+the table's row 15. Swapping drag and zonal in the composition fails nothing, as derived: it moves the
+sum by an ulp.
+
+**Cost.** Estimated after a first, confounded measurement rather than before it: `exp`, two `sqrt` and a
+division per evaluation, ~60-80 ns, four evaluations - ~0.25-0.3 us per body-step on top of `j2`, with
+the band search (5 or 10 iterations) adding 10-40 % under the tabled laws. Measured, marginal per
+body-step between 12 and 60 satellites, interleaved with the pre-drag kernel: `pm` 0.066 us, `pm+j2`
+0.076 (the pre-drag kernel: 0.13 - it passed the zonal row through every call), `pm+j2+zonal` 0.231,
+`pm+j2+drag` 0.236 / 0.241 / 0.224 for exponential / table / MSIS. The drag term costs ~0.16 us, half the
+estimate, and the search is invisible - its branches on a 28- or 601-entry row stay in cache and predict.
+**The first version passed the tables through a per-stage `_cowell_accel` call and tripled the `pm` and
+`j2` tiers' cost** (0.38 us per body-step) because numba did not inline it and `inline="always"` fails
+on it; the step now calls `_gravity_accel`, `_drag_term` and `_zonal_term` itself, each behind its flag.
+`_cowell_accel` remains that same composition, for the field-level tests.
+
+| Run | NumPy path (before) | fused (after) | published numbers |
+|---|---|---|---|
+| `station_keeping.png`'s 10-day run, 4 sats, dt = 30 s | 41.3 s | 9.7 s | 3.435695 m/s/day, -14.1075 %, -0.1421 % - identical |
+| `benchmarks/msis_sweep.py`, 5 tiers x 6 days | 317 s | 19 s | every column identical to 4 decimals |
+
+The remaining wall time is the station-keeping controller's per-step Python and, in the sweep, the
+truth integration and MSIS profile evaluation - no longer propagation.
 
 ---
 
@@ -1489,7 +1556,7 @@ optionally record.
 ## Deliberately not built
 
 - **A compiled force-composition layer.** Cowell's compiled twin is fused for `point_mass_gravity`,
-  `j2` and `zonal` only (see the Cowell section); `forces.compose_accelerations` and any other model
+  `j2`, `drag` and `zonal` only (see the Cowell section); `forces.compose_accelerations` and any other model
   stay NumPy, and a Cowell body carrying one falls back to `RK4Integrator`. A general compiled dispatcher would
   need force models to be registered as compiled callables, which no model yet asks for.
 - **Massive Cowell bodies, N-body forces, and perturbers advanced per stage.** Massive Cowell bodies
