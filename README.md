@@ -59,7 +59,7 @@ Two caveats:
   latitude (see `docs/architecture.md`). That is why the sweep reports statistics over all bodies.
 
 Every tier runs compiled. Cowell uses `kernels.cowell_rk4_step`, a fused twin of RK4 +
-`point_mass_gravity` + `j2` (and `zonal`, J3..J6, not enabled here), held to the NumPy path at 1e-12
+`point_mass_gravity` + `j2` (and `zonal` and `drag`, not enabled here), held to the NumPy path at 1e-12
 relative. The re-base that places a Cowell or secular-J2 body on its parent's end-of-step position is
 compiled too (`kernels.rebase_relative_states`, bit-identical to the NumPy block). Measured on the 12-satellite
 scenario, one step costs about 6 µs for Cowell and 7 µs for secular J2 against 5 to 6 µs for Kepler;
@@ -120,6 +120,43 @@ metric misses two things this one shows:
 
 The Cowell figure checks itself. A 1.88 km along-track error moves a pass by `(1.88 / 6921) / (n − ω)`
 = 0.265 s, and the measured 0.223 s is the along-track share of that error.
+
+### Links between satellites: the same question for an inter-satellite network
+
+A ground pass is one half of a constellation's contact plan; links between satellites are the other.
+`isl.py` gives every pair of satellites its link windows. A link is open while the straight line
+between the two clears the Earth by a stated grazing altitude, here 100 km of atmosphere. Each window
+carries range and range rate at rise, closest approach and set, the dataset a downstream network
+model consumes. `run_sweep(..., isl=IslSpec(...))` scores each tier on those windows with the same
+overlap matching as ground passes. The same constellation, now 3 planes of 4 so that pairs move
+relative to each other, gives 366 windows over the 48 cross-plane pairs in 24 h
+(`benchmarks/isl_sweep.py`):
+
+| Tier | ISL mean / max \|rise shift\| | ISL windows lost / gained | Ground mean \|rise shift\| | Ground passes lost / gained |
+|---|---|---|---|---|
+| Kepler | 20.6 s / 41.6 s | 0 / 0 | 55.8 s | 7 / 6 |
+| Secular J2, mean-seeded | 0.32 s / 0.77 s | 0 / 0 | 2.07 s | 1 / 0 |
+| Cowell + J2, 60 s step | 0.125 s / 0.347 s | 0 / 0 | 0.107 s | 0 / 0 |
+| Cowell + J2 + J3..J6, 60 s step | 0.082 s / 0.226 s | 0 / 0 | 0.082 s | 0 / 0 |
+
+- **A tier that is fine for ground contacts stays fine for links.** The Cowell tiers score within
+  20 % of their ground figures, because their error is a common along-track lag, which shifts passes
+  and links alike.
+- **The analytic tiers do much better on links than on passes.** Secular J2 is 6.4× better and Kepler
+  2.7× better. A link cannot see a rotation of the whole constellation, and errors correlated between
+  the two ends partly cancel. So mean-seeded secular J2 is enough for a 24-hour link schedule, but
+  not for ground passes.
+
+For coplanar orbits the windows have a closed form: the link opens when the phase between the two
+satellites reaches `acos(ρ/r₁) + acos(ρ/r₂)`, where ρ is the Earth's radius plus the grazing altitude.
+The tests check every edge against it.
+
+Window edges are interpolated between samples, and the clearance curve is concave where it crosses
+zero. So rises read late and sets early, by a bias that falls fourfold each time the step halves.
+For the cross-plane pairs above, an independent 1 s calculation measured that bias at 0.45 s on
+average and 0.65 s at worst at a 60 s spacing, and 0.04 s at 15 s. Inside the sweep metric it cancels,
+because truth and model share one grid. An exported dataset keeps it, so sample at 15 s when edge
+times matter.
 
 ### Does a 550 km constellation need more than J2?
 
@@ -309,7 +346,9 @@ model's defining invariant drawn rather than asserted.
     Runge-Kutta stage sees its own time.
   - **`drag`**: a co-rotating atmosphere with a choice of density law: a single exponential band, a
     28-band piecewise table, or NRLMSIS 2.0. MSIS's solar activity (F10.7, Ap) is a per-body
-    coefficient, so the state of the Sun is a sweep axis like any model choice.
+    coefficient, so the state of the Sun is a sweep axis like any model choice. All three laws are
+    fused into the compiled Cowell step, which took the MSIS sweep from 317 s to 19 s with every
+    published number unchanged.
   - **`third_body`**: one named point-mass perturber.
   - **`srp`**: cannonball solar radiation pressure, with a cylindrical or conical (umbra/penumbra)
     shadow.
@@ -330,9 +369,11 @@ model's defining invariant drawn rather than asserted.
   - With `station_keeping=` and `delta_v_baseline=`, it runs a station-keeping controller under each
     configuration and scores the **Δv budget** against a named baseline configuration (truth has no
     drag, so the baseline is always stated, never inferred).
-- **Observation geometry** (`geometry.py`, `access.py`): elevation, azimuth, range and range rate from
-  a ground station; access windows; line of sight. The **contact dataset** of windows with rise, peak
-  and set samples is the export a downstream network model consumes.
+- **Observation geometry** (`geometry.py`, `access.py`, `isl.py`): elevation, azimuth, range and range
+  rate from a ground station; access windows; line of sight. Inter-satellite link windows use the
+  same machinery with a segment-clearance test. The **contact datasets**, ground-to-satellite and
+  satellite-to-satellite, each with rise, peak and set samples, are the export a downstream network
+  model consumes.
 - **SGP4 bridge** (`sgp4_bridge.py`): wraps the `sgp4` package and never reimplements it. A TLE's mean
   elements never reach the engine's element conversion: vessels are seeded from SGP4's own Cartesian
   state.
@@ -383,8 +424,8 @@ that works without the editable checkout.
 
 | | |
 |---|---|
-| Tests | 716 passing |
-| Type checking | `mypy --strict`, clean across 35 source files |
+| Tests | 772 passing |
+| Type checking | `mypy --strict`, clean across 36 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
 | Coverage | 92%, measured with Numba disabled at 696 tests (timing tests deselected) |
 | Published reference | Vallado et al. (2006) SGP4 verification vectors, all in-tolerance cases |
@@ -532,6 +573,7 @@ Orbit_Mechanics/
 │   ├── sweep.py             # Model configurations as data; error and timing statistics
 │   ├── geometry.py          # Elevation, azimuth, range rate, access windows, line of sight
 │   ├── access.py            # Contact-window error metric and the contact dataset export
+│   ├── isl.py               # Inter-satellite link windows, their dataset and sweep metric
 │   ├── sgp4_bridge.py       # SGP4 wrapped: TLE ingest and an external sweep tier (sgp4, optional)
 │   ├── stationkeeping.py    # Dead-band altitude controller; atmosphere choice in Δv
 │   ├── viz.py               # Plot-data preparation: ground tracks, altitude, error curves
@@ -577,6 +619,7 @@ python benchmarks/figures.py solar   # ...or only the figures named (ground, err
                                      #    atmosphere, access, stationkeeping, solar)
 python benchmarks/zonal_sweep.py     # does a 550 km constellation need more than J2?
 python benchmarks/tesseral_sweep.py  # GEO east-west cost by slot longitude (--leo adds the LEO sweep)
+python benchmarks/isl_sweep.py       # inter-satellite link windows by model tier, against ground passes
 python benchmarks/msis_sweep.py      # solar activity against the atmosphere model, in Δv (a few minutes)
 python benchmarks/bench_step.py      # step-cost benchmarks
 ```
@@ -707,20 +750,22 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - tesseral harmonics to degree and order 4 (force model and reference)
      - Cowell RK4
      - third-body perturbations
-     - drag with exponential and tabulated atmospheres
+     - drag with exponential and tabulated atmospheres, compiled
      - NRLMSIS 2.0 through `pymsis`, with solar activity as a sweep axis
      - solar radiation pressure with shadow geometry
      - continuous and impulsive thrust
      - the SGP4 bridge
+     - inter-satellite link visibility, its contact dataset and sweep metric
    - **Planned:**
      - a compiled twin for the tesseral model
      - perturbers advanced per integrator stage
      - Encke
      - symplectic integrators
      - SGP4 on the frontier plot
-6. **Constellation and inter-satellite link modelling.** This goes in a separate repository that
-   consumes this engine's contact dataset (see [Scope](#scope-where-this-project-stops)). Walker
-   generation and TLE ingest stay here.
+6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
+   that consumes this engine's two contact datasets, ground and inter-satellite (see
+   [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay
+   here.
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,
