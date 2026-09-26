@@ -586,18 +586,17 @@ def test_enable_force_model_rejects_an_unknown_density_law() -> None:
     assert np.all(params[sats, DRAG_PARAM_NAMES.index("density_model")] == DENSITY_MODEL_LAYERED)
 
 
-def test_the_layered_law_still_disqualifies_the_fused_compiled_cowell_kernel() -> None:
+def test_the_layered_law_keeps_the_fused_compiled_cowell_kernel() -> None:
     """The density law is a coefficient, not a mask bit, so it cannot change the fused plan - and
-    must not. `kernels.cowell_rk4_step` fuses `point_mass_gravity`, `j2` and `zonal` only; a drag bit of
-    either flavour has to send the whole Cowell set down the NumPy path, or the compiled path would
-    silently drop drag altogether."""
+    must not. `kernels.cowell_rk4_step` fuses `point_mass_gravity`, `j2`, `drag` and `zonal`, with
+    every density law in its drag term, so a drag bit of any flavour keeps the Cowell set compiled."""
     sim = scenarios.earth_constellation(_session(), n_sats=2, n_planes=2)
     sats = _sat_slots(sim)
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(gravity.POINT_MASS_MODEL, bodies=sats)
     assert sim._cowell_fused_ok
     sim.enable_force_model(DRAG_MODEL, bodies=sats[0], **_LAYERED_COEFFS)
-    assert not sim._cowell_fused_ok
+    assert sim._cowell_fused_ok
 
 
 @pytest.mark.parametrize(
@@ -628,7 +627,7 @@ def test_a_model_config_can_select_the_density_law_as_plain_sweep_data(
     assert idx.size == 4
     column = DRAG_PARAM_NAMES.index("density_model")
     assert np.all(sim.force_model_params[DRAG_MODEL][idx, column] == selector)
-    assert not sim._cowell_fused_ok, "drag of either flavour must keep the fused plan disabled"
+    assert sim._cowell_fused_ok, "drag of either flavour is fused; the plan must stay compiled"
 
     before = sim.global_states[idx].copy()
     sim.step(config.dt)
@@ -654,7 +653,7 @@ def test_decay_under_each_density_law_matches_its_own_orbit_averaged_rate(decay:
     layered law *validated* rather than merely *different*: the same band lookup, driven through 8640
     RK4 steps and three band boundaries, has to reproduce an independently integrated mean equation.
     The budget is in section 4 of the module docstring."""
-    assert not decay.fused_ok, "drag must have disqualified the fused compiled kernel"
+    assert decay.fused_ok, "drag is fused; the plan must have stayed compiled"
     a = _semi_major_axis(decay.endpoints)
     assert np.allclose(a[0], A0_KM, rtol=1e-12)
     t_end = N_STEPS * DT

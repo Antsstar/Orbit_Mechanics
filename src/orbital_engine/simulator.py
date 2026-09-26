@@ -25,6 +25,7 @@ from . import forces
 from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a force model (gravity.py)
 from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
 from . import zonal  # registers "zonal"; ZONAL_MODEL is in the fused Cowell plan below
+from . import drag  # registers "drag"; DRAG_MODEL and its density tables are in the fused plan below
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
@@ -218,7 +219,7 @@ class Simulation:
 
         # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
         # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
-        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2` and
+        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2`, `drag` and
         # `zonal` only, so `_cowell_fused_ok` records whether the current masks let `step()` use it;
         # any other model on a Cowell body sends the whole Cowell set down the NumPy `RK4Integrator`
         # path.
@@ -237,6 +238,13 @@ class Simulation:
         self._cowell_has_zonal = np.zeros(max_capacity, dtype=np.bool_)
         self._no_zonal_params = np.zeros((1, len(zonal.ZONAL_PARAM_NAMES)), dtype=np.float64)
         self._cowell_zonal_params: NDArray[np.float64] = self._no_zonal_params
+        self._cowell_has_drag = np.zeros(max_capacity, dtype=np.bool_)
+        self._no_drag_params = np.zeros((1, len(drag.DRAG_PARAM_NAMES)), dtype=np.float64)
+        self._cowell_drag_params: NDArray[np.float64] = self._no_drag_params
+        # Drag's density tables (`drag.density_tables`: the layered table, then one row per MSIS
+        # triple a Cowell body uses) and each slot's MSIS row, -1 where it has none.
+        self._cowell_drag_table_of = np.full(max_capacity, -1, dtype=np.int64)
+        self._cowell_drag_tables, _ = drag.density_tables(np.empty((0, 3)))
         self._cowell_fused_ok: bool = False
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
@@ -435,21 +443,31 @@ class Simulation:
         """
         Decide, from data, whether `step()` may run the Cowell set through the fused compiled kernel.
 
-        `kernels.cowell_rk4_step` hard-codes `point_mass_gravity`, `j2` and `zonal` (J3..J6) - numba
-        cannot dispatch over the Python kernel list `forces.compose_accelerations` walks - with
-        per-body flags so a mixed arena - some Cowell bodies with J2, some with J2..J6, some with
-        neither - still qualifies. Two conditions disqualify the whole set, and the fallback is then
-        the NumPy path for every Cowell body, not a per-body split: any Cowell body carrying a bit
-        outside those three models (`drag`, `srp`, `third_body`, `thrust`, the test fixtures), and
-        any Cowell body whose parent is itself Cowell (the kernel reads a parent's row as fixed
-        across the four stages; `RK4Integrator` would see the parent's stage candidates instead).
+        `kernels.cowell_rk4_step` hard-codes `point_mass_gravity`, `j2`, `drag` (all three density
+        laws) and `zonal` (J3..J6) - numba cannot dispatch over the Python kernel list
+        `forces.compose_accelerations` walks - with per-body flags so a mixed arena - some Cowell
+        bodies with J2, some with J2..J6 or drag, some with neither - still qualifies. Three conditions
+        disqualify the whole set, and the fallback is then the NumPy path for every Cowell body, not a
+        per-body split: any Cowell body carrying a bit outside those four models (`srp`,
+        `third_body`, `thrust`, the test fixtures); any Cowell body whose parent is itself Cowell (the
+        kernel reads a parent's row as fixed across the four stages; `RK4Integrator` would see the
+        parent's stage candidates instead); and an MSIS drag row whose `(f107, f107a, ap)` profile was
+        never evaluated, which the reference path then reports as `LookupError` at step time, exactly
+        as it always has.
+
+        Drag's density tables are stacked here (`drag.density_tables`), never in a step: the layered
+        table, then one row per distinct MSIS triple among the Cowell drag rows, each body pointed at
+        its own row by `_cowell_drag_table_of`. The kernel re-checks each MSIS body's live indices
+        against its row and returns the slot on a mismatch, so a coefficient written straight into
+        `force_model_params` after this ran re-plans rather than reading a stale profile.
 
         Cached here, at configuration time, for the same reason `_force_dispatch_idx` is: the step
         must not pay a NumPy reduction over the mask to discover a configuration that only changes
         when `set_propagator`, `enable_force_model` or `resolve_force_models` is called. The
-        `"j2"` and `"zonal"` coefficient arrays are bound here too, since
+        `"j2"`, `"zonal"` and `"drag"` coefficient arrays are bound here too, since
         `forces.resolve_force_models` allocates them lazily; a one-row dummy stands in until each
-        exists, and the kernel only reads a row behind that body's `has_j2` / `has_zonal` flag.
+        exists, and the kernel only reads a row behind that body's `has_j2` / `has_zonal` /
+        `has_drag` flag.
         """
         idx = self._cowell_idx
         self._cowell_primaries = self.parent_indices[idx]
@@ -457,11 +475,14 @@ class Simulation:
         pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
         j2_bit = np.uint64(1) << np.uint64(get_force_model(geopotential.J2_MODEL).bit)
         zonal_bit = np.uint64(1) << np.uint64(get_force_model(zonal.ZONAL_MODEL).bit)
+        drag_bit = np.uint64(1) << np.uint64(get_force_model(drag.DRAG_MODEL).bit)
         np.not_equal(self.force_model_mask & pm_bit, np.uint64(0), out=self._cowell_has_point_mass)
         np.not_equal(self.force_model_mask & j2_bit, np.uint64(0), out=self._cowell_has_j2)
         np.not_equal(self.force_model_mask & zonal_bit, np.uint64(0), out=self._cowell_has_zonal)
+        np.not_equal(self.force_model_mask & drag_bit, np.uint64(0), out=self._cowell_has_drag)
 
-        foreign = (self.force_model_mask[idx] & ~(pm_bit | j2_bit | zonal_bit)) != np.uint64(0)
+        fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit
+        foreign = (self.force_model_mask[idx] & ~fused_bits) != np.uint64(0)
         parent_is_cowell = np.isin(self._cowell_primaries, idx)
         self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
 
@@ -469,6 +490,25 @@ class Simulation:
         self._cowell_j2_params = self._no_j2_params if j2_params is None else j2_params
         zonal_params = self.force_model_params.get(zonal.ZONAL_MODEL)
         self._cowell_zonal_params = self._no_zonal_params if zonal_params is None else zonal_params
+        drag_params = self.force_model_params.get(drag.DRAG_MODEL)
+        self._cowell_drag_params = self._no_drag_params if drag_params is None else drag_params
+
+        # The MSIS rows among the Cowell drag bodies, by `drag_kernel`'s own threshold (`>= 1.5`).
+        self._cowell_drag_table_of.fill(-1)
+        activity = np.empty((0, 3), dtype=np.float64)
+        msis_rows = np.empty(0, dtype=np.int64)
+        if drag_params is not None:
+            with_drag = idx[self._cowell_has_drag[idx]]
+            msis_rows = with_drag[drag_params[with_drag, drag.DENSITY_MODEL_COL] >= 1.5]
+            activity = drag_params[msis_rows][:, drag.SOLAR_COLS]
+        try:
+            self._cowell_drag_tables, table_of = drag.density_tables(activity)
+        except LookupError:
+            # A profile was never evaluated: the reference path raises that at step time, as before.
+            self._cowell_drag_tables, _ = drag.density_tables(np.empty((0, 3), dtype=np.float64))
+            self._cowell_fused_ok = False
+        else:
+            self._cowell_drag_table_of[msis_rows] = table_of
 
     def enable_force_model(
         self,
@@ -1078,16 +1118,18 @@ class Simulation:
         """
         cowell_idx = self._cowell_idx
         if cowell_idx.size > 0:
+            # Fused twin: leaves global_states[cowell_idx] exactly as RK4Integrator would and writes
+            # the parent-relative result straight into _cowell_rel. See `_refresh_cowell_plan` for when
+            # this branch is available. It returns -1 or - having written nothing - the slot of an MSIS
+            # drag body whose live indices no longer match the plan's profile; one re-plan then either
+            # repairs the plan or disqualifies it, and the reference path below takes over.
+            done = False
             if self.use_compiled_kernel and self._cowell_fused_ok:
-                # Fused twin: leaves global_states[cowell_idx] exactly as RK4Integrator would and
-                # writes the parent-relative result straight into _cowell_rel. See
-                # `_refresh_cowell_plan` for when this branch is available.
-                cowell_rk4_step(
-                    float(dt), self.global_states, self.mu_array, self.parent_indices, cowell_idx,
-                    self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
-                    self._cowell_has_zonal, self._cowell_zonal_params, self._cowell_rel,
-                )
-            else:
+                done = self._cowell_compiled_step(dt) < 0
+                if not done:
+                    self._refresh_cowell_plan()
+                    done = self._cowell_fused_ok and self._cowell_compiled_step(dt) < 0
+            if not done:
                 parent_state_at_start = self.global_states[self._cowell_primaries].copy()
                 cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
                 cowell_propagator.propagate(
@@ -1674,6 +1716,17 @@ class Simulation:
                 f"each, in RSW components and km/s; got shape {dv.shape} for {n_bodies} body(ies)."
             )
         return dv
+
+    def _cowell_compiled_step(self, dt: ScalarSeconds) -> int:
+        """One call of the fused `kernels.cowell_rk4_step` on the current plan; its return value."""
+        tables = self._cowell_drag_tables
+        return int(cowell_rk4_step(
+            float(dt), self.global_states, self.mu_array, self.parent_indices, self._cowell_idx,
+            self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
+            self._cowell_has_zonal, self._cowell_zonal_params,
+            self._cowell_has_drag, self._cowell_drag_params, self._cowell_drag_table_of,
+            tables.tables, tables.meta, self._cowell_rel,
+        ))
 
     def _rebase(self, indices: NDArray[np.int64], rel: NDArray[np.float64]) -> None:
         """

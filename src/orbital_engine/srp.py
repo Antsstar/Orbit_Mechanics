@@ -175,7 +175,7 @@ survives any amount of staging.
 Composition and tiers
 ---------------------
 Reference tier only, with no compiled twin. `Simulation._refresh_cowell_plan` accepts only
-`point_mass_gravity`, `j2` and `zonal` into the fused `kernels.cowell_rk4_step`, so this model's bit is
+`point_mass_gravity`, `j2`, `drag` and `zonal` into the fused `kernels.cowell_rk4_step`, so this model's bit is
 foreign and a Cowell set containing an `"srp"` body runs entirely on the NumPy `RK4Integrator` path
 (`tests/validation/test_srp.py` asserts it).
 

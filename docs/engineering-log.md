@@ -1364,6 +1364,21 @@ famous one.
 
 ---
 
+## Adding array arguments to a per-stage `@njit` call tripled the cost of tiers that never used them
+
+Fusing drag into `kernels.cowell_rk4_step`, the first version passed the stacked density tables (four
+arrays) and eleven drag scalars through `_cowell_accel`, called four times per body per step. The drag
+tiers were fine; the **`pm` and `pm+j2` tiers went from 0.12 to 0.38 us per body-step** - bodies with no
+drag at all paid for it. numba did not inline the call (it did for the old, smaller signature), so every
+stage marshalled the array structs; `@njit(inline="always")` on it fails in `inline_inlinables`. Moving
+the drag and zonal blocks into their own functions but still calling them from `_cowell_accel` made it
+worse. What worked: the step calls `_gravity_accel` (scalars only, inlined), then `_drag_term` and
+`_zonal_term` **behind their flags in the step itself**, and the tables are packed into two arrays
+rather than five (each array argument also costs ~0.1 us of dispatch per call of the step,
+measured). `pm+j2` then measured 0.076 us per body-step, *faster* than before the change, since the old
+kernel was paying to pass the zonal row too. Measure a no-op tier after changing a fused signature; the
+tier you added is not where the regression shows.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

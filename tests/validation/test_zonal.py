@@ -40,6 +40,7 @@ from orbital_engine.frames import ReferenceFrames
 from orbital_engine.geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
 from orbital_engine.gravity import POINT_MASS_MODEL
 from orbital_engine.simulator import Simulation
+from orbital_engine.thrust import THRUST_MODEL
 from orbital_engine.viz import sample_states
 from orbital_engine.zonal import ZONAL_MODEL
 
@@ -201,11 +202,11 @@ def test_zero_coefficients_and_zero_separation_contribute_exactly_nothing() -> N
 def test_cowell_body_with_zonal_stays_on_the_fused_compiled_plan(
     db_session_factory: Callable[[], Session],
 ) -> None:
-    """`kernels.cowell_rk4_step` fuses point_mass_gravity, j2 and zonal, so a zonal bit keeps the
-    Cowell set on the compiled path (held equivalent to the NumPy one in
+    """`kernels.cowell_rk4_step` fuses point_mass_gravity, j2, drag and zonal, so a zonal bit keeps
+    the Cowell set on the compiled path (held equivalent to the NumPy one in
     `test_kernel_equivalence.py`), and Cowell + zonal timings are comparable with the other fused
-    tiers. A zonal body that also carries a model outside the fused set - drag here - still sends the
-    whole set down the NumPy path."""
+    tiers - with drag on the same body too, since drag is fused. A zonal body that also carries a
+    model outside the fused set - thrust here - still sends the whole set down the NumPy path."""
     sim, sats = _constellation(db_session_factory())
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, sats)
@@ -215,6 +216,9 @@ def test_cowell_body_with_zonal_stays_on_the_fused_compiled_plan(
     assert sim._cowell_fused_ok
     sim.enable_force_model(DRAG_MODEL, sats[:1], ballistic_coeff=0.01, rho0=1e-12, h0=500.0,
                            scale_height=60.0, r_ref=EARTH_R_EQ, omega=EARTH_OMEGA)
+    assert sim._cowell_fused_ok, "zonal + drag are both fused; the body must stay compiled"
+    sim.enable_force_model(THRUST_MODEL, sats[:1], thrust_n=0.1, isp_s=300.0, mass_kg=100.0,
+                           dry_mass_kg=50.0, dir_s=1.0)
     assert not sim._cowell_fused_ok
 
 

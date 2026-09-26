@@ -395,16 +395,18 @@ def test_drag_composes_with_point_mass_and_j2() -> None:
     assert np.all(power < 0.0)
 
 
-def test_cowell_bodies_with_drag_fall_back_to_the_numpy_path() -> None:
-    """`kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2` and `zonal` only. A drag bit
-    must disqualify it, or the compiled path would silently drop drag."""
+def test_cowell_bodies_with_drag_stay_on_the_fused_plan() -> None:
+    """`kernels.cowell_rk4_step` fuses `point_mass_gravity`, `j2`, `drag` and `zonal`, so a drag bit
+    keeps the Cowell set on the compiled path, with the body flagged so the kernel applies drag to it
+    and to no other (held equivalent to this module's kernel in `test_kernel_equivalence.py`)."""
     sim = scenarios.earth_constellation(_session(), n_sats=2, n_planes=2)
     sats = _sat_slots(sim)
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(gravity.POINT_MASS_MODEL, sats)
     assert sim._cowell_fused_ok
     sim.enable_force_model(DRAG_MODEL, sats[1], omega=0.0, **_DRAG_COEFFS)
-    assert not sim._cowell_fused_ok
+    assert sim._cowell_fused_ok
+    assert sim._cowell_has_drag[sats[1]] and not sim._cowell_has_drag[sats[0]]
 
 
 # ==================================================================================================
@@ -414,7 +416,7 @@ def test_cowell_bodies_with_drag_fall_back_to_the_numpy_path() -> None:
 def test_secular_decay_matches_orbit_averaged_rate(runs: DecayRuns) -> None:
     """`Delta a` over 5 orbits under Cowell with `point_mass_gravity` and non-rotating drag, compared
     with `da/dt = -rho(a) B' sqrt(mu a)`. The budget is in the module docstring."""
-    assert runs.fused_ok == [False, False]
+    assert runs.fused_ok == [True, True]
     a = _semi_major_axis(runs.prograde)
     assert np.allclose(a[0], A0_KM, rtol=1e-12)
     t_end = N_STEPS * DT

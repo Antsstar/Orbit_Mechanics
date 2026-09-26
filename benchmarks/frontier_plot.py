@@ -29,8 +29,8 @@ and `Simulation` construction excluded, per `sweep.run_sweep`).
 
 **The implementation caveat.** With numba installed every tier runs compiled: Kepler and secular J2
 through their kernels, Cowell through `kernels.cowell_rk4_step`, which fuses RK4 with
-`point_mass_gravity`, `j2` and `zonal` - this script sweeps the first two (any model outside those
-three would fall back to the NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied). Without numba,
+`point_mass_gravity`, `j2`, `drag` and `zonal` - this script sweeps the first two (any model outside
+those four would fall back to the NumPy `RK4Integrator` path, and `Simulation._cowell_fused_ok` says which applied). Without numba,
 Kepler and secular J2 run as interpreted Python and Cowell as vectorised NumPy, so the horizontal axis
 then measures implementation as much as model - printed here, on the figure itself and in
 `README.md`. The re-base each Cowell and secular-J2 body needs after `calc_global()` also runs compiled
