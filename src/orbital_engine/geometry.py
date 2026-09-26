@@ -21,7 +21,9 @@ References - Vallado, *Fundamentals of Astrodynamics and Applications*, 4th ed.:
   The ECEF -> SEZ rotation `ROT2(90 deg - phi) ROT3(lambda)` is written out and re-derived in
   `_sez_rotations` rather than taken on trust.
 * Sec. 5.3, Alg. 35 (`SIGHT`), the line-of-sight test. Our `line_of_sight` is the spherical form of
-  it, with the parameter clamped to the segment (see there).
+  it, with the parameter clamped to the segment (see there). `segment_clearance` is the same test
+  as a continuous signed distance, which is what lets an inter-satellite link window (`isl.py`) have
+  interpolated edges the way an elevation window does.
 
 Algorithm and section numbers are from memory and **unverified against the text**; each formula is
 derived in place, so the derivation - not the citation - is what the tests hold.
@@ -117,6 +119,7 @@ from .utilities import Transformations
 __all__ = [
     "Topocentric", "AccessWindow",
     "station_position_fixed", "elevation_azimuth", "access_windows", "line_of_sight",
+    "segment_clearance",
 ]
 
 
@@ -424,8 +427,8 @@ def access_windows(
     **Error order: second, `O(h^2)`.** Expanding `f = e - mask` about its root `t*` and solving the
     secant through the bracketing samples for its zero gives
 
-        t_hat - t* = -(f'' / (2 f')) (t_i - t*) (t_i+1 - t*) + O(h^3)
-                   =  (f'' / (2 f')) a b,        a = t* - t_i >= 0,  b = t_i+1 - t* >= 0
+        t_hat - t* =  (f'' / (2 f')) (t_i - t*) (t_i+1 - t*) + O(h^3)
+                   = -(f'' / (2 f')) a b,        a = t* - t_i >= 0,  b = t_i+1 - t* >= 0
 
     so the bound is `|f''| h^2 / (8 |f'|)`, attained at `a = b = h/2`. Two consequences the tests
     assert rather than assume. First, it is a *bias*, not a scatter. The elevation curve is **convex
@@ -569,3 +572,64 @@ def line_of_sight(
     closest = r1 + tau[..., np.newaxis] * delta
     visible: NDArray[np.bool_] = np.sum(closest * closest, axis=-1) >= float(body_radius_km) ** 2
     return visible
+
+
+def segment_clearance(
+    r1_km: ArrayFloat,
+    r2_km: ArrayFloat,
+    *,
+    body_radius_km: ScalarFloat,
+    h_graze_km: ScalarFloat = 0.0,
+) -> ArrayFloat:
+    """
+    Signed clearance of the segment `r1 -> r2` above a sphere of radius `body_radius_km + h_graze_km`
+    at the origin, in km: **positive when the two points can see each other**.
+
+    `line_of_sight` answers yes or no; this answers *by how much*, which is what a window edge needs.
+    A boolean sampled on a grid can only snap a crossing to a sample, a quantisation of up to one
+    sample interval; a continuous signed function can be inversely interpolated between the two
+    samples that bracket its zero, exactly as `access_windows` does with elevation. Same geometry,
+    same clamp:
+
+        tau*      = clip(-(r1 . (r2 - r1)) / |r2 - r1|^2, 0, 1)
+        clearance = |r1 + tau* (r2 - r1)| - (body_radius_km + h_graze_km)
+
+    i.e. the minimum distance of the **segment** (not the infinite line) from the centre, minus the
+    grazing radius. Without the clamp, two satellites stacked radially - one directly above the
+    other - would read as occulted, since the infinite line through them passes through the centre.
+
+    `h_graze_km` is the grazing altitude: the ray must clear the body's surface by this much. It
+    stands in for the atmosphere and refraction margin a real link keeps (commonly ~100 km for an
+    optical or RF crosslink) and is a *geometric* parameter, not a radio one. It defaults to zero
+    here, where the function is a geometric primitive with `line_of_sight`'s semantics (the sign of
+    `segment_clearance(..., h_graze_km=0)` is `line_of_sight`'s answer away from the tangent case);
+    `isl.IslSpec` makes it a required field, because at the link level an implicit zero would be a
+    silent choice of a 100 km-optimistic link.
+
+    **Smoothness.** For fixed endpoints the clearance is a smooth function of their positions while
+    the foot of the perpendicular is strictly inside the segment, and while it is clamped to an
+    endpoint (it is then that endpoint's radius). Across the switch it is continuous with a
+    continuous first derivative - the minimum of a smooth function over an interval, as the
+    unconstrained minimiser crosses the boundary - so its second derivative jumps there. The linear
+    edge interpolation of `isl.py` is second order on either side of that switch; a crossing that
+    happens to sit exactly on it loses nothing but the constant in the `O(h^2)` term.
+
+    Arrays are `(..., 3)` and broadcast against each other; the result has the broadcast shape
+    with the trailing axis removed. Coincident endpoints give `tau* = 0`, i.e. the radius of `r1`
+    minus the grazing radius, as in `line_of_sight`.
+    """
+    r1 = np.asarray(r1_km, dtype=np.float64)
+    r2 = np.asarray(r2_km, dtype=np.float64)
+    if r1.shape[-1] != 3 or r2.shape[-1] != 3:
+        raise ValueError(f"positions must have a trailing axis of 3, got {r1.shape}, {r2.shape}.")
+
+    delta = r2 - r1
+    denom = np.sum(delta * delta, axis=-1)
+    safe = np.where(denom > 0.0, denom, 1.0)
+    tau = np.clip(np.where(denom > 0.0, -np.sum(r1 * delta, axis=-1) / safe, 0.0), 0.0, 1.0)
+
+    closest = r1 + tau[..., np.newaxis] * delta
+    clearance: ArrayFloat = (
+        np.sqrt(np.sum(closest * closest, axis=-1)) - (float(body_radius_km) + float(h_graze_km))
+    )
+    return clearance

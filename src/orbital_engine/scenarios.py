@@ -34,6 +34,7 @@ __all__ = [
     "EARTH_P", "EARTH_E", "MOON_P", "MOON_E",
     "VESSEL_DRY_MASS", "VESSEL_FUEL_MASS",
     "STATION_LATITUDE_DEG", "STATION_LONGITUDE_DEG", "STATION_ALTITUDE_KM",
+    "coplanar_satellites", "coplanar_satellite_name",
     "two_body", "sun_earth_moon", "earth_constellation", "powered_vessel", "hohmann_pair",
     "ground_station_pass", "eclipsed_satellite", "station_keeping_satellites",
     "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
@@ -526,6 +527,82 @@ def ground_station_pass(
             p=radius, e=0.0, i=math.radians(inclination_deg),      # circular, so p == a == r
             raan=math.radians(raan_deg), arg_pe=0.0,
             theta=math.pi + 2.0 * math.pi * k / n_sats,
+        ))
+        names.append(name)
+
+    session.commit()
+
+    return Simulation(
+        body_names=names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+
+
+def coplanar_satellite_name(k: int) -> str:
+    """Name of satellite `k` in `coplanar_satellites`."""
+    return f"CO-SAT-{k:02d}"
+
+
+def coplanar_satellites(
+    session: Session,
+    *,
+    altitudes_km: Sequence[float],
+    phases_deg: Sequence[float],
+    inclination_deg: float = 0.0,
+    raan_deg: float = 0.0,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth plus one massless Keplerian vessel per entry of `altitudes_km`, all on **circular orbits
+    in one plane**, satellite `k` at radius `EARTH_RADIUS + altitudes_km[k]` and argument of latitude
+    `phases_deg[k]` at `t = 0`. Named `coplanar_satellite_name(k)`.
+
+    Built for `isl.py`'s closed-form validation, which is plane geometry: two coplanar circular
+    orbits have relative phase `phi(t) = phi0 + (n1 - n2) t`, the segment between them clears a
+    sphere of radius `rho` exactly while `|phi| < acos(rho / r1) + acos(rho / r2)` (the two tangent
+    angles), so every link window over any horizon is known in closed form. Equal altitudes give the
+    fixed-phase case, whose chord clears the centre by exactly `r cos(phi / 2)` for all time.
+
+    Keplerian on purpose - this is geometry, not dynamics, and a propagator error-free to ~1e-12
+    relative keeps a window tolerance about interpolation alone. `inclination_deg` and `raan_deg`
+    tilt the common plane: the clearance is invariant under rotation about the centre, so a test
+    run in a tilted plane must reproduce the equatorial numbers - which is what catches an axis or
+    frame mistake that an equatorial case cannot.
+    """
+    if len(altitudes_km) != len(phases_deg):
+        raise ValueError(
+            f"altitudes_km and phases_deg must have equal length, got {len(altitudes_km)} "
+            f"and {len(phases_deg)}")
+    if len(altitudes_km) < 1:
+        raise ValueError("coplanar_satellites needs at least one satellite")
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names: List[str] = ["Earth"]
+    for k, (altitude, phase) in enumerate(zip(altitudes_km, phases_deg)):
+        name = coplanar_satellite_name(k)
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+            p=EARTH_RADIUS + float(altitude), e=0.0,            # circular, so p == a == r
+            i=math.radians(inclination_deg), raan=math.radians(raan_deg), arg_pe=0.0,
+            theta=math.radians(float(phase)),
         ))
         names.append(name)
 

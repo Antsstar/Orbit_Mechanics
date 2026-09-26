@@ -60,6 +60,13 @@ against truth, which has no drag and so no Delta-v. It is the same kind of addit
 `access`: one extra propagation per configuration from a fresh build, at that configuration's own
 `dt`, and nothing about the error or timing runs changes. See `station_keeping_for`.
 
+**Inter-satellite links, optionally.** Pass `isl=IslSpec(...)` and every `SweepResult` (engine and
+external) carries `isl`, an `access.AccessMetrics` over satellite *pairs*: the same overlap matching,
+shift statistics and lost/gained counts as `access`, computed by the same code (`isl.py`). It is
+wired exactly like `access` - one dense truth for the sweep (shared with `access` when the two grids
+coincide), one extra propagation per configuration, the same divisibility rule - and changes nothing
+else.
+
 **No plotting dependency.** This module never imports `matplotlib`; `benchmarks/frontier_plot.py`
 does that.
 """
@@ -76,6 +83,9 @@ from .access import (
     windows_from_simulation, windows_from_truth,
 )
 from .custom_types import PropagatorType
+from .isl import (
+    IslSpec, compare_isl_windows, isl_windows, isl_windows_from_simulation, isl_windows_from_truth,
+)
 from .stationkeeping import (
     MIN_SAMPLES_PER_ORBIT, BodyDeltaV, DeltaVMetrics, StationKeepingSpec, delta_v_metrics,
     run_station_keeping, window_period_s,
@@ -87,7 +97,7 @@ from .simulator import Simulation
 __all__ = [
     "ForceModelSpec", "ModelConfig", "ExternalTier", "ErrorStats", "SweepResult",
     "eligible_bodies", "apply_config", "run_sweep", "access_metrics_for", "score_external",
-    "check_station_keeping_dt", "station_keeping_for",
+    "check_station_keeping_dt", "station_keeping_for", "isl_metrics_for",
 ]
 
 
@@ -177,6 +187,7 @@ class SweepResult:
     n_bodies: int
     access: Optional[AccessMetrics] = None
     delta_v: Optional[DeltaVMetrics] = None
+    isl: Optional[AccessMetrics] = None
 
 
 def eligible_bodies(sim: Simulation) -> NDArray[np.int64]:
@@ -273,7 +284,7 @@ def _error_stats(errors_km: NDArray[np.float64]) -> ErrorStats:
 
 
 def _access_body_names(
-    sim: Simulation, idx: NDArray[np.int64], spec: AccessSpec,
+    sim: Simulation, idx: NDArray[np.int64], spec: AccessSpec | IslSpec,
 ) -> Tuple[List[str], List[int]]:
     """
     The body names and slots the access metrics are reported for, in a single fixed order.
@@ -289,6 +300,27 @@ def _access_body_names(
         return [slot_to_name[s] for s in slots], slots
     slots = [sim.name_to_index[name] for name in spec.bodies]
     return list(spec.bodies), slots
+
+
+def _sample_grid(
+    config: ModelConfig, horizon_s: float, sample_dt_s: float, metric: str, spec_name: str,
+) -> NDArray[np.float64]:
+    """
+    The shared sample grid for a window metric, refusing a configuration whose `dt` does not divide
+    its spacing - see `access_metrics_for` for why that is a silent wrong answer rather than a
+    rounding detail. Used by both `access_metrics_for` and `isl_metrics_for`.
+    """
+    grid = access_grid(horizon_s, sample_dt_s)
+    spacing = float(grid[1] - grid[0])
+    steps_per_sample = spacing / config.dt
+    if abs(steps_per_sample - round(steps_per_sample)) > 1e-9 or round(steps_per_sample) < 1:
+        raise ValueError(
+            f"config '{config.name}': dt={config.dt} s does not divide the {metric} sample spacing "
+            f"{spacing} s (horizon {horizon_s} s at sample_dt_s={sample_dt_s} s). The {metric} "
+            f"metric would then propagate this configuration at a step it was never run with. "
+            f"Raise {spec_name}.sample_dt_s to a multiple of every config's dt."
+        )
+    return grid
 
 
 def access_metrics_for(
@@ -317,16 +349,7 @@ def access_metrics_for(
     than the one `run_sweep` timed and reported an error for. That is a silent, entirely plausible
     wrong answer, so it raises `ValueError` instead.
     """
-    grid = access_grid(horizon_s, spec.sample_dt_s)
-    spacing = float(grid[1] - grid[0])
-    steps_per_sample = spacing / config.dt
-    if abs(steps_per_sample - round(steps_per_sample)) > 1e-9 or round(steps_per_sample) < 1:
-        raise ValueError(
-            f"config '{config.name}': dt={config.dt} s does not divide the access sample spacing "
-            f"{spacing} s (horizon {horizon_s} s at sample_dt_s={spec.sample_dt_s} s). The access "
-            f"metric would then propagate this configuration at a step it was never run with. "
-            f"Raise AccessSpec.sample_dt_s to a multiple of every config's dt."
-        )
+    grid = _sample_grid(config, horizon_s, spec.sample_dt_s, "access", "AccessSpec")
 
     sim = build_scenario()
     sim.record_history = False
@@ -336,6 +359,36 @@ def access_metrics_for(
     model = windows_from_simulation(sim, slots, grid, spec, max_dt=config.dt)
     truth = windows_from_truth(access_truth, names, spec)
     return compare_windows(truth, model)
+
+
+def isl_metrics_for(
+    build_scenario: Callable[[], Simulation],
+    config: ModelConfig,
+    horizon_s: float,
+    spec: IslSpec,
+    isl_truth: ReferenceTrajectory,
+) -> AccessMetrics:
+    """
+    Inter-satellite-link window error for one configuration against an already-integrated truth -
+    `access_metrics_for` with satellite pairs in place of `(station, body)`, and every argument of
+    that function's docstring carries over: `isl_truth` sampled on `access_grid(horizon_s,
+    spec.sample_dt_s)`, a fresh build propagated at `config.dt` onto the same grid, and a
+    `ValueError` if `config.dt` does not divide the sample spacing.
+
+    The body list - the configuration's own targets unless `spec.bodies` narrows them - is the same
+    list, in the same order, for truth and model, so a pair `(a, b)` names the same two satellites
+    on both sides.
+    """
+    grid = _sample_grid(config, horizon_s, spec.sample_dt_s, "ISL", "IslSpec")
+
+    sim = build_scenario()
+    sim.record_history = False
+    idx = apply_config(sim, config)
+    names, slots = _access_body_names(sim, idx, spec)
+
+    model = isl_windows_from_simulation(sim, slots, grid, spec, max_dt=config.dt)
+    truth = isl_windows_from_truth(isl_truth, names, spec)
+    return compare_isl_windows(truth, model)
 
 
 def check_station_keeping_dt(
@@ -441,6 +494,8 @@ def score_external(
     timing_warmup: int = 2,
     access: Optional[AccessSpec] = None,
     access_truth: Optional[ReferenceTrajectory] = None,
+    isl: Optional[IslSpec] = None,
+    isl_truth: Optional[ReferenceTrajectory] = None,
 ) -> SweepResult:
     """
     One `ExternalTier` against an already-integrated truth - the external counterpart of one
@@ -451,7 +506,9 @@ def score_external(
     taken relative to `tier.central_body`. Timing is one call producing a state every `tier.dt` up
     to the horizon. With `access`, `access_truth` must be sampled on `access_grid(horizon_s,
     access.sample_dt_s)`; the tier is evaluated on exactly that grid, so there is no step-size
-    divisibility condition to check - an external tier samples, it does not step.
+    divisibility condition to check - an external tier samples, it does not step. `isl` /
+    `isl_truth` work the same way on the ISL grid; the tier's positions are relative to
+    `tier.central_body`, so `isl.central_body` must name the same body.
     """
     if abs(float(truth.times[-1]) - horizon_s) > 1e-9 * max(1.0, horizon_s):
         raise ValueError(f"truth ends at {truth.times[-1]} s, not at the horizon {horizon_s} s")
@@ -479,12 +536,29 @@ def score_external(
         model = windows_from_positions(tier.positions(agrid)[:, columns, :], agrid, access)
         access_metrics = compare_windows(windows_from_truth(access_truth, names, access), model)
 
+    isl_metrics: Optional[AccessMetrics] = None
+    if isl is not None:
+        if isl_truth is None:
+            raise ValueError("ISL metrics need isl_truth sampled on the ISL grid")
+        if isl.central_body != tier.central_body:
+            raise ValueError(
+                f"tier {tier.name!r} gives positions relative to {tier.central_body!r}, but the ISL "
+                f"spec's central body is {isl.central_body!r}")
+        isl_names = list(tier.bodies) if isl.bodies is None else list(isl.bodies)
+        isl_columns = [list(tier.bodies).index(name) for name in isl_names]
+        igrid = access_grid(horizon_s, isl.sample_dt_s)
+        isl_model = isl_windows(tier.positions(igrid)[:, isl_columns, :], igrid, isl)
+        isl_metrics = compare_isl_windows(
+            isl_windows_from_truth(isl_truth, isl_names, isl), isl_model,
+        )
+
     return SweepResult(
         config_name=tier.name,
         error=_error_stats(errors_km),
         wall_time_us=wall_time_us,
         n_bodies=len(tier.bodies),
         access=access_metrics,
+        isl=isl_metrics,
     )
 
 
@@ -504,6 +578,7 @@ def run_sweep(
     external: Sequence[ExternalTier] = (),
     station_keeping: Optional[StationKeepingSpec] = None,
     delta_v_baseline: Optional[str] = None,
+    isl: Optional[IslSpec] = None,
 ) -> List[SweepResult]:
     """
     Run every configuration in `configs` against one scenario and return one `SweepResult` each, in
@@ -540,6 +615,11 @@ def run_sweep(
     Every config's `dt` is checked against the controller first (`check_station_keeping_dt`), before
     truth is integrated. `delta_v_baseline` without `station_keeping` is refused too, since it would
     otherwise be silently ignored.
+
+    `isl`, when given, adds `SweepResult.isl` - inter-satellite link window error, per satellite
+    pair, against the same truth model (see `isl.py`). Same economy as `access`: one dense truth for
+    the whole sweep - **the access truth itself** when `access` is also given on the same grid - and
+    one extra propagation per configuration. `ErrorStats` and `access` are untouched by it.
     """
     truth_sim = build_scenario()
 
@@ -573,6 +653,21 @@ def run_sweep(
             tesseral=tesseral,
         )
 
+    isl_truth: Optional[ReferenceTrajectory] = None
+    if isl is not None:
+        isl_grid = access_grid(horizon_s, isl.sample_dt_s)
+        if access_truth is not None and np.array_equal(access_truth.times, isl_grid):
+            isl_truth = access_truth
+        else:
+            # Every truth-model keyword the dense access truth above receives must be forwarded
+            # here too - `tests/validation/test_isl.py` asserts that all truth calls in one sweep
+            # share their model keywords, which is what catches a pass-through added to one only.
+            isl_truth = reference_for(
+                build_scenario(), isl_grid,
+                rtol=truth_rtol, atol=truth_atol, oblateness=oblateness, zonal=zonal,
+                tesseral=tesseral,
+            )
+
     budgets: dict[str, Tuple[BodyDeltaV, ...]] = {}
     results: List[SweepResult] = []
     for config in configs:
@@ -605,6 +700,10 @@ def run_sweep(
                 build_scenario, config, horizon_s, access, access_truth,
             )
 
+        isl_metrics: Optional[AccessMetrics] = None
+        if isl is not None and isl_truth is not None:
+            isl_metrics = isl_metrics_for(build_scenario, config, horizon_s, isl, isl_truth)
+
         if station_keeping is not None:
             budgets[config.name] = station_keeping_for(
                 build_scenario, config, horizon_s, station_keeping,
@@ -616,6 +715,7 @@ def run_sweep(
             wall_time_us=wall_time_us,
             n_bodies=int(idx.size),
             access=access_metrics,
+            isl=isl_metrics,
         ))
 
     if station_keeping is not None and delta_v_baseline is not None:
@@ -630,7 +730,7 @@ def run_sweep(
     for tier in external:
         results.append(score_external(
             tier, horizon_s, truth, timing_batches=timing_batches, timing_warmup=timing_warmup,
-            access=access, access_truth=access_truth,
+            access=access, access_truth=access_truth, isl=isl, isl_truth=isl_truth,
         ))
 
     return results
