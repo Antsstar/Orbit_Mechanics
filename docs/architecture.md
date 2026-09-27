@@ -704,6 +704,18 @@ noon-midnight, while the season swings **0.80-1.13** (292 km, monthly, from the 
   averaged profile misleads the budget mainly through the time of year, not the local time - and
   both are small against solar activity, which remains the dominant input.
 
+**Negative controls** (applied to the real source, the three diurnal test modules run - 57 tests -
+and restored with `git checkout --`): the Sun's longitude with the wrong sign **10 fail**; local time off
+by 12 h **9**; latitude from the y axis **10**; apparent instead of mean Sun **10**; `t` ignored (the Sun
+frozen at the epoch) **5**; one UT sample instead of the zonal mean **13**; diurnal rows dispatched to
+the averaged law **6**; the solar mean-anomaly rate slipped to the mean-longitude rate **2** (the
+solstice instants); no periodic wrap in local time **1** (only the 23:30-24:00 cell is affected, and
+only the dedicated wrap test samples it); the plan not excluding diurnal rows **1** - the plan-flag
+test. That last one is nearly an equivalent mutant: the fused twin finds no planned profile row for a
+diurnal body, returns its slot, and `step()` falls back to NumPy anyway, so the physics survives and
+only a wasted compiled attempt per step is lost. The exclusion in `_refresh_cowell_plan` is the
+intended guard; the twin's staleness check is a second one nobody designed for this.
+
 ---
 
 ## Third-body perturbation: the first force that is not parent-relative
