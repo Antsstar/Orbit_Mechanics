@@ -846,8 +846,9 @@ window.eval = function (src) { if (src === "this") return window; return window.
     moon_range_km: { title: "Distance from the Moon", blurb: "The deep dip is the flyby. How low and how late each model's dip comes is its flyby prediction." },
     speed_km_s: { title: "Speed relative to Earth", blurb: "Fast near Earth, slowest near the Moon. Its shape after the flyby decides whether Orion falls back home." },
     delta_v_m_s: { title: "Engine burns, as total Δv", blurb: "Velocity change from engine burns so far. Big steps set Orion on course; small ones are corrections." },
+    arc_error_km: { title: "Error over each coast", blurb: "Each model restarted from NASA's state after every burn and every jump in the navigation data, then flown to the next one. It isolates the model's own error from the data's artefacts.", log: true },
   };
-  const METRIC_ORDER = ["position_error_km", "earth_range_km", "moon_range_km", "speed_km_s", "delta_v_m_s"];
+  const METRIC_ORDER = ["position_error_km", "arc_error_km", "earth_range_km", "moon_range_km", "speed_km_s", "delta_v_m_s"];
 
   // ---------------------------------------------------------------- load
   async function load() {
@@ -1013,7 +1014,8 @@ window.eval = function (src) { if (src === "this") return window; return window.
 
     // chapters + scrubber ticks from the truth's events
     const nasaEv = S.events.filter((e) => e.model === S.truth.id);
-    const chapters = nasaEv.filter((e) => !/correction/.test(e.key) && e.key !== "model_seed");
+    // Chips are for spacecraft events; data artefacts stay on the scrubber only.
+    const chapters = nasaEv.filter((e) => !/correction|^unlisted_|separation|^model_seed$|^navigation_data_jump$/.test(e.key));
     $("chapters").innerHTML = chapters.map((e, i) => '<button type="button" class="chip" data-seek="' + Math.max(S.t0, e.t) + '" data-i="' + i + '">' + esc(eventLabel(e.key)) + "</button>").join("");
     const span = S.t1 - S.t0;
     $("ticks").innerHTML = nasaEv.filter((e) => e.t >= S.t0 && e.t <= S.t1).map((e) =>
@@ -1202,18 +1204,21 @@ window.eval = function (src) { if (src === "this") return window; return window.
     return { traces, mids };
   }
 
+  // Error charts open on a log scale: their tiers span five orders of magnitude.
+  const opensLog = (k) => !!((METRIC_INFO[k] && METRIC_INFO[k].log) || /_error_(km|s)$/.test(k));
+
   function buildChartDom() {
     $("charts").innerHTML = S.metricOrder.map((k) => {
       const info = METRIC_INFO[k] || { title: k.replace(/_/g, " "), blurb: "" };
-      const logOK = info.log || /_error_(km|s)$/.test(k);
+      const logOK = opensLog(k);
       return '<article class="chart" data-metric="' + esc(k) + '"><div class="chart__head"><h3>' + esc(info.title) + '<span class="chart__unit">' + esc(S.metrics[k].unit) + "</span></h3>" +
-        (logOK ? '<button type="button" class="toggle" data-log="' + esc(k) + '" aria-pressed="false">Log scale</button>' : "") + "</div>" +
+        (logOK ? '<button type="button" class="toggle" data-log="' + esc(k) + '" aria-pressed="' + String(logOK) + '">Log scale</button>' : "") + "</div>" +
         (info.blurb ? '<p class="chart__blurb">' + esc(info.blurb) + "</p>" : "") +
         '<div class="plot-wrap"><div class="plot"></div><div class="cursor"></div></div><p class="clipnote" aria-live="polite"></p></article>';
     }).join("");
     S.charts = S.metricOrder.map((k) => {
       const el = document.querySelector('.chart[data-metric="' + k + '"]');
-      return { key: k, el, gd: el.querySelector(".plot"), cursor: el.querySelector(".cursor"), note: el.querySelector(".clipnote"), log: false, ready: false };
+      return { key: k, el, gd: el.querySelector(".plot"), cursor: el.querySelector(".cursor"), note: el.querySelector(".clipnote"), log: opensLog(k), ready: false };
     });
     document.querySelectorAll("[data-log]").forEach((b) => b.addEventListener("click", () => {
       const ch = S.charts.find((x) => x.key === b.dataset.log);
