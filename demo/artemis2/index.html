@@ -1,3 +1,5 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Artemis II Flyby Replay</title>
 <meta name="description" content="Artemis II's lunar flyby replayed under several models of the physics, each scored against NASA's navigation data.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -110,6 +112,7 @@ button, select, input { font: inherit; color: inherit; }
   padding-inline: 16px;
   padding-block: 0 48px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 28px;
 }
 @media (min-width: 760px) { .page { padding-inline: 28px; } }
@@ -156,7 +159,7 @@ button, select, input { font: inherit; color: inherit; }
 .howto {
   display: grid;
   gap: 8px 24px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   margin: 4px 0 0;
   padding: 0;
   list-style: none;
@@ -198,9 +201,8 @@ button, select, input { font: inherit; color: inherit; }
 /* minimal replacement for Cesium's widgets.css */
 .cesium-widget { position: relative; width: 100%; height: 100%; overflow: hidden; }
 .cesium-widget canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-.cesium-widget-credits { display: none !important; }
 .credits {
-  position: absolute; right: 8px; bottom: 6px;
+  position: absolute; right: 8px; bottom: 6px; pointer-events: auto;
   font-size: 11px; color: var(--space-muted);
   display: flex; flex-wrap: wrap; gap: 0 8px; justify-content: flex-end;
   max-width: 70%;
@@ -458,7 +460,7 @@ button, select, input { font: inherit; color: inherit; }
 .cards {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
 }
 .card {
   background: var(--surface);
@@ -577,6 +579,8 @@ button, select, input { font: inherit; color: inherit; }
   background: var(--bad-bg); color: var(--bad);
   border-radius: var(--radius); padding: 12px 14px;
 }
+/* single-column grids must not grow to their content's min-content width */
+.masthead, .stage, .panel, .clock, .section-head, .card, .card__head, .facts, .fact, .chart, .foot { grid-template-columns: minmax(0, 1fr); }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 </style>
 
@@ -614,10 +618,11 @@ button, select, input { font: inherit; color: inherit; }
             <button type="button" id="camMission" aria-pressed="true">Whole mission</button>
             <button type="button" id="camOrion" aria-pressed="false">Follow Orion</button>
             <button type="button" id="camMoon" aria-pressed="false">Moon</button>
+            <button type="button" id="camEarth" aria-pressed="false">Earth</button>
           </div>
         </div>
         <div class="stamp" id="stamp3d" hidden>Synthetic</div>
-        <div class="credits" id="credits"></div>
+        <div class="credits"><span>Earth: Natural Earth II</span><span>Stars: Tycho-2</span><span id="credits"></span></div>
         <div class="tooltip" id="tip" hidden></div>
         <div class="fallback" id="fallback" hidden><p id="fallbackText"></p></div>
       </div>
@@ -696,8 +701,21 @@ button, select, input { font: inherit; color: inherit; }
   </footer>
 </div>
 
-<script>window.CESIUM_BASE_URL = "https://cdn.jsdelivr.net/npm/cesium@1.145.0/Build/Cesium/";</script>
+<script>
+// Cesium.js itself comes from the CDN, but its base URL is local: the artifact sandbox
+// blocks fetches and workers from other origins, and a same-origin base makes Cesium
+// fall back to the worker code inlined in Cesium.js. Only the IAU 2006 frame tables
+// this mission needs are shipped under cesium/Assets/.
+window.CESIUM_BASE_URL = "cesium/";
+// Knockout, bundled inside Cesium.js, finds the global object with (0,eval)("this").
+// Under a Content-Security-Policy without 'unsafe-eval' (the claude.ai artifact sandbox)
+// that throws and aborts the whole bundle. Answer that one question without evaluating
+// anything, and restore the real eval as soon as Cesium.js has run.
+window.__realEval = window.eval;
+window.eval = function (src) { if (src === "this") return window; return window.__realEval(src); };
+</script>
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.145.0/Build/Cesium/Cesium.js"></script>
+<script>window.eval = window.__realEval; delete window.__realEval;</script>
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
 <script>
 "use strict";
@@ -1216,11 +1234,15 @@ button, select, input { font: inherit; color: inherit; }
     let note = "";
     if (ch.log) {
       layout.yaxis.type = "log";
-      layout.yaxis.tickformat = "~s";
+      layout.yaxis.tickformat = ",~g";
       note = "Log scale: each gridline is ten times the one below. Every model fits.";
     } else {
-      layout.yaxis.tickformat = unit === "km/s" ? ".1f" : "~s";
       const fit = fitAxis(ch.key, mids);
+      // SI suffixes read "400k" nicely but turn 0.5 km into "500m"; use them only for big ranges.
+      let hiAll = 0;
+      mids.forEach((id) => S.metrics[ch.key].series[id].v.forEach((v) => { if (v > hiAll) hiAll = v; }));
+      const top = fit.range ? fit.range[1] : hiAll;
+      layout.yaxis.tickformat = unit === "km/s" ? ".1f" : top >= 1e4 ? "~s" : ",~g";
       if (fit.range) {
         layout.yaxis.range = fit.range;
         const top = fit.range[1];
@@ -1229,11 +1251,14 @@ button, select, input { font: inherit; color: inherit; }
           let i = 0; while (i < s.v.length && s.v[i] <= top) i++;
           let tx = s.t[Math.min(i, s.t.length - 1)];
           if (i > 0 && i < s.v.length) tx = s.t[i - 1] + ((top - s.v[i - 1]) / (s.v[i] - s.v[i - 1])) * (s.t[i] - s.t[i - 1]);
-          const span = S.t1 - S.t0, leftSide = (tx - S.t0) / span > 0.6;
+          const span = S.t1 - S.t0, frac = (tx - S.t0) / span, leftSide = frac > 0.6;
+          const narrow = (ch.gd.clientWidth || 600) < 560;
+          const label = narrow ? esc(md.label) + " ↑ " + fmtVal(p.hi, unit) + " " + esc(unit)
+                               : esc(md.label) + " ↑ off scale, peak " + fmtVal(p.hi, unit) + " " + esc(unit);
           layout.annotations.push({
             x: dateStr(tx), y: top, xref: "x", yref: "y", showarrow: true, arrowhead: 2, arrowsize: 1, arrowwidth: 1.5,
             arrowcolor: colourOf(md, dark), ax: leftSide ? -34 : 34, ay: 26 + 22 * k,
-            xanchor: leftSide ? "right" : "left", text: esc(md.label) + " ↑ off scale, peak " + fmtVal(p.hi, unit) + " " + esc(unit),
+            xanchor: leftSide ? "right" : "left", text: label,
             font: { size: 11.5, color: c.ink, family: "Barlow, sans-serif" }, bgcolor: c.surface, bordercolor: colourOf(md, dark), borderwidth: 1.2, borderpad: 3,
           });
         });
@@ -1362,7 +1387,10 @@ button, select, input { font: inherit; color: inherit; }
     try {
       widget = new C.CesiumWidget($("globe"), {
         clock: clock.cz,
-        baseLayer: C.ImageryLayer.fromProviderAsync(C.TileMapServiceImageryProvider.fromUrl("assets/earth/", { fileExtension: "jpg", maximumLevel: 2, credit: "Natural Earth II" })),
+        // No tiled globe: it needs web workers to mesh its tiles, which the sandbox
+        // blocks. Earth is drawn below as a textured ellipsoid, like the Moon.
+        globe: false,
+        skyAtmosphere: false,
         skyBox: new C.SkyBox({ sources: {
           positiveX: "assets/skybox/tycho2t3_80_px.jpg", negativeX: "assets/skybox/tycho2t3_80_mx.jpg",
           positiveY: "assets/skybox/tycho2t3_80_py.jpg", negativeY: "assets/skybox/tycho2t3_80_my.jpg",
@@ -1379,8 +1407,6 @@ button, select, input { font: inherit; color: inherit; }
     clock.widgetTicks = true;
     const scene = widget.scene, camera = scene.camera;
     if (scene.moon) scene.moon = scene.moon.destroy();  // we draw the tabulated Moon ourselves
-    scene.globe.enableLighting = true;
-    scene.globe.baseColor = C.Color.fromCssColorString("#0d2138");
     scene.fog.enabled = false;
     scene.backgroundColor = C.Color.BLACK;
     scene.renderError.addEventListener((_s, err) => fb("The 3D view stopped with a rendering error: " + (err && err.message ? err.message : err)));
@@ -1393,12 +1419,21 @@ button, select, input { font: inherit; color: inherit; }
     // ICRF -> Earth-fixed. Full IAU 2006 when its tables load, else GMST only (TEME).
     let icrfReady = false;
     C.Transforms.preloadIcrfFixed(new C.TimeInterval({ start: clock.cz.startTime, stop: clock.cz.stopTime }))
-      .then(() => { icrfReady = true; $("frameLabel").textContent = "Earth-centred inertial view (ICRF)"; })
-      .catch(() => { $("frameLabel").textContent = "Earth-centred inertial view (ICRF, GMST approx.)"; });
+      .then(() => { icrfReady = true; })
+      .catch(() => { icrfReady = false; });
     const M3 = new C.Matrix3(), M4 = new C.Matrix4();
+    let frameUsed = "";
     function frameMatrix(time) {
-      const m = icrfReady ? C.Transforms.computeIcrfToFixedMatrix(time, M3) : undefined;
-      return m || C.Transforms.computeTemeToPseudoFixedMatrix(time, M3);
+      let m = icrfReady ? C.Transforms.computeIcrfToFixedMatrix(time, M3) : undefined;
+      const used = m ? "icrf" : "gmst";
+      if (!m) m = C.Transforms.computeTemeToPseudoFixedMatrix(time, M3);
+      if (used !== frameUsed) {
+        frameUsed = used;
+        $("frameLabel").textContent = used === "icrf" ? "Earth-centred inertial view (ICRF)" : "Earth-centred inertial view (ICRF, GMST approx.)";
+        $("frameLabel").title = used === "icrf" ? "Earth's orientation from the IAU 2006 precession-nutation tables"
+          : "Earth's orientation from sidereal time only; precession and nutation are ignored (under 0.4 deg in 2026). Trajectories are unaffected.";
+      }
+      return m;
     }
 
     const tracks = scene.primitives.add(new C.PolylineCollection());
@@ -1429,6 +1464,14 @@ button, select, input { font: inherit; color: inherit; }
     const orionLabel = labels.add({ text: "Orion", font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.WHITE, showBackground: true, backgroundColor: new C.Color(0, 0, 0, 0.55), pixelOffset: new C.Cartesian2(10, -12), horizontalOrigin: C.HorizontalOrigin.LEFT, disableDepthTestDistance: Number.POSITIVE_INFINITY });
     const earthLabel = labels.add({ text: "Earth", position: C.Cartesian3.ZERO, font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.fromCssColorString("#cfe1ff"), pixelOffset: new C.Cartesian2(0, 22), horizontalOrigin: C.HorizontalOrigin.CENTER, disableDepthTestDistance: Number.POSITIVE_INFINITY });
     const moonLabel = labels.add({ text: "Moon", font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.fromCssColorString("#e6e6e6"), pixelOffset: new C.Cartesian2(0, 22), horizontalOrigin: C.HorizontalOrigin.CENTER, disableDepthTestDistance: Number.POSITIVE_INFINITY });
+
+    // Earth: textured WGS84 ellipsoid in the Earth-fixed frame, so it turns under the inertial camera
+    const eR = C.Ellipsoid.WGS84.radii;
+    scene.primitives.add(new C.Primitive({
+      geometryInstances: new C.GeometryInstance({ geometry: new C.EllipsoidGeometry({ radii: eR, vertexFormat: C.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat, stackPartitions: 96, slicePartitions: 96 }) }),
+      appearance: new C.MaterialAppearance({ material: C.Material.fromType("Image", { image: "assets/earth.jpg" }), faceForward: true, closed: true }),
+      asynchronous: false,
+    }));
 
     // Moon: textured sphere at the tabulated position, near side toward Earth, plus its path
     let moonPrim = null;
@@ -1463,7 +1506,15 @@ button, select, input { font: inherit; color: inherit; }
     const clT = truthEvent("closest_lunar_approach");
     const pB = interpOrion(truthTr, clT ? clT.t : truthTr.t[Math.floor(truthTr.t.length / 2)], {}) || { x: 0, y: 1, z: 0 };
     const vA = new C.Cartesian3(pA.x, pA.y, pA.z), vB = new C.Cartesian3(pB.x, pB.y, pB.z);
-    const normal = C.Cartesian3.normalize(C.Cartesian3.cross(vA, vB, new C.Cartesian3()), new C.Cartesian3());
+    // Look down on the Moon's orbital plane: the free return lies close to it. (Orion's
+    // seed and flyby positions are nearly opposite each other, so their cross product is
+    // ill-conditioned; the Moon's own motion is not.)
+    let normal = C.Cartesian3.normalize(C.Cartesian3.cross(vA, vB, new C.Cartesian3()), new C.Cartesian3());
+    if (S.moon && S.moon.t.length > 10) {
+      const k = Math.floor(S.moon.t.length / 2), j = Math.min(S.moon.t.length - 1, k + 6);
+      const n2 = C.Cartesian3.cross(toCart(S.moon, k), toCart(S.moon, j), new C.Cartesian3());
+      if (C.Cartesian3.magnitude(n2) > 0) normal = C.Cartesian3.normalize(n2, n2);
+    }
     if (normal.z < 0) C.Cartesian3.negate(normal, normal);
     const midMission = C.Cartesian3.multiplyByScalar(vB, 0.5, new C.Cartesian3());
     const tilt = C.Cartesian3.normalize(C.Cartesian3.subtract(C.Cartesian3.ZERO, vB, new C.Cartesian3()), new C.Cartesian3());
@@ -1473,6 +1524,7 @@ button, select, input { font: inherit; color: inherit; }
       if (camMode === "orion" && interpOrion(truthTr, Math.min(Math.max(t, truthTr.t[0]), truthTr.t[truthTr.t.length - 1]), tmp)) return C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
       if (camMode === "moon" && S.moon && interpOrion(S.moon, Math.min(Math.max(t, S.moon.t[0]), S.moon.t[S.moon.t.length - 1]), tmp)) return C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
       if (camMode === "mission") return C.Cartesian3.clone(midMission, center);
+      if (camMode === "earth") return C.Cartesian3.clone(C.Cartesian3.ZERO, center);
       return C.Cartesian3.clone(C.Cartesian3.ZERO, center);
     }
     function transformFor(time) {
@@ -1482,16 +1534,20 @@ button, select, input { font: inherit; color: inherit; }
     }
     function setCam(mode) {
       camMode = mode;
-      ["Mission", "Orion", "Moon"].forEach((n) => $("cam" + n).setAttribute("aria-pressed", String(mode === n.toLowerCase())));
+      ["Mission", "Orion", "Moon", "Earth"].forEach((n) => $("cam" + n).setAttribute("aria-pressed", String(mode === n.toLowerCase())));
       const el = $("globe"), aspect = Math.max(0.3, el.clientWidth / Math.max(1, el.clientHeight));
-      const range = mode === "mission" ? 5.6e8 * Math.max(1, 1.5 / aspect) : mode === "orion" ? 9e7 : 6e7;
-      ssc.minimumZoomDistance = mode === "mission" ? 2e7 : 4e6;
+      // Cesium's fov spans the wider dimension; fit the span to the narrower one.
+      const halfNarrow = aspect >= 1 ? Math.atan(Math.tan(Math.PI / 6) / aspect) : Math.PI / 6;
+      const span = mode === "mission" ? 5.6e8 : mode === "orion" ? 6e7 : mode === "earth" ? 1.2e8 : 4e7;
+      const range = span / (2 * Math.tan(halfNarrow));
+      ssc.minimumZoomDistance = mode === "mission" ? 2e7 : mode === "earth" ? 9e6 : 4e6;
       const off = C.Cartesian3.multiplyByScalar(viewDir(mode === "mission" ? 0.45 : 0.9), range, new C.Cartesian3());
       camera.lookAtTransform(transformFor(clock.cz.currentTime), off);
     }
     $("camMission").addEventListener("click", () => setCam("mission"));
     $("camOrion").addEventListener("click", () => setCam("orion"));
     $("camMoon").addEventListener("click", () => setCam("moon"));
+    $("camEarth").addEventListener("click", () => setCam("earth"));
 
     const pos = {}, moonP = {}, moonP2 = {};
     const moonT = new C.Matrix4(), moonW = new C.Matrix4(), moonRot = new C.Matrix3(), mx = new C.Cartesian3(), my = new C.Cartesian3(), mz = new C.Cartesian3();
