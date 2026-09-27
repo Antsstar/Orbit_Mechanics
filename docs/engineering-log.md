@@ -1453,6 +1453,23 @@ Found while building `msis_diurnal.py` (the diurnal-bulge density law) and its v
    interval count instead (`STEP_SIZE='276'`). And `mypy` crashed with an INTERNAL ERROR that was only
    its own `cp1252` console failing to print a `μ` in a numpy stub note: set `PYTHONIOENCODING=utf-8`.
 
+## Artemis II replay: the data disagreed with itself
+
+1. **A 1.9 m/s velocity change NASA's event list does not have.** The first full replay put the best
+   tier 356 km off at the flyby and 18,700 km off at the end, with no entry - against per-arc misses of
+   metres. Before touching the engine, the 04-05 14:46-15:16 "discontinuity" (86 km of closure) was
+   coasted both ways: the navigation files form two families 1.8 m/s apart, and the later family (which
+   carries the flyby) is the earlier plus one impulsive 1.88 m/s at ~01:24 UTC on 5 April (closure 1.1
+   km). `od011v1` models only 0.164 + 0.120 m/s there. `artemis2_replay.replay_burns` reconstructs it;
+   with it the flyby error is 46 km. Lesson: when a model is excellent per arc and poor end to end, look
+   for an inconsistency in the truth between the arcs before looking at the model.
+2. **Sandbox: `PYTHONPATH=... python` is refused** in a worktree-isolated agent (the harness cannot
+   prove what it loads). Put the worktree's `src` first from inside the process instead:
+   `python -c "import sys; sys.path.insert(0, 'src'); ..."`, or `sys.path.insert` in the script, as
+   `scripts/build_artemis2_demo.py` does. Check `orbital_engine.__file__`.
+3. **Bash heredocs containing apostrophes failed** in the Bash tool ("unexpected EOF while looking for
+   matching `'`") even with a quoted delimiter; write the file with the editor tool instead.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

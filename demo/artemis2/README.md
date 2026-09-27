@@ -15,9 +15,11 @@ OrbitalEngine model tiers side by side, each scored against NASA's navigation da
 - **Contact strip**: Deep Space Network windows per station and loss of signal behind the Moon, one
   bar per model.
 
-**The data in `data/` is synthetic** until the engine side replaces it. `meta.json` says so, and the
-page shows a hazard banner, a 3D stamp, a tag on NASA's row and a watermark on every chart for as long
-as `"synthetic": true`.
+**The data in `data/` is real**: NASA's navigation trajectory from JPL Horizons, and four OrbitalEngine
+model tiers flown from it (`orbital_engine.artemis2_replay`, written by `scripts/build_artemis2_demo.py`).
+`meta.json` carries `"synthetic": false` and the provenance. `make_sample_data.py` still writes the
+synthetic layout fixture; while `meta.json` says `"synthetic": true` the page shows a hazard banner, a
+3D stamp, a tag on NASA's row and a watermark on every chart.
 
 ## Run it
 
@@ -30,11 +32,19 @@ Then open <http://localhost:8000/>. Opening `index.html` straight from disk does
 page `fetch`es its CSV files. It needs network access to `cdn.jsdelivr.net` (CesiumJS 1.145.0,
 Plotly 2.35.2) and Google Fonts. No Cesium ion account or token is used.
 
-To regenerate the sample data (NumPy only, about a minute):
+To regenerate the real data (offline: it reads the committed Horizons data set in
+`src/orbital_engine/data/artemis2/`; about three minutes, most of it the Moon and Sun tiers on the
+engine's NumPy path):
 
 ```
-python demo/artemis2/make_sample_data.py
+python scripts/build_artemis2_demo.py                 # writes demo/artemis2/data/ and prints the summary
+python scripts/build_artemis2_demo.py --convergence   # also re-flies the best tier at half the step
 ```
+
+The script puts the repository's `src/` first on `sys.path`, so it runs the checkout it sits in. To
+refresh the Horizons data themselves (network), `python scripts/fetch_artemis2.py`, then rebuild.
+To get the synthetic fixture back instead (NumPy only, about a minute):
+`python demo/artemis2/make_sample_data.py`.
 
 ## Files
 
@@ -43,7 +53,7 @@ python demo/artemis2/make_sample_data.py
 | `index.html` | The page: HTML, CSS and JS in one file, no build step |
 | `SCHEMA.md` | **The data contract.** The engine side writes exactly this |
 | `data/` | `meta.json`, `models.csv`, `trajectory.csv`, `metrics.csv`, `events.csv`, `windows.csv` |
-| `make_sample_data.py` | Writes the synthetic `data/` |
+| `make_sample_data.py` | Writes the synthetic layout fixture into `data/` (overwrites the real data) |
 | `assets/` | Earth (Natural Earth II, stitched to one 2048x1024 image), Moon and Tycho-2 star-map textures, all from the CesiumJS package |
 | `cesium/Assets/` | CesiumJS's IAU 2006 Earth-orientation tables for 2026, and `approximateTerrainHeights.json` |
 
@@ -122,9 +132,13 @@ same relative paths.
 
 ## Known limitations
 
-- The sample is a layout fixture: a Keplerian Moon, toy dynamics and invented correction burns.
-  Nothing in it is a measurement except the two NASA-reported figures in the `nasa` rows of
-  `events.csv`.
+- NASA's trajectory is 14 navigation files joined end to end, and the joins show: jumps of up to
+  ~12 km at file boundaries, a ~90 km switch between two solutions on 5 April, and interpolation
+  ringing around burns. They are marked as "Navigation data jump" events and are not smoothed; see
+  `docs/architecture.md`, "Artemis II replay".
+- The truth rows in `events.csv` carry NASA's reported figures (the contract's rule). The farthest
+  distance is the event list's 413,146.2 km from Earth's centre; NASA's public 406,771 km is from the
+  surface.
 - Track drawing and markers interpolate linearly between samples, so samples need to be dense near
   Earth and the Moon (see `SCHEMA.md`).
 - Earth has no night-side lights or atmosphere glow, and its imagery is 2048x1024.

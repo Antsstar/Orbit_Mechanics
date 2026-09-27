@@ -1,6 +1,6 @@
 model_id,label,description,colour,colour_dark,is_truth
-nasa,NASA navigation,Orion's reconstructed trajectory as reported by NASA. The reference every model is scored against.,#17212e,#f2f5f8,1
-kepler,Earth only,"Two-body Kepler: Earth as a point mass, nothing else. Blind to the Moon.",#2a78d6,#3987e5,0
-j2,Earth + oblateness,"Earth point mass plus J2, the equatorial bulge. Still blind to the Moon.",#eb6834,#d95926,0
-moon,Earth + Moon,Adds the Moon's gravity. The first tier that can fly a lunar flyby.,#1baf7a,#199e70,0
-moon_sun,Earth + Moon + Sun,Adds the Sun's tidal pull on the Earth-Moon-Orion system.,#eda100,#c98500,0
+nasa,NASA navigation,"Orion's trajectory from NASA's navigation team, via JPL Horizons. The reference every model is scored against.",#17212e,#f2f5f8,1
+earth,Earth only,"Earth as a point mass and nothing else. Blind to the Moon, so it cannot fly a lunar flyby.",#2a78d6,#3987e5,0
+earth_j2,Earth + bulge,Adds Earth's equatorial bulge (J2). It matters near Earth and hardly at all out by the Moon.,#eb6834,#d95926,0
+earth_moon,Earth + Moon,"Adds the Moon's gravity, with the Moon where JPL's ephemeris puts it. The first tier that can fly the flyby.",#1baf7a,#199e70,0
+earth_moon_sun,Earth + Moon + Sun,"Adds the Sun's pull, which differs slightly between Earth and Orion. The engine's best model here.",#eda100,#c98500,0
