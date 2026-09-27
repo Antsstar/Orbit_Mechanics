@@ -1379,6 +1379,33 @@ measured). `pm+j2` then measured 0.076 us per body-step, *faster* than before th
 kernel was paying to pass the zonal row too. Measure a no-op tier after changing a fused signature; the
 tier you added is not where the regression shows.
 
+## Diurnal NRLMSIS: four things that cost time
+
+Found while building `msis_diurnal.py` (the diurnal-bulge density law) and its validation.
+
+1. **A mean altitude is not a mean semi-major axis.** The sun-synchronous check first predicted the
+   J2 node rate from the one-period *time-averaged altitude* of the osculating-circular seed (5.0 km
+   below it at 297 km / 96.7 deg): +0.26 % faster than the Sun. Measured: **+0.520 %**. The rate goes
+   as `a^-7/2` of the *mean semi-major axis*, which at the seeding point is
+   `a_osc (1 - (3/2) J2 (R/a)^2 sin^2 i)` - 9.8 km below - giving +0.513 %. The engine already had
+   that term (`propagators.mean_seeded_p`). The test passed with the wrong derivation only because its
+   tolerance (0.3 %) was wide; it is now 0.1 % around the right one. Treat "mean altitude" in
+   `stationkeeping.py`/`scenarios.py` as the controller's quantity, never as `a_mean`.
+2. **Docstring numbers written before measuring were wrong twice.** The first draft of
+   `msis_diurnal.py` quoted a +3.9 % seasonal drift over 10 days at 400 km (measured **+1.4 %**) and a
+   1.3 %/deg latitude gradient (measured 1.1 %/deg). Both were placeholders for "to be measured" that
+   read like results. Write `TBD` rather than a plausible number.
+3. **A tolerance contradicted its own derivation.** `solar_ephemeris.py` derives that
+   `12 h + (alpha - L)/15` equals `UT + (alpha - GMST)/15` to 0.0006 deg; the first test asserted
+   0.1 s of time, which is 0.0004 deg, and failed at 0.146 s. 0.0006 deg is **0.149 s** (240 s/deg).
+   The derivation was right; the unit conversion in the tolerance was not.
+4. **MSIS keeps a longitude/UT dependence at fixed local time** (1.3 % rms, 4 % max at 400 km; 13 % max
+   at 500 km), while its *global* mean moves by only 0.16 % with UT. A table at one UT would pin one
+   arbitrary longitude to each local time for the whole run, so the table is the zonal mean over 6 UT
+   samples (exact to the float32 floor; 4 leave 2.7e-4). Also: the sandbox this repo is worked in
+   rejects `PYTHONPATH=...` on a command line - use a runner that inserts the worktree's `src` into
+   `sys.path` and asserts `orbital_engine.__file__` before running pytest.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

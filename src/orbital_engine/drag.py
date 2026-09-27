@@ -36,6 +36,7 @@ Choosing a density law
 | `0.0` (`DENSITY_MODEL_EXPONENTIAL`, the default) | `rho0 exp(-(h - h0) / H)` | `rho0`, `h0`, `scale_height` |
 | `1.0` (`DENSITY_MODEL_LAYERED`) | piecewise exponential, 28 bands, Vallado Table 8-4 | none of those three |
 | `2.0` (`DENSITY_MODEL_MSIS`) | NRLMSIS 2.0 global-mean profile via `pymsis` (`msis_bridge.py`) | `f107`, `f107a`, `ap` |
+| `3.0` (`DENSITY_MODEL_MSIS_DIURNAL`) | NRLMSIS 2.0 over altitude x latitude x local solar time, the epoch's day (`msis_diurnal.py`) | `f107`, `f107a`, `ap`, `epoch_days`, and `t` |
 
 An unwritten coefficient row is all zeros, so **0.0 is the single-exponential law and every existing
 configuration keeps its previous behaviour bit for bit**. Under the layered and MSIS laws `rho0`, `h0`
@@ -95,9 +96,12 @@ Every coefficient follows its usual convention, and the kernel works in engine u
 | `f107`          | 7 | sfu, previous-day F10.7 - read only under MSIS |
 | `f107a`         | 8 | sfu, 81-day mean F10.7 - read only under MSIS |
 | `ap`            | 9 | daily Ap, 0..400 - read only under MSIS |
+| `epoch_days`    | 10 | UT days from 2000-01-01T12:00 UT at `t = 0` - read only under the diurnal MSIS law |
 
-Columns 7-9 are read only on MSIS rows, so a legacy 7-column parameter array still evaluates the
-first two laws unchanged.
+Columns 7-9 are read only on the two MSIS laws' rows and column 10 only on diurnal rows, so a legacy
+7-column parameter array still evaluates the first two laws unchanged, and a 10-column one the first
+three. The diurnal law is the only one that reads the kernel's `t` (through the Sun's mean longitude,
+`solar_ephemeris.py`); every other law is steady in the co-rotating frame.
 
 `rho [kg/m^3] * B [m^2/kg]` has units of 1/m, and the engine needs 1/km. **The only unit conversion is
 `_PER_M_TO_PER_KM = 1e3`**, applied once to `rho * B`. Then `(1/km) * (km/s)^2 = km/s^2`. Scale height
@@ -119,8 +123,8 @@ constant here.
 the frame `state` is written in. In an ecliptic-seeded scenario that tilts the atmosphere.
 
 **`h` is geocentric radius minus `r_ref`**, a spherical altitude, not a geodetic one. With
-`r_ref = EARTH_R_EQ` it overestimates polar altitude by up to 21 km, which at `H = 60 km` is about a
-factor of 1.4 in density. Whether that matters is up to the caller. Vallado's table is written in
+`r_ref = EARTH_R_EQ` it *underestimates* polar altitude by up to 21 km (the polar radius is 6356.8 km),
+which at `H = 60 km` overestimates polar density by about a factor of 1.4. Whether that matters is up to the caller. Vallado's table is written in
 terms of ellipsoidal height.
 
 **Degenerate rows contribute exactly `0.0`**, with no division, overflow or warning:
@@ -162,10 +166,14 @@ from numpy.typing import NDArray
 
 from .atmosphere import (
     BASE_ALTITUDE_KM, BASE_DENSITY_KG_M3, DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED,
-    DENSITY_MODEL_MSIS, DENSITY_MODELS, SCALE_HEIGHT_KM, exponential_density, layered_density,
+    DENSITY_MODEL_MSIS, DENSITY_MODEL_MSIS_DIURNAL, DENSITY_MODELS, SCALE_HEIGHT_KM,
+    exponential_density, layered_density,
 )
 from .msis_bridge import (
     MSIS_SOLAR_COEFFICIENTS, cached_msis_profile, check_solar_activity, msis_density, msis_profile,
+)
+from .msis_diurnal import (
+    EPOCH_COEFFICIENT, check_epoch, msis_diurnal_density, msis_diurnal_table,
 )
 from .custom_types import ScalarSeconds
 from .geopotential import barycentre_parented
@@ -177,12 +185,13 @@ if TYPE_CHECKING:
 __all__ = [
     "DRAG_MODEL", "DRAG_PARAM_NAMES", "EARTH_OMEGA", "drag_kernel", "DensityTables", "density_tables",
     "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED", "DENSITY_MODEL_MSIS",
+    "DENSITY_MODEL_MSIS_DIURNAL", "DIURNAL_THRESHOLD",
 ]
 
 DRAG_MODEL: Final[str] = "drag"
 DRAG_PARAM_NAMES: Final = (
     "ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega", "density_model",
-    "f107", "f107a", "ap",
+    "f107", "f107a", "ap", "epoch_days",
 )
 _B_COL: Final[int] = 0
 _RHO0_COL: Final[int] = 1
@@ -192,9 +201,14 @@ _R_REF_COL: Final[int] = 4
 _OMEGA_COL: Final[int] = 5
 _DENSITY_MODEL_COL: Final[int] = 6
 _SOLAR_COLS: Final = slice(7, 10)          # f107, f107a, ap - MSIS_SOLAR_COEFFICIENTS, in order
+_DIURNAL_COLS: Final = slice(7, 11)        # f107, f107a, ap, epoch_days - the diurnal table's key
 #: Public names for the two column positions `Simulation._refresh_cowell_plan` reads to find MSIS rows.
 DENSITY_MODEL_COL: Final[int] = _DENSITY_MODEL_COL
 SOLAR_COLS: Final = _SOLAR_COLS
+#: `drag_kernel` dispatches a row to the diurnal MSIS law from this selector value up (half-way
+#: between 2.0 and 3.0); `Simulation._refresh_cowell_plan` reads it to keep such rows off the fused
+#: twin, which knows laws 0-2 only (and would read 3.0 as MSIS).
+DIURNAL_THRESHOLD: Final[float] = 2.5
 
 # rho [kg/m^3] * B [m^2/kg] is 1/m; the engine wants 1/km. This is the model's only unit conversion.
 _PER_M_TO_PER_KM: Final[float] = 1.0e3
@@ -235,14 +249,18 @@ def _validate_density_coefficients(
     4. For every distinct `(f107, f107a, ap)` the call leaves on an MSIS row, the indices are
        range-checked and the NRLMSIS 2.0 profile is **evaluated now** (`msis_profile`, memoised) -
        this is the configuration-time boundary; the kernel only reads the memo.
+    5. The diurnal law (`DENSITY_MODEL_MSIS_DIURNAL`) follows rules 2-4 with `epoch_days` added: all
+       four in the call that selects it, `epoch_days` refused on any other law, and its table
+       (`msis_diurnal.msis_diurnal_table`) evaluated here for every distinct `(f107, f107a, ap,
+       epoch_days)`, after every key has been range-checked.
     """
     requested = coefficients.get("density_model")
     if requested is not None and float(requested) not in DENSITY_MODELS:
         raise ValueError(
             f"force model '{DRAG_MODEL}': density_model={requested!r} is not a known density law; "
             f"use atmosphere.DENSITY_MODEL_EXPONENTIAL ({DENSITY_MODEL_EXPONENTIAL}), "
-            f"DENSITY_MODEL_LAYERED ({DENSITY_MODEL_LAYERED}) or DENSITY_MODEL_MSIS "
-            f"({DENSITY_MODEL_MSIS})."
+            f"DENSITY_MODEL_LAYERED ({DENSITY_MODEL_LAYERED}), DENSITY_MODEL_MSIS "
+            f"({DENSITY_MODEL_MSIS}) or DENSITY_MODEL_MSIS_DIURNAL ({DENSITY_MODEL_MSIS_DIURNAL})."
         )
 
     existing = sim.force_model_params.get(DRAG_MODEL)
@@ -253,13 +271,32 @@ def _validate_density_coefficients(
     else:
         law = np.zeros(bodies.size)
     on_msis = law == DENSITY_MODEL_MSIS
+    on_diurnal = law == DENSITY_MODEL_MSIS_DIURNAL
+    on_solar = on_msis | on_diurnal
 
     given = [key for key in MSIS_SOLAR_COEFFICIENTS if key in coefficients]
-    if given and not np.all(on_msis):
+    if given and not np.all(on_solar):
         raise ValueError(
             f"force model '{DRAG_MODEL}': {given} are read only under density_model="
-            f"DENSITY_MODEL_MSIS ({DENSITY_MODEL_MSIS}); slot(s) "
-            f"{bodies[~on_msis].tolist()} would silently ignore them."
+            f"DENSITY_MODEL_MSIS ({DENSITY_MODEL_MSIS}) or DENSITY_MODEL_MSIS_DIURNAL "
+            f"({DENSITY_MODEL_MSIS_DIURNAL}); slot(s) {bodies[~on_solar].tolist()} would silently "
+            f"ignore them."
+        )
+    if EPOCH_COEFFICIENT in coefficients and not np.all(on_diurnal):
+        raise ValueError(
+            f"force model '{DRAG_MODEL}': {EPOCH_COEFFICIENT} is read only under density_model="
+            f"DENSITY_MODEL_MSIS_DIURNAL ({DENSITY_MODEL_MSIS_DIURNAL}); slot(s) "
+            f"{bodies[~on_diurnal].tolist()} would silently ignore it."
+        )
+    if (requested is not None and float(requested) == DENSITY_MODEL_MSIS_DIURNAL
+            and (len(given) < 3 or EPOCH_COEFFICIENT not in coefficients)):
+        missing = [key for key in (*MSIS_SOLAR_COEFFICIENTS, EPOCH_COEFFICIENT)
+                   if key not in coefficients]
+        raise ValueError(
+            f"force model '{DRAG_MODEL}': density_model=DENSITY_MODEL_MSIS_DIURNAL needs f107, f107a, "
+            f"ap and {EPOCH_COEFFICIENT} given explicitly (missing {missing}). Solar activity and the "
+            f"epoch are configuration data, never looked up - see "
+            f"msis_diurnal.msis_diurnal_coefficients."
         )
     if requested is not None and float(requested) == DENSITY_MODEL_MSIS and len(given) < 3:
         missing = [key for key in MSIS_SOLAR_COEFFICIENTS if key not in coefficients]
@@ -268,17 +305,27 @@ def _validate_density_coefficients(
             f"given explicitly (missing {missing}). Solar activity is configuration data here and is "
             f"never looked up or downloaded - see msis_bridge.SOLAR_ACTIVITY_* for presets."
         )
-    if not np.any(on_msis):
+    if not np.any(on_solar):
         return
 
-    activity = (existing[bodies][:, _SOLAR_COLS].copy() if existing is not None
-                else np.zeros((bodies.size, 3)))
-    for column, key in enumerate(MSIS_SOLAR_COEFFICIENTS):
+    # Existing rows may be narrower than the current layout (a legacy array); pad with zeros.
+    keys = np.zeros((bodies.size, 4))
+    if existing is not None:
+        old = existing[bodies][:, _DIURNAL_COLS]
+        keys[:, :old.shape[1]] = old
+    for column, key in enumerate((*MSIS_SOLAR_COEFFICIENTS, EPOCH_COEFFICIENT)):
         if key in coefficients:
-            activity[:, column] = float(coefficients[key])
-    for f107, f107a, ap in np.unique(activity[on_msis], axis=0):
+            keys[:, column] = float(coefficients[key])
+    for f107, f107a, ap in np.unique(keys[on_msis, :3], axis=0):
         check_solar_activity(float(f107), float(f107a), float(ap))
         msis_profile(float(f107), float(f107a), float(ap))
+    # Every diurnal key is range-checked before the first (~9 s) table is evaluated.
+    diurnal_keys = np.unique(keys[on_diurnal], axis=0)
+    for f107, f107a, ap, epoch in diurnal_keys:
+        check_solar_activity(float(f107), float(f107a), float(ap))
+        check_epoch(float(epoch))
+    for f107, f107a, ap, epoch in diurnal_keys:
+        msis_diurnal_table(float(f107), float(f107a), float(ap), float(epoch))
 
 
 @register_force_model(
@@ -315,7 +362,9 @@ def drag_kernel(
     term never calls `pymsis`; it raises `LookupError` if a row's profile was never evaluated.
 
     Coefficient units and the single conversion (`_PER_M_TO_PER_KM`) are in the module docstring.
-    `t` and `mu_array` are unused: the atmosphere is steady in the frame co-rotating with the parent.
+    Under the diurnal MSIS law (3.0) density also depends on the row's latitude and mean local solar
+    time, the latter through `t` (the Sun's mean longitude at `epoch_days + t / 86400`); that is the
+    only law that reads `t`. `mu_array` is unused.
     """
     primaries = parent_indices[indices]
     rel = state[indices] - state[primaries]                     # (k, 6): [r | v] relative to parent
@@ -333,11 +382,12 @@ def drag_kernel(
 
     altitude = np.sqrt(r2) - coeff[:, _R_REF_COL]
 
-    # Which density law each row uses. The three masks partition the rows, so exactly one of the
+    # Which density law each row uses. The four masks partition the rows, so exactly one of the
     # terms below is non-zero per row and the sum is a branchless select - no `np.where` over a
     # freshly allocated pair, and no `if np.any(...)` guard (`CLAUDE.md`, Conventions). For a row on
-    # the first two laws the masks are the same booleans they were before MSIS existed and the MSIS
-    # term is exactly +0.0, so those rows are bit-identical to the two-law kernel.
+    # the first three laws the masks are the same booleans they were before the diurnal law existed
+    # (a 2.0 row fails `>= 2.5`), and each absent law's term is exactly +0.0, so those rows are
+    # bit-identical to the two- and three-law kernels.
     #
     # Rows with no separation contribute exactly zero under either law, and a row with no scale
     # height contributes zero under the single-band law only (an unconfigured row, H = 0). Neither
@@ -347,13 +397,17 @@ def drag_kernel(
     selector = coeff[:, _DENSITY_MODEL_COL]
     beyond_exponential = selector >= 0.5          # the two-law kernel's `use_layered`, verbatim
     use_exponential = ~beyond_exponential         # so even a NaN selector keeps its old meaning
-    use_msis = selector >= 1.5
-    use_layered = beyond_exponential & ~use_msis
+    beyond_layered = selector >= 1.5
+    use_diurnal = selector >= DIURNAL_THRESHOLD
+    use_msis = beyond_layered & ~use_diurnal
+    use_layered = beyond_exponential & ~beyond_layered
     density = (                                                                       # kg/m^3
         exponential_density(altitude, coeff[:, _RHO0_COL], coeff[:, _H0_COL], scale_height,
                             separated & use_exponential & (scale_height > 0.0))
         + layered_density(altitude, separated & use_layered)
         + msis_density(altitude, coeff[:, _SOLAR_COLS], separated & use_msis)
+        + msis_diurnal_density(altitude, rel[:, :3], t, coeff[:, _DIURNAL_COLS],
+                               separated & use_diurnal)
     )
 
     # 0.5 * rho [kg/m^3] * B [m^2/kg] * 1e3 -> 1/km; times |v_rel| [km/s] times v_rel [km/s].

@@ -413,8 +413,8 @@ def test_closed_form_msis_acceleration_in_the_kernel() -> None:
     state[1:, :3] = r
     state[1:, 3:] = v
     params = np.zeros((3, len(DRAG_PARAM_NAMES)))
-    params[1] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_MSIS, *HIGH]
-    params[2] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_MSIS, *MODERATE]
+    params[1, :10] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_MSIS, *HIGH]
+    params[2, :10] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_MSIS, *MODERATE]
     out = np.zeros((3, 3))
     with np.errstate(all="raise"):
         drag.drag_kernel(np.array([1, 2], dtype=np.int64), 0.0, state, np.zeros(3),

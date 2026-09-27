@@ -3,13 +3,14 @@ Atmospheric density laws — the *density* half of `drag.py`, split out so the c
 swept model dimension rather than a hard-coded formula.
 
 `drag.py` owns the drag acceleration `-(1/2) rho B |v_rel| v_rel`. This module owns `rho(h)`, and
-offers three laws:
+offers four laws:
 
 | law | selector | what it is |
 |---|---|---|
 | single exponential | `DENSITY_MODEL_EXPONENTIAL` (0.0) | `rho0 exp(-(h - h0) / H)`, one band, the original |
 | piecewise exponential | `DENSITY_MODEL_LAYERED` (1.0) | 28 bands, 0 to 1000+ km, from the table below |
 | NRLMSIS 2.0 mean profile | `DENSITY_MODEL_MSIS` (2.0) | `pymsis` averaged at configuration time, see `msis_bridge.py` |
+| NRLMSIS 2.0 with the diurnal bulge | `DENSITY_MODEL_MSIS_DIURNAL` (3.0) | `pymsis` tabulated over altitude x latitude x local solar time for the epoch's day, see `msis_diurnal.py` |
 
 The third law is evaluated by the same `piecewise_exponential_density` as the table - log-linear
 between altitude nodes - with the nodes, densities and scale heights read from a profile
@@ -83,14 +84,15 @@ from numpy.typing import NDArray
 from .custom_types import ArrayFloat, ArrayKilometers
 
 __all__ = [
-    "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED", "DENSITY_MODEL_MSIS", "DENSITY_MODELS",
+    "DENSITY_MODEL_EXPONENTIAL", "DENSITY_MODEL_LAYERED", "DENSITY_MODEL_MSIS",
+    "DENSITY_MODEL_MSIS_DIURNAL", "DENSITY_MODELS",
     "BASE_ALTITUDE_KM", "BASE_DENSITY_KG_M3", "SCALE_HEIGHT_KM",
     "layered_density", "exponential_density", "piecewise_exponential_density",
 ]
 
 # Selector values for the `density_model` coefficient of the `"drag"` force model. They are floats
 # because `Simulation.enable_force_model` takes `**coefficients: float` and `force_model_params` is a
-# float array; the kernel dispatches on thresholds half-way between them (`>= 0.5`, `>= 1.5`), so any
+# float array; the kernel dispatches on thresholds half-way between them (`>= 0.5`, `>= 1.5`, `>= 2.5`), so any
 # value rounds to the nearer law rather than silently selecting none, and `drag.py`'s
 # `validate_coefficients` refuses anything that is not exactly one of them.
 DENSITY_MODEL_EXPONENTIAL: Final[float] = 0.0
@@ -98,7 +100,12 @@ DENSITY_MODEL_LAYERED: Final[float] = 1.0
 #: NRLMSIS 2.0 via `pymsis`, averaged into an altitude profile at configuration time
 #: (`msis_bridge.py`). Needs the `f107`, `f107a` and `ap` coefficients on the same row.
 DENSITY_MODEL_MSIS: Final[float] = 2.0
-DENSITY_MODELS: Final = (DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, DENSITY_MODEL_MSIS)
+#: NRLMSIS 2.0 as a function of altitude, latitude and mean local solar time, tabulated at
+#: configuration time for the UT day of an epoch (`msis_diurnal.py`). Needs `f107`, `f107a`, `ap` and
+#: `epoch_days` on the same row, and reads the kernel's `t`. Dispatched from `>= 2.5`.
+DENSITY_MODEL_MSIS_DIURNAL: Final[float] = 3.0
+DENSITY_MODELS: Final = (DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED, DENSITY_MODEL_MSIS,
+                         DENSITY_MODEL_MSIS_DIURNAL)
 
 # Vallado 4e Table 8-4. Column 1 is the base ellipsoidal altitude of the band in km, column 2 the
 # nominal density there in kg/m^3, column 3 the band's scale height in km. Read the "How much to
