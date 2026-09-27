@@ -48,6 +48,7 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `isl.py` | Inter-satellite link visibility: pair windows cut on `geometry.segment_clearance`, the contact dataset's satellite-to-satellite half, and `run_sweep(isl=...)` - scored by `access.py`'s own matcher and statistics | **new** |
 | `events.py` | Event-driven step splitting: a step cut where a continuous function of the arena state changes sign, located by a bracketed root find over trial propagations. The second thing `step()` splits for, after a scheduled manoeuvre — and the first that has to *find* its own epoch | **new** |
 | `zonal.py` | `zonal`: the J3..J6 zonal harmonics of the parent, additive to `j2`, with a matching truth option in `reference.py` written from a different derivation | **new** |
+| `ephemeris.py` | Tabulated perturber ephemerides (`EphemerisTable`, cubic Hermite on positions *and* velocities, registered once under a content-derived key) and `ephemeris_third_body`: up to three parent-centred perturbers per body, direct minus indirect, evaluated at every RK4 stage's own time | **new** |
 
 Nothing was removed. No module lost a responsibility. The only deletion was `register_model` /
 `get_model` in `registry.py`, which nothing had ever called, replaced by the force-model registry.
@@ -742,12 +743,61 @@ Sun-Earth is an exact two-body pair, which makes the error predictable as a vect
 2.6 % and 1.3 % of that prediction. Without `third_body` the error is 2.5e4 km. A test-only oracle
 that supplies the Sun at each stage's true time brings back fourth order (ratios 17.9, 17.0, 16.5,
 down to 2.1e-4 km at 2700 s). So the freeze is the only residual, and it dominates RK4's own
-error below a step of about a day. Removing it means advancing perturbers per stage, which is not
-built. A LEO satellite perturbed by the Moon sees a perturber turning 13 times faster, and its
-coefficient is unmeasured.
+error below a step of about a day. Removing it for *arena* perturbers means advancing them per stage,
+which is not built; the fourth-order alternative is a *tabulated* perturber, next section. A LEO
+satellite perturbed by the Moon sees a perturber turning 13 times faster, and its coefficient is
+unmeasured.
 
 **Composition.** Its bit is foreign to `_refresh_cowell_plan`, so any Cowell set that includes a
 `third_body` body runs on the NumPy path. There is no compiled twin.
+
+---
+
+## Ephemeris-driven perturbers: the third body as a function of time
+
+`ephemeris.py` registers `ephemeris_third_body`: the same direct-minus-indirect term as `third_body`,
+but the perturber is a **tabulated ephemeris** (a JPL Horizons vector table, say), not an arena body.
+It exists for replaying a real trajectory - a crewed lunar flyby against its navigation solution -
+where the Moon and Sun must be at their real positions at the right time in every stage.
+
+**Why tables, at the boundary.** A real ephemeris is data, not a Keplerian orbit, so it cannot be an
+arena body without inventing dynamics for it. It enters as plain arrays - `t_s`, `position_km`,
+`velocity_km_s`, centred on the parent - through an immutable `EphemerisTable`, registered once. The
+kernel contract passes only float `params` rows, so a body stores a **key**, and the key is a digest of
+the table's content: the same table always gets the same key, and a key can never be re-bound to other
+data. That makes the module's memo harmless - two simulations sharing a key share, by construction,
+the same numbers - which is `msis_bridge.py`'s pattern (configuration-time data, looked up by a key in a
+coefficient row, `LookupError` on a miss rather than lazy evaluation). Nothing in a step reads a file,
+a network or a third-party object.
+
+**Why Hermite.** Piecewise cubic Hermite on the tabulated positions *and* velocities is fourth order
+from two nodes, local to one interval, C1 across nodes (so RK4 never meets a kink in the force), and has
+an error that is a *prediction*, not just a bound: `x''''(t_mid) h^4/384` at the midpoint. A Horizons
+lunar table at 1 h is 8.8e-6 km off at worst, halving the step divides that by 16, and
+`EphemerisTable.error_estimate_km()` computes the bound from a table's own data for a real table with no
+analytic truth. The velocities come with the table for free, which is what a spline would throw away.
+Queries outside the table raise; extrapolating a cubic is silently wrong.
+
+**Why relative to the parent.** Cowell integrates the parent-relative state, so the force must be
+parent-relative too, and the indirect term is not optional: for the Sun on a GEO satellite it is 1800
+times the tide it cancels. The table must therefore be centred on the parent - `r_s` is used as given,
+since the parent's own ephemeris is not in the arena - and a table that names its `centre` has that
+checked when the model is enabled.
+
+**The order headline.** The kernel evaluates the table at the time it is handed, which under
+`RK4Integrator` is each stage's own (`tesseral.py` established that the clock reaches every stage and
+every split sub-step). The relative equation of motion is then `r'' = f(t, r)` with nothing frozen, so
+RK4 keeps fourth order. In `third_body`'s own verification geometry - the massless Moon under the Sun
+for 30 days, truth a DOP853 integration whose Sun is the analytic Kepler function the table sampled -
+it measures 1.044, 5.84e-2, 3.43e-3, 2.10e-4 km at 21600 / 10800 / 5400 / 2700 s (ratios 17.9, 17.0,
+16.3): `test_third_body.py`'s per-stage oracle, now in the engine. At 3600 s it is **6.6e-4 km where
+`third_body` is 2.64 km**. Freezing its stage time reproduces `third_body`'s error to 3.6e-7 km, so the
+freeze is the whole difference. A cislunar flyby at 5812 km past a tabulated Moon converges at fourth
+order in both closest-approach time and distance.
+
+**Composition.** Foreign to the fused plan, so a Cowell set carrying it runs on the NumPy path (about
+120 us per kernel call per perturber slot group); no compiled twin. A zero `mu` skips the slot exactly,
+so a run with the Moon's `mu` set to zero is bit-identical to point-mass Cowell.
 
 ---
 
