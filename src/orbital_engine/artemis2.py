@@ -416,7 +416,7 @@ def coast(model: CoastModel, t0: ArrayFloat, state0: ArrayFloat, t1: ArrayFloat,
     """
     t = np.asarray(t0, dtype=np.float64).copy()
     h = (np.asarray(t1, dtype=np.float64) - t) / n_steps
-    y = np.asarray(state0, dtype=np.float64).copy()
+    y: ArrayFloat = np.asarray(state0, dtype=np.float64).copy()
     hc = h[:, None]
 
     def f(tt: ArrayFloat, yy: ArrayFloat) -> ArrayFloat:
