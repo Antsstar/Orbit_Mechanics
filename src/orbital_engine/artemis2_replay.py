@@ -110,6 +110,10 @@ Open-loop integrals along NASA's trajectory, seed to closest approach (3.92 d), 
 RK4 at 60 s (sub-stepped to one hundredth of a radian of local turning, `MAX_TURN_PER_STEP`) is ~1e-4 km
 per flight, far below every number above; `tests/validation/test_artemis2_replay.py` checks it by
 halving.
+
+The measurements against these estimates (Earth only 16,093 km at the flyby, Earth + Moon 1,045 km,
+Earth + Moon + Sun 46 km and entry 1.8 min after NASA's; per arc 15 m median, 2.65 km through the flyby)
+are tabulated in `docs/architecture.md`, "Artemis II replay: four tiers against NASA's navigation".
 """
 from __future__ import annotations
 
