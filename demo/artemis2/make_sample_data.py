@@ -14,7 +14,10 @@ What it does, briefly:
   point mass + J2 + Moon + Sun + a small solar-pressure term, targeted by
   Newton iteration so its lunar periapsis altitude and time land near the
   figures NASA reported for the real flyby (6,545 km, 6 April ~23:00 UTC).
-  Its outbound and return correction burns are invented.
+  Its outbound and return correction burns are invented. Its
+  ``closest_lunar_approach`` and ``max_earth_distance`` rows in events.csv
+  carry NASA's *reported* figures, as the real file will, not the fixture's
+  own minima (6,547.6 km and 407,093 km).
 * The model tiers (kepler, j2, moon, moon_sun) are seeded from that state an
   hour after translunar injection and flown with fewer force terms, with the
   same correction burns applied. Their divergence is genuine for the toy

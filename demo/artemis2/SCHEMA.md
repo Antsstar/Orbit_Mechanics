@@ -10,9 +10,9 @@ shows a banner while it does.
 
 ## Conventions
 
-- **Time.** Every time is `t_s`: seconds (float) from the epoch in `meta.json`. It is the TDB-free
-  offset: `epoch_utc + t_s` is the UTC instant the page displays. Negative values are allowed.
-  Sample times need not be uniform or shared between models.
+- **Time.** Every time is `t_s`: elapsed SI seconds (float) from the epoch in `meta.json`. The page
+  displays `epoch_utc + t_s` as UTC (no leap second falls inside the mission). Negative values are
+  allowed. Sample times need not be uniform or shared between models.
 - **Frame.** Positions are Earth-centred ICRF (J2000 axes), in km. The page rotates them into
   Earth-fixed coordinates for drawing. Do not send Earth-fixed or TEME positions.
 - **Units.** km, km/s, m/s and seconds. The `unit` column is displayed as given.
@@ -126,15 +126,25 @@ body and 600 s elsewhere (sample: 37,423 rows, 1.6 MB).
 | `unit` | string or empty | |
 | `note` | string | One plain-English line, shown on hover. |
 
+**Reported versus predicted.** Rows under the truth model are what NASA *reported* (the published
+flyby altitude of 6,545 km, the 406,740 km record distance), not minima re-derived from the truth
+trajectory. The scorecard compares every model against these rows, so write NASA's own figures here
+and say in `note` what they are measured from. The sample does this: its truth trajectory's own
+perilune is 6,547.6 km, and the `nasa` row carries the reported 6,545 km.
+
 Keys the page treats specially (all others are listed and marked on the track generically):
 
 | Key | Kind | `value` | Used for |
 |---|---|---|---|
 | `closest_lunar_approach` | apsis | altitude above the mean lunar radius (1,737.4 km), km | Metric cards: "Closest to the Moon", delta vs truth in km and in time. |
-| `max_earth_distance` | apsis | distance from Earth's centre, km | Metric cards: "Farthest from Earth". |
+| `max_earth_distance` | apsis | distance from Earth, km. **Say in `note` whether from the centre or the surface**: NASA's 406,740 km figure does not state it here, and the two differ by 6,371 km | Metric cards: "Farthest from Earth". |
 | `entry_interface` | milestone | altitude, km (121.92) | Metric cards: "Entry interface" time vs truth. A model without it did not reach the atmosphere. |
 | `return_perigee` | apsis | altitude, km | Metric cards: shown instead of entry when a model misses Earth. |
-| `model_seed` | milestone | none | Marks where the models start from truth. Drawn on every chart. |
+| `model_seed` | milestone | none | Marks where the models start from truth. Drawn on every chart and quoted in the header. |
+
+The chapter buttons under the mission clock are the truth's events except `model_seed` and any key
+containing `correction`; every truth event also gets a tick on the timeline scrubber (burns amber,
+apsides white).
 
 Events outside a model's trajectory span are listed but not drawn on the track.
 
@@ -151,8 +161,17 @@ The sample uses a 10° elevation mask and a spherical Earth, with lunar blackout
 disc covering Orion as seen from Earth's centre. The engine side should state its own definitions in
 `meta.json` `notes`.
 
+## Time span and the Earth-orientation tables
+
+The 3D view rotates ICRF into Earth-fixed coordinates with CesiumJS's IAU 2006 tables, of which only
+`cesium/Assets/IAU2006_XYS/IAU2006_XYS_18.json` and `_19.json` are shipped (they cover 2026). Data far
+outside 2026 still draws, with Earth's orientation from sidereal time alone (the view's label then
+reads "GMST approx."): at most a few tenths of a degree of Earth's spin, and no effect on any
+trajectory, since those are drawn in the same rotated frame as the camera.
+
 ## Size budget
 
-The page itself is about 90 KB plus 1.4 MB of bundled textures. CesiumJS and Plotly load from
-`cdn.jsdelivr.net`. Data should stay under 8 MB so the whole artifact stays well under its 16 MB
-limit; the sample is 2.7 MB.
+`index.html` is 84 KB. Bundled files: 1.2 MB of textures in `assets/` (Earth, Moon, star map) and
+0.43 MB in `cesium/Assets/`. CesiumJS 1.145.0 and Plotly 2.35.2 load from `cdn.jsdelivr.net` and do
+not count. Keep `data/` under 8 MB so the published artifact stays well inside its 16 MB limit; the
+sample is 2.66 MB.
