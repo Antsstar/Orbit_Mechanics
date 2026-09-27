@@ -40,6 +40,8 @@ __all__ = [
     "LIGHT_SOURCE_NAME", "LIGHT_SOURCE_DISTANCE_KM",
     "tle_satellites", "zonal_twins", "zonal_twin_name",
     "geostationary_satellites", "geostationary_radius_km", "geo_satellite_name",
+    "sun_synchronous_satellites", "sun_synchronous_inclination_deg", "sso_satellite_name",
+    "TROPICAL_YEAR_DAYS",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -838,6 +840,111 @@ def station_keeping_satellites(
             dry_mass=VESSEL_DRY_MASS, fuel_mass=VESSEL_FUEL_MASS, drag_area=4.0,
             p=EARTH_R_EQ + altitude_km, e=0.0, i=math.radians(inclination_deg),
             raan=math.radians(raan_deg), arg_pe=0.0, theta=0.0,
+        ))
+    session.commit()
+
+    sim = Simulation(
+        body_names=["Earth"] + names,
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else len(names) + 8,
+    )
+    sats = np.array([sim.name_to_index[n] for n in names], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, sats)
+    sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    return sim
+
+
+#: Mean tropical year, days - the period a sun-synchronous node must precess through 360 deg in.
+TROPICAL_YEAR_DAYS = 365.2422
+
+
+def sun_synchronous_inclination_deg(
+    semi_major_axis_km: float, *, j2: Optional[float] = None, r_eq: Optional[float] = None,
+    mu: float = MU_EARTH,
+) -> float:
+    """
+    Inclination, degrees, of the circular orbit of radius `semi_major_axis_km` whose J2 node rate
+    `dRAAN/dt = -(3/2) n J2 (R/a)^2 cos i` equals the mean Sun's `360 deg / TROPICAL_YEAR_DAYS`
+    (first-order secular J2, `propagators.secular_j2_rates`' formula at `e = 0`). Defaults are
+    `geopotential.EARTH_J2` and `EARTH_R_EQ`: 96.67 deg at 300 km altitude, 97.03 at 400, 97.40 at 500.
+    """
+    from .geopotential import EARTH_J2, EARTH_R_EQ
+
+    k2 = EARTH_J2 if j2 is None else float(j2)
+    big_r = EARTH_R_EQ if r_eq is None else float(r_eq)
+    a = float(semi_major_axis_km)
+    n = math.sqrt(mu / a ** 3)
+    sun_rate = 2.0 * math.pi / (TROPICAL_YEAR_DAYS * 86400.0)
+    return math.degrees(math.acos(-sun_rate / (1.5 * n * k2 * (big_r / a) ** 2)))
+
+
+def sso_satellite_name(k: int) -> str:
+    """Name of satellite `k` in `sun_synchronous_satellites` - `SSO-00`, `SSO-01`, ..."""
+    return f"SSO-{k:02d}"
+
+
+def sun_synchronous_satellites(
+    session: Session,
+    *,
+    epoch_days: float,
+    ltan_hours: Sequence[float] = (18.0, 12.0),
+    altitude_km: float = 300.0,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth plus one massless Cowell satellite per entry of `ltan_hours` (`sso_satellite_name(k)`), each
+    on a circular **sun-synchronous** orbit whose ascending node sits at mean local solar time
+    `ltan_hours[k]` at `t = 0`, every one carrying `point_mass_gravity` and `j2` (Earth values) and
+    nothing else - drag is the thing being compared, as in `station_keeping_satellites`, whose seeding
+    (osculating-circular at `altitude_km` above `EARTH_R_EQ`, seeded at the ascending node) this copies.
+    The default pair is the headline of `msis_diurnal.py`: **dawn-dusk** (LTAN 18 h) and
+    **noon-midnight** (LTAN 12 h).
+
+    `epoch_days` (UT days from `solar_ephemeris.J2000_UT` at `t = 0`) places the Sun: the node's right
+    ascension is `L + 15 deg (LTAN - 12 h)`, `L` the Sun's mean longitude - mean local time, the same
+    convention `solar_ephemeris.local_solar_time_hours` and NRLMSIS use. Pass the same `epoch_days` to
+    the diurnal density law, or the plane and the bulge disagree about where the Sun is.
+
+    The inclination is `sun_synchronous_inclination_deg` of the **seed** radius. The one-period mean
+    orbit sits a few km lower under J2 (as in `station_keeping_satellites`); `dRAAN/dt` scales as
+    `a^-7/2`, so the precession is ~0.4 % faster than the Sun's - 0.004 deg/day, i.e. ~9 s of LTAN over
+    10 days - and a station-kept orbit oscillating in a 2.5 km band moves it by less. Both are far below
+    the diurnal table's 30 min spacing, so the plane is sun-locked for any horizon this engine runs.
+    """
+    from .geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
+    from .solar_ephemeris import sun_mean_longitude_deg
+
+    if not ltan_hours:
+        raise ValueError("ltan_hours must name at least one satellite")
+    a = EARTH_R_EQ + float(altitude_km)
+    inclination = math.radians(sun_synchronous_inclination_deg(a))
+    sun_lon = float(sun_mean_longitude_deg(float(epoch_days)))
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+
+    names = [sso_satellite_name(k) for k in range(len(ltan_hours))]
+    for name, ltan in zip(names, ltan_hours):
+        raan = math.radians((sun_lon + 15.0 * (float(ltan) - 12.0)) % 360.0)
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=VESSEL_FUEL_MASS, drag_area=4.0,
+            p=a, e=0.0, i=inclination, raan=raan, arg_pe=0.0, theta=0.0,
         ))
     session.commit()
 

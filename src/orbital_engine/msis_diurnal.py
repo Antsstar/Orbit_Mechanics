@@ -45,24 +45,26 @@ What is frozen, and what is not
   the date); the table is built for the UT day containing `epoch_days` and used for the whole run. The
   Sun's declination, the semi-annual variation and the annual asymmetry therefore stay at that day.
   Their drift is a stated error, measured from MSIS itself in `tests/validation/test_msis_diurnal.py`:
-  **at the 2024 March equinox the global mean at 400 km moves by +3.9 % over 10 days** (the semi-annual
-  maximum is in April), so a 10-day run averages ~2 % low of a season-following model; near a
-  semi-annual extremum it is well under 1 %.
+  **from the 2024 March equinox the global mean moves by +0.8 / +1.4 / +1.9 % over 10 days at
+  300 / 400 / 500 km** (+0.6 / +0.9 / +1.2 % over 5; the semi-annual maximum is in April), so a 10-day
+  run at 400 km reads ~0.7 % low on average against a season-following model. The epoch's day itself
+  is **1.15 / 1.19 / 1.21x** the annual-mean profile of `DENSITY_MODEL_MSIS` at those heights - the
+  season is not a small term in a comparison between the two laws, and is reported separately.
 - **Local time is not frozen.** It is computed at every kernel call from the satellite's own position
   and the kernel's `t`: `s = 12 h + (alpha_sat - L(t)) / 15`, with `L` the Sun's mean longitude at
   `epoch_days + t / 86400` (`solar_ephemeris.local_solar_time_hours`) - so it follows both the
   satellite round its orbit and the Sun's ~1 deg/day motion. RK4 hands each stage its own time
   (`tests/validation/test_tesseral.py` proves that contract), and this law reads it.
 - **Why `L` and not the Sun's right ascension.** MSIS's own local time is `UT + lon / 15` - mean solar
-  time. `solar_ephemeris.py` shows `12 h + (alpha_sat - L) / 15` is that same quantity to 0.24 s; the
+  time. `solar_ephemeris.py` shows `12 h + (alpha_sat - L) / 15` is that same quantity to 0.15 s; the
   apparent-sun version differs by the equation of time (-14.2 to +16.4 min), which at the steepest point
   of the bulge is ~3 % of density. This is a deliberate deviation from "LST = 12 h + (alpha_sat -
   alpha_sun)", made because the table is indexed by MSIS's local time and a faithful wrap must look it
   up with the same definition.
 - **Latitude is the geocentric declination** `asin(z / |r|)`; MSIS takes geodetic latitude. The two
   differ by `f sin 2 phi`, at most 0.19 deg at 45 deg, against a largest latitude gradient of
-  `d ln rho / d phi` ~ 1.3 %/deg in the table (400 km): <= **0.25 %** locally, and odd in latitude over
-  an orbit. **Altitude** is `drag.py`'s spherical `|r| - r_ref`, common to every density law (see
+  `d ln rho / d phi` of 1.1 %/deg in the table (400 km, 0.45 %/deg rms; 1.3 %/deg at 500 km): <=
+  **0.2 %** locally, and odd in latitude over an orbit. **Altitude** is `drag.py`'s spherical `|r| - r_ref`, common to every density law (see
   `drag.py`), not MSIS's geodetic height.
 - **No Earth rotation angle is needed.** Local solar time is inertial geometry, and the zonal mean has
   no longitude left in it.

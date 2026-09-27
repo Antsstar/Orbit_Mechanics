@@ -55,7 +55,7 @@ reason is the model it feeds: NRLMSIS takes UT and longitude and forms its local
 `UT + lon / 15`, which is mean solar time at that longitude. The two agree exactly once one uses
 `GMST = L + 15 deg (UT - 12 h)`: IAU 1982 `GMST = 280.46061837 + 360.98564736629 n` against
 `L = 280.460 + 0.9856474 n` differ by `360 n + 0.0006 deg - 3.4e-8 deg n`, i.e. by `15 UT - 180 deg`
-to 0.001 deg (0.24 s) over this century. The apparent time differs from that by the equation of time,
+to 0.0006 deg (0.15 s of time) over 2000-2050. The apparent time differs from that by the equation of time,
 -14.2 to +16.4 min, which would move every density lookup by up to 4 deg of local time.
 """
 from __future__ import annotations
