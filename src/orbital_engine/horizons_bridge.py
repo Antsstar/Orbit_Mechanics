@@ -13,7 +13,14 @@ network: `fetch` is the one function here that imports `urllib`, it imports it l
 and no stateful third-party object lives inside a step. Horizons is the ephemeris; this module turns
 its output into `(n,)` / `(n, 3)` float64 arrays once, at ingest. Interpolating those arrays inside a
 force model is a separate module's job (`ephemeris.py`), which consumes `t_s`, `position_km` and
-`velocity_km_s` directly - there is deliberately no interpolation object here.
+`velocity_km_s` directly - there is deliberately no interpolation object here. The hand-off:
+
+    moon = load_cached("moon")
+    EphemerisTable("Moon", moon.t_s - offset_s, moon.position_km, moon.velocity_km_s, centre="Earth")
+
+with `centre="Earth"` because every committed table is Earth-centred, and `offset_s =
+artemis2.tdb_seconds(epoch)` when the arena's `sim.t = 0` is a seed epoch other than the tables'
+`epoch_tdb` (`scenarios.artemis2` seeds at 2026-04-03T01:00 TDB, `offset_s` = 82,800 s).
 
 **Reference.** Giorgini, J. D. et al., *JPL's On-Line Solar System Data Service*, BAAS 28(3), 1158
 (1996); the Horizons API is documented at https://ssd-api.jpl.nasa.gov/doc/horizons.html and the

@@ -1181,7 +1181,9 @@ def artemis2(
     itself, so the seed is bit-identical to the data rather than a `coe_to_rv` round trip of it.
 
     **Clock.** `sim.t = 0` is `epoch_tdb`; the tables' `t_s` count from `artemis2.EPOCH_TDB`, so a
-    table time maps to sim time as `t_s - artemis2.tdb_seconds(epoch_tdb)`. `start_epoch` is set to
+    table time maps to sim time as `t_s - artemis2.tdb_seconds(epoch_tdb)` - which is what to hand the
+    ephemeris force model: `EphemerisTable("Moon", moon.t_s - offset, moon.position_km,
+    moon.velocity_km_s, centre="Earth")`, the tables being Earth-centred. `start_epoch` is set to
     the epoch as a naive `datetime` **on the TDB scale**. **Frame:** ICRF, whose +z is 0.147 deg from
     the true pole in 2026; the J2 here assumes +z (cost: `artemis2.pole_misalignment_cost`). The Moon
     and Sun are not bodies here - their ephemeris force model is a separate module's.

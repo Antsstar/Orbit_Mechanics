@@ -1546,7 +1546,9 @@ objects inside a step. Horizons *is* the ephemeris; the bridge parses its text o
 `HorizonsVectors(target, center, frame, time_scale, epoch_tdb, jd_tdb, t_s, position_km,
 velocity_km_s, header)` and stores it as `.npz`. There is no interpolation object here: the ephemeris
 force model (`ephemeris.py`, a separate module) consumes `t_s` / `position_km` / `velocity_km_s`
-directly. The **network** is touched only by `horizons_bridge.fetch`, called only by
+directly, as `EphemerisTable(name, t_s - offset, position_km, velocity_km_s, centre="Earth")` - every
+committed table is Earth-centred, and `offset = artemis2.tdb_seconds(seed epoch)` moves the tables'
+clock onto the arena's (82,800 s for `scenarios.artemis2`'s default). The **network** is touched only by `horizons_bridge.fetch`, called only by
 `scripts/fetch_artemis2.py`; `urllib` is imported inside `fetch`, and the tests run the loaders in a
 subprocess with sockets disabled.
 
