@@ -1644,6 +1644,103 @@ finite-burn reconstruction (the interpolant's ringing makes onset and cutoff unr
 
 ---
 
+## Artemis II replay: four tiers against NASA's navigation
+
+`artemis2_replay.py` flies Orion from NASA's own state through the burns NASA flew, under four model
+tiers, scores each against NASA's trajectory, and writes the dashboard's data contract
+(`demo/artemis2/SCHEMA.md`); `scripts/build_artemis2_demo.py` is the driver (~3 min). It is the
+comparison the engine was built for, on a real crewed trajectory.
+
+**Tiers** (data, `TIERS`): Earth point mass; + J2 (about ICRF +z); + the Moon (DE441 through
+`ephemeris.py`, every RK4 stage at its own time); + the Sun the same way. Truth is Horizons -1024. All
+start from NASA's state at 2026-04-03 01:00 TDB (`scenarios.artemis2`'s default: the TLI cluster and
+the 00:06 file join are over, and the per-minute coast residual is at the coast model's 0.03 mm/s
+floor), **bit-identical**. Each is flown on the tables' own 1-min grid - so the truth is compared at
+its samples, never interpolated - sub-stepped to 0.01 rad of turning about Earth or the Moon.
+
+**Burns.** `burns.csv`'s `kind == "burn"` rows after the seed, by `schedule_delta_v` (exact epochs), in
+RSW about Earth of the tier's own state with the components measured about NASA's. For a tier within a
+few km of NASA the two frames agree to 1e-5 rad; for one thousands of km off neither is meaningful.
+
+**The 5 April solution switch - found here, not in the event list.** NASA's data fly two families of
+navigation solutions ~1.8 m/s apart: `od011v1` (to 04-05 02:45 TDB) and the first part of
+`Orion_OEM_20260406_1028` (04:35-14:48) on one; the `Orion_OEM_20260405_1125` file (02:45-04:35) and
+everything after 15:10 - the flyby and the return - on the other. Coasting either family across the gap
+shows the second is the first plus **one impulse of 1.88 m/s at ~01:24 UTC** (end-to-end closure 1.1 km,
+impulsive; RSW `(0.27, -1.50, -1.10)` m/s), at the epoch where `od011v1` itself models only 0.164 m/s
+(plus 0.120 at 01:40). `burns.csv` sees the switch as three discontinuities (02:43, 04:19, and the
+14:46-15:16 one, with 86 km of closure and interpolant swings to 1.9 km/s). Its cause is not in the
+event list; NASA's flight-day-4 blog mentions wastewater venting and an attitude change to point the
+vent at the Sun, but nothing here shows that is it. `replay_burns` replaces the modelled pair with the
+reconstructed impulse by default; without it the best tier is **356 km off at the flyby instead of 46,
+18,700 km at the data end instead of 1,450, and misses entry**.
+
+**Two views.** *Replay* (`position_error_km`): one flight per tier, everything applied, the truth's
+artefacts included. *Per arc* (`arc_error_km`): re-seeded from NASA's clean state after every cluster in
+`burns.csv` - burns **and** data discontinuities - and flown to the next, so each of the 26 arcs sits
+inside one self-consistent solution and measures only the model.
+
+**Definitions.** Closest approach from the Moon's centre, shown as altitude over 1,737.4 km;
+farthest distance from Earth's **centre** (the event list's 413,146.2 km - NASA's public 406,771 km is
+from the surface); entry interface 121.92 km above WGS-84 (altitude at the geocentric latitude about the
+true pole, < 1 m from geodetic at 122 km). DSN contact: elevation > 10 deg (the 70-m transmit limit,
+DSN 810-005 module 301; mechanical ~6 deg) at DSS-14/63/43 (same module, Table 5, WGS-84) **and** the
+Moon not in the line of sight. `geometry.elevation_azimuth` rotates about +z, so positions go through a
+fixed rotation to a true-pole frame, with `theta0 + omega t` fitted to Horizons' `earth_sites.npz`
+(residual 2e-8 rad; stations reproduced to 20 m; `theta0` 219.8117 deg at `EPOCH_TDB`, the ingest's
+219.8118). The station's **geodetic** latitude is passed as `geometry`'s latitude, so its horizon is the
+geodetic one the mask is defined against; the station moves <= 21 km, 0.003 deg as seen from the Moon.
+Lunar blackout: the Moon's sphere blocks Orion -> Earth's centre.
+
+**Results** (`python scripts/build_artemis2_demo.py`; estimates were in the module docstring first):
+
+| tier | error at CA | CA altitude (NASA 6,545) | CA time vs 23:01 UTC | error at data end | back at Earth | arcs, median / max |
+|---|---|---|---|---|---|---|
+| Earth only | 16,093 km | 11,638 km | +213 min | 438,878 km | perigee 382 km, 15 Apr 16:25 | 26 km / 33,600 km |
+| Earth + bulge | 16,129 km | 11,545 km | +214 min | 438,482 km | perigee 379 km, 15 Apr 16:10 | 28 km / 33,600 km |
+| Earth + Moon | 1,045 km | 6,765 km | +11.6 min | 25,656 km | no entry before the tables end | 1.8 km / 40.6 km |
+| Earth + Moon + Sun | **46 km** | **6,557 km** | **-0.8 min** | 1,454 km | **EI 23:54:46 UTC, +1.8 min** | **0.015 km / 2.65 km** |
+
+Against the estimates: Earth-only's closest approach (11,638 km; estimated ~11,700 from the impact
+parameter 13,450 km) and end error (4.4e5 km, near its 452,900 km apogee) are as derived, its error at
+the flyby at the top of the 5,000-16,000 km range. Its return perigee is 382 km, not TLI's 196 km: the
+estimate ignored the RTC and crew-module burns, which at apogee speed (~0.3 km/s) move perigee by
+hundreds of km - a correction to the estimate, not a miss. J2 moves Earth-only by tens of km, as
+estimated (40 km of open-loop drift by the flyby). Earth + Moon is 1,045 km off at the flyby against an
+open-loop 750 km (the feedback the estimate omits, 1.4x) and 25,700 km at the end against ~1e4 (the
+flyby's lens, 6e-5 rad/km, acting on a ~1,000 km B-plane shift rather than the few hundred assumed).
+The best tier's 46 km at the flyby is the data's 1.9 m/s switch reconstructed to ~0.06 m/s plus the
+22:34 / 00:03 file joins; its 1,454 km at the last sample is along-track - 1.8 min at 10 km/s, the
+flyby having amplified ~45 km into ~1 m/s. Per arc it is the ingest's coast model, as it should be:
+**0.035 km over the 14 h first arc** (the ingest's 0.5 km was from 00:06, through perigee), **2.65 km
+through the flyby arc** (ingest 2.6 km; no lunar harmonics), median 15 m. Halving the step moves the
+flyby arc by 1.3e-9 km and the full replay by 3.3e-4 km at the flyby, 0.05 km at entry.
+
+**NASA's own trajectory**: closest approach 8,281.94 km from the centre (6,544.5 km altitude) at
+23:00:46 UTC; lunar blackout **22:41:43-23:21:35 UTC, 39.9 min**, against NASA's reported LOS 22:44 /
+AOS 23:24 UTC, "about 40 minutes" (NASA flight-day-6 blog): the duration agrees, both edges ~2.3 min
+earlier - NASA's minute-rounded times of signal loss and reacquisition at a station against a geometric
+occultation of Earth's centre, whose edge moves by up to ~1.6 min across Earth's disc. The best tier
+predicts 39.9 min from 22:41 UTC; Earth + Moon 40.5 min, 12 min late; the Earth-only tiers never pass
+behind the Moon at the flyby (they do, for an hour, on 7 April, far beyond it).
+**DSN**: each site recurs every ~24 h (Goldstone and Madrid 5-7 h passes, Canberra 11-13 h: Orion sat at
+-25 to -30 deg declination). At 10 deg there are two gaps a day of ~1 h (Goldstone -> Canberra near
+00 UTC, Madrid -> Goldstone near 07 UTC); at the 6 deg mechanical limit they shrink to <= 30 min
+mid-mission. The real network also used other antennas; this is the three 70-m dishes only.
+
+**Truth artefacts.** 13 file joins (up to ~12 km) and the 5 April switch are marked in `events.csv` as
+`navigation_data_jump` milestones (closure > 5 km, 7 after the seed), listed in `meta.json`'s notes, and
+left in `position_error_km` as steps. Interpolant ringing around burns (TLI +-6 m/s^2) sits inside
+clusters, which the arcs skip.
+
+**Deliberately not done.** No re-targeting of burns (the tiers fly NASA's burns, not their own
+corrections - that is the point of the comparison); no SRP (~1e-11 km/s^2, ~3 km over 8 days); no lunar
+harmonics; J2 about +z (0.70 km over the first post-TLI hours, metres here). Earth's GM is
+`scenarios.MU_EARTH`, 1.6e-8 from DE440's (3 m over the first arc against `artemis2.coast`, which uses
+DE440's).
+
+---
+
 ## Higher zonals: J3..J6 as a second model, not a wider first one
 
 `zonal.py` registers `"zonal"`: the J3..J6 perturbation of the Keplerian parent, per-body coefficients
