@@ -1227,7 +1227,7 @@ def artemis2(
         system_names=["Earth System"],
         session=session,
         max_capacity=capacity if capacity is not None else 10,
-        start_epoch=datetime.fromisoformat(str(np.datetime_as_string(np.datetime64(when, "us"), unit="us"))),
+        start_epoch=datetime.fromisoformat(str(np.datetime_as_string(np.asarray(when, dtype="datetime64[us]"), unit="us"))),
     )
     idx = np.array([sim.name_to_index[ORION_NAME]], dtype=np.int64)
     sim.set_propagator(idx, PropagatorType.COWELL)

@@ -60,7 +60,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Final, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Final, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -189,13 +189,13 @@ def load(name: str) -> hb.HorizonsVectors:
 
 def tdb_seconds(when_tdb: Union[str, np.datetime64]) -> float:
     """Seconds from `EPOCH_TDB` to the TDB instant `when_tdb`."""
-    ns = (np.datetime64(when_tdb, "ns") - np.datetime64(EPOCH_TDB, "ns")).astype(np.int64)
+    ns = (hb.as_ns(when_tdb) - hb.as_ns(EPOCH_TDB)).astype(np.int64)
     return float(ns) / 1e9
 
 
 def tdb_instant(t_s: float) -> np.datetime64:
     """The TDB instant `t_s` seconds after `EPOCH_TDB` (to the nanosecond)."""
-    return np.datetime64(EPOCH_TDB, "ns") + np.timedelta64(int(round(t_s * 1e9)), "ns")
+    return hb.as_ns(EPOCH_TDB) + np.timedelta64(int(round(t_s * 1e9)), "ns")
 
 
 def _utc_of_tdb(t_s: float) -> np.datetime64:
@@ -307,7 +307,7 @@ def parse_major_events(text: str, *, year: int = 2026) -> List[MissionEvent]:
         dur_ms = re.search(r"\((\d+)m\s*(\d+)s\)", desc)
         duration = float(dur.group(1)) if dur else (
             60.0 * float(dur_ms.group(1)) + float(dur_ms.group(2)) if dur_ms else math.nan)
-        when_utc = np.datetime64(utc, "ns")
+        when_utc = hb.as_ns(utc)
         when_tdb = hb.utc_to_tdb(when_utc)
         events.append(MissionEvent(
             name=re.sub(r"\s+", " ", desc), met=met, utc=when_utc, tdb=when_tdb,
@@ -322,7 +322,7 @@ def load_events() -> List[MissionEvent]:
     return parse_major_events((DATA_DIR / "orion_object_data.txt").read_text(encoding="utf-8"))
 
 
-def _iso(when: np.datetime64, unit: str = "ms") -> str:
+def _iso(when: np.datetime64, unit: Literal["s", "ms", "ns"] = "ms") -> str:
     return str(np.datetime_as_string(when, unit=unit))
 
 

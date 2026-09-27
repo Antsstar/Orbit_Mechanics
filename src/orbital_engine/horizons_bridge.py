@@ -53,7 +53,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Final, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Final, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -65,7 +65,7 @@ __all__ = [
     "HorizonsVectors", "HorizonsError",
     "parse_vectors", "format_vectors_csv", "save_npz", "load_npz", "load_cached", "cached_path",
     "build_query", "fetch", "stack_times",
-    "parse_calendar_tdb", "julian_date", "utc_to_tdb", "tdb_minus_tt_s", "tdb_minus_utc_s",
+    "as_ns", "parse_calendar_tdb", "julian_date", "utc_to_tdb", "tdb_minus_tt_s", "tdb_minus_utc_s",
 ]
 
 HORIZONS_API_URL: Final[str] = "https://ssd.jpl.nasa.gov/api/horizons.api"
@@ -134,7 +134,7 @@ class HorizonsVectors:
     @property
     def epoch(self) -> np.datetime64:
         """`epoch_tdb` as a `datetime64[ns]` (the value is a TDB instant)."""
-        return np.datetime64(self.epoch_tdb, "ns")
+        return as_ns(self.epoch_tdb)
 
     @property
     def state(self) -> ArrayFloat:
@@ -144,7 +144,7 @@ class HorizonsVectors:
 
     def at_tdb(self, when: Union[str, np.datetime64]) -> int:
         """Index of the sample exactly at TDB instant `when`; `KeyError` if none."""
-        target_ns = (np.datetime64(when, "ns") - self.epoch).astype(np.int64)
+        target_ns = (as_ns(when) - self.epoch).astype(np.int64)
         hit = np.flatnonzero(np.round(self.t_s * 1e9).astype(np.int64) == int(target_ns))
         if hit.size == 0:
             raise KeyError(f"no sample at {when} TDB")
@@ -154,6 +154,11 @@ class HorizonsVectors:
 # --------------------------------------------------------------------------------------------------
 # Time
 # --------------------------------------------------------------------------------------------------
+
+def as_ns(when: Union[str, np.datetime64]) -> np.datetime64:
+    """`when` (an ISO-8601 string or a `datetime64`) as a `datetime64[ns]`; the scale is the caller's."""
+    return cast(np.datetime64, np.asarray(when, dtype="datetime64[ns]")[()])
+
 
 def parse_calendar_tdb(text: str) -> np.datetime64:
     """`"A.D. 2026-Apr-02 01:59:00.0000"` -> `datetime64[ns]`, exact (the scale is the caller's)."""
@@ -171,7 +176,7 @@ def parse_calendar_tdb(text: str) -> np.datetime64:
 
 def julian_date(when: Union[str, np.datetime64]) -> float:
     """Julian date of `when`, on the same scale as `when` (JD 2451545.0 = 2000-01-01T12:00)."""
-    ns = (np.datetime64(when, "ns") - _J2000_INSTANT).astype(np.int64)
+    ns = (as_ns(when) - _J2000_INSTANT).astype(np.int64)
     return _J2000_JD + float(ns) / (SECONDS_PER_DAY * _NS_PER_S)
 
 
@@ -184,7 +189,7 @@ def tdb_minus_tt_s(jd_tt: Union[float, ArrayFloat]) -> ArrayFloat:
 
 def tdb_minus_utc_s(utc: Union[str, np.datetime64]) -> float:
     """`TDB - UTC` in seconds at UTC instant `utc` (2017-01-01 onward; see `TT_MINUS_UTC_S`)."""
-    when = np.datetime64(utc, "ns")
+    when = as_ns(utc)
     if when < np.datetime64("2017-01-01T00:00:00", "ns"):
         raise ValueError("TT_MINUS_UTC_S = 69.184 s holds from 2017-01-01; earlier epochs need the leap-second table")
     jd_tt = julian_date(when) + TT_MINUS_UTC_S / SECONDS_PER_DAY
@@ -193,7 +198,7 @@ def tdb_minus_utc_s(utc: Union[str, np.datetime64]) -> float:
 
 def utc_to_tdb(utc: Union[str, np.datetime64]) -> np.datetime64:
     """The TDB instant (as `datetime64[ns]`) of UTC instant `utc`, to the nanosecond of the series."""
-    when = np.datetime64(utc, "ns")
+    when = as_ns(utc)
     return when + np.timedelta64(int(round(tdb_minus_utc_s(when) * 1e9)), "ns")
 
 
@@ -274,7 +279,7 @@ def parse_vectors(text: str, *, epoch_tdb: Optional[Union[str, np.datetime64]] =
         raise HorizonsError("empty $$SOE/$$EOE block")
 
     instants = np.array(when, dtype="datetime64[ns]")
-    epoch = np.datetime64(epoch_tdb, "ns") if epoch_tdb is not None else instants[0]
+    epoch = as_ns(epoch_tdb) if epoch_tdb is not None else instants[0]
     t_s: ArrayFloat = np.asarray((instants - epoch).astype(np.int64), dtype=np.float64) / 1e9
     jd_arr: ArrayFloat = np.asarray(jd, dtype=np.float64)
     from_cal = np.array([julian_date(w) for w in instants], dtype=np.float64)
