@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
-from orbital_engine import drag, geopotential, gravity, kernels, scenarios, zonal
+from orbital_engine import drag, geopotential, gravity, kernels, scenarios, tesseral, zonal
 from orbital_engine.atmosphere import (
     BASE_ALTITUDE_KM, DENSITY_MODEL_EXPONENTIAL, DENSITY_MODEL_LAYERED,
 )
@@ -469,42 +469,49 @@ def _build_cowell_two_body(session: Session, **kwargs: float) -> tuple[Simulatio
 
 
 def _run_cowell_reference(
-    sim: Simulation, idx: np.ndarray, dt: float, steps: int,
+    sim: Simulation, idx: np.ndarray, dt: float, steps: int, t0: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The definition: `RK4Integrator` against `Simulation.accelerations`, then the subtraction
-    `Simulation.step` applies to recover the parent-relative result."""
+    `Simulation.step` applies to recover the parent-relative result. Step `k` starts at `t0 + k dt`,
+    accumulated by the same additions as `_run_cowell_kernel`'s clock (only `"tesseral"` reads it)."""
     integrator = RK4Integrator(sim.max_capacity)
     primaries = sim.parent_indices[idx]
     rel = np.zeros((idx.size, 6))
+    t = float(t0)
     for _ in range(steps):
         parent_start = sim.global_states[primaries].copy()
-        integrator.step(sim.accelerations, sim.t, sim.global_states, dt, idx, primaries)
+        integrator.step(sim.accelerations, t, sim.global_states, dt, idx, primaries)
         rel = sim.global_states[idx] - parent_start
+        t += dt
     return sim.global_states[idx].copy(), rel
 
 
 def _fused_plan_args(sim: Simulation) -> tuple[object, ...]:
-    """The per-body flags, coefficient arrays and density tables `Simulation._refresh_cowell_plan`
-    built, in `kernels.cowell_rk4_step`'s argument order (between `indices` and `rel_out`)."""
+    """The per-body flags, coefficient arrays, density tables and tesseral scratch
+    `Simulation._refresh_cowell_plan` built, in `kernels.cowell_rk4_step`'s argument order (between
+    `indices` and `rel_out`)."""
     tables = sim._cowell_drag_tables
     return (
         sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
         sim._cowell_has_zonal, sim._cowell_zonal_params,
         sim._cowell_has_drag, sim._cowell_drag_params, sim._cowell_drag_table_of,
         tables.tables, tables.meta,
+        sim._cowell_has_tesseral, sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
     )
 
 
 def _run_cowell_kernel(
-    sim: Simulation, idx: np.ndarray, dt: float, steps: int,
+    sim: Simulation, idx: np.ndarray, dt: float, steps: int, t0: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     rel_out = np.zeros((sim.max_capacity, 6), dtype=np.float64)
+    t = float(t0)
     for _ in range(steps):
         stale = kernels.cowell_rk4_step(
-            dt, sim.global_states, sim.mu_array, sim.parent_indices, idx, *_fused_plan_args(sim),
+            dt, t, sim.global_states, sim.mu_array, sim.parent_indices, idx, *_fused_plan_args(sim),
             rel_out,
         )
         assert stale == -1, f"the fused kernel reported a stale MSIS plan for slot {stale}"
+        t += dt
     return sim.global_states[idx].copy(), rel_out[idx].copy()
 
 
@@ -790,6 +797,8 @@ def _fused_accel(
     field-level twin both the zonal and the drag comparisons below call. `drag_row` is one row of
     `force_model_params["drag"]`, decoded exactly as `cowell_rk4_step` decodes it."""
     zp = np.zeros((1, len(zonal.ZONAL_PARAM_NAMES))) if zonal_params is None else zonal_params
+    tp = np.zeros((1, len(tesseral.TESSERAL_PARAM_NAMES)))
+    vw = np.zeros((2, kernels.TESSERAL_VW_SIZE, kernels.TESSERAL_VW_SIZE))
     has_drag = drag_row is not None
     d = np.zeros(len(drag.DRAG_PARAM_NAMES)) if drag_row is None else drag_row
     law = kernels._drag_law(float(d[drag.DENSITY_MODEL_COL]))
@@ -799,7 +808,8 @@ def _fused_accel(
         False, False, 0.0, 0.0,
         has_drag, law, float(d[0]), float(d[1]), float(d[2]), float(d[3]), float(d[4]), float(d[5]),
         table, tables.tables, int(tables.n_nodes[table]),
-        has_zonal, zp, row)
+        has_zonal, zp, row,
+        False, tp, 0.0, vw)
 
 
 def _zonal_field_points() -> np.ndarray:

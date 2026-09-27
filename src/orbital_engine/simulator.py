@@ -13,8 +13,8 @@ from .propagators import (
     Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates, mean_seeded_p,
 )
 from .kernels import (
-    NUMBA_AVAILABLE, calc_global_states, cowell_rk4_step, kepler_propagate, rebase_relative_states,
-    secular_j2_propagate,
+    NUMBA_AVAILABLE, TESSERAL_VW_SIZE, calc_global_states, cowell_rk4_step, kepler_propagate,
+    rebase_relative_states, secular_j2_propagate,
 )
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
@@ -26,6 +26,7 @@ from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a
 from . import geopotential  # registers "j2"; also supplies barycentre_parented and J2_MODEL below
 from . import zonal  # registers "zonal"; ZONAL_MODEL is in the fused Cowell plan below
 from . import drag  # registers "drag"; DRAG_MODEL and its density tables are in the fused plan below
+from . import tesseral  # registers "tesseral"; TESSERAL_MODEL is in the fused Cowell plan below
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
@@ -219,8 +220,8 @@ class Simulation:
 
         # Cowell dispatch plan, rebuilt by `_refresh_cowell_plan` from both `_refresh_active_indices`
         # (the Cowell set changed) and `resolve_force_models` (the enabled models changed). The
-        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2`, `drag` and
-        # `zonal` only, so `_cowell_fused_ok` records whether the current masks let `step()` use it;
+        # compiled twin `kernels.cowell_rk4_step` is fused for `point_mass_gravity`, `j2`, `drag`,
+        # `zonal` and `tesseral` only, so `_cowell_fused_ok` records whether the current masks let `step()` use it;
         # any other model on a Cowell body sends the whole Cowell set down the NumPy `RK4Integrator`
         # path.
         # `_cowell_rel` is the per-step parent-relative result both paths hand to the re-base in
@@ -245,6 +246,12 @@ class Simulation:
         # triple a Cowell body uses) and each slot's MSIS row, -1 where it has none.
         self._cowell_drag_table_of = np.full(max_capacity, -1, dtype=np.int64)
         self._cowell_drag_tables, _ = drag.density_tables(np.empty((0, 3)))
+        self._cowell_has_tesseral = np.zeros(max_capacity, dtype=np.bool_)
+        self._no_tesseral_params = np.zeros((1, len(tesseral.TESSERAL_PARAM_NAMES)), dtype=np.float64)
+        self._cowell_tesseral_params: NDArray[np.float64] = self._no_tesseral_params
+        # The tesseral term's V/W recursion table, filled per evaluation by the kernel: fixed-size
+        # scratch, arena-owned so the compiled step allocates nothing.
+        self._cowell_tesseral_vw = np.zeros((2, TESSERAL_VW_SIZE, TESSERAL_VW_SIZE), dtype=np.float64)
         self._cowell_fused_ok: bool = False
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
@@ -444,11 +451,11 @@ class Simulation:
         Decide, from data, whether `step()` may run the Cowell set through the fused compiled kernel.
 
         `kernels.cowell_rk4_step` hard-codes `point_mass_gravity`, `j2`, `drag` (all three density
-        laws) and `zonal` (J3..J6) - numba cannot dispatch over the Python kernel list
+        laws), `zonal` (J3..J6) and `tesseral` (orders m >= 1 of degrees 2..4) - numba cannot dispatch over the Python kernel list
         `forces.compose_accelerations` walks - with per-body flags so a mixed arena - some Cowell
         bodies with J2, some with J2..J6 or drag, some with neither - still qualifies. Three conditions
         disqualify the whole set, and the fallback is then the NumPy path for every Cowell body, not a
-        per-body split: any Cowell body carrying a bit outside those four models (`srp`,
+        per-body split: any Cowell body carrying a bit outside those five models (`srp`,
         `third_body`, `thrust`, the test fixtures); any Cowell body whose parent is itself Cowell (the
         kernel reads a parent's row as fixed across the four stages; `RK4Integrator` would see the
         parent's stage candidates instead); and an MSIS drag row whose `(f107, f107a, ap)` profile was
@@ -464,10 +471,10 @@ class Simulation:
         Cached here, at configuration time, for the same reason `_force_dispatch_idx` is: the step
         must not pay a NumPy reduction over the mask to discover a configuration that only changes
         when `set_propagator`, `enable_force_model` or `resolve_force_models` is called. The
-        `"j2"`, `"zonal"` and `"drag"` coefficient arrays are bound here too, since
+        `"j2"`, `"zonal"`, `"drag"` and `"tesseral"` coefficient arrays are bound here too, since
         `forces.resolve_force_models` allocates them lazily; a one-row dummy stands in until each
         exists, and the kernel only reads a row behind that body's `has_j2` / `has_zonal` /
-        `has_drag` flag.
+        `has_drag` / `has_tesseral` flag.
         """
         idx = self._cowell_idx
         self._cowell_primaries = self.parent_indices[idx]
@@ -480,8 +487,10 @@ class Simulation:
         np.not_equal(self.force_model_mask & j2_bit, np.uint64(0), out=self._cowell_has_j2)
         np.not_equal(self.force_model_mask & zonal_bit, np.uint64(0), out=self._cowell_has_zonal)
         np.not_equal(self.force_model_mask & drag_bit, np.uint64(0), out=self._cowell_has_drag)
+        tesseral_bit = np.uint64(1) << np.uint64(get_force_model(tesseral.TESSERAL_MODEL).bit)
+        np.not_equal(self.force_model_mask & tesseral_bit, np.uint64(0), out=self._cowell_has_tesseral)
 
-        fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit
+        fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit | tesseral_bit
         foreign = (self.force_model_mask[idx] & ~fused_bits) != np.uint64(0)
         parent_is_cowell = np.isin(self._cowell_primaries, idx)
         self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
@@ -492,6 +501,8 @@ class Simulation:
         self._cowell_zonal_params = self._no_zonal_params if zonal_params is None else zonal_params
         drag_params = self.force_model_params.get(drag.DRAG_MODEL)
         self._cowell_drag_params = self._no_drag_params if drag_params is None else drag_params
+        tesseral_params = self.force_model_params.get(tesseral.TESSERAL_MODEL)
+        self._cowell_tesseral_params = self._no_tesseral_params if tesseral_params is None else tesseral_params
 
         # The MSIS rows among the Cowell drag bodies, by `drag_kernel`'s own threshold (`>= 1.5`).
         self._cowell_drag_table_of.fill(-1)
@@ -1718,14 +1729,23 @@ class Simulation:
         return dv
 
     def _cowell_compiled_step(self, dt: ScalarSeconds) -> int:
-        """One call of the fused `kernels.cowell_rk4_step` on the current plan; its return value."""
+        """
+        One call of the fused `kernels.cowell_rk4_step` on the current plan; its return value.
+
+        The step starts at `self.t` - the same `t` the reference path hands `RK4Integrator.step` - which
+        `_advance` only moves after propagating, so a manoeuvre or event sub-step starts at its own
+        clock. The kernel forms the stage times from it exactly as the integrator does.
+        """
         tables = self._cowell_drag_tables
         return int(cowell_rk4_step(
-            float(dt), self.global_states, self.mu_array, self.parent_indices, self._cowell_idx,
+            float(dt), float(self.t), self.global_states, self.mu_array, self.parent_indices,
+            self._cowell_idx,
             self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
             self._cowell_has_zonal, self._cowell_zonal_params,
             self._cowell_has_drag, self._cowell_drag_params, self._cowell_drag_table_of,
-            tables.tables, tables.meta, self._cowell_rel,
+            tables.tables, tables.meta,
+            self._cowell_has_tesseral, self._cowell_tesseral_params, self._cowell_tesseral_vw,
+            self._cowell_rel,
         ))
 
     def _rebase(self, indices: NDArray[np.int64], rel: NDArray[np.float64]) -> None:

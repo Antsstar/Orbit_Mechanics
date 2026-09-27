@@ -41,7 +41,7 @@ __all__ = [
     "NUMBA_AVAILABLE", "kepler_propagate", "calc_global_states",
     "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate", "cowell_rk4_step",
     "rebase_relative_states", "DRAG_LAW_EXPONENTIAL", "DRAG_LAW_LAYERED", "DRAG_LAW_MSIS",
-    "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL",
+    "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL", "TESSERAL_VW_SIZE",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -435,7 +435,7 @@ def secular_j2_propagate(
 
 
 # ==================================================================================================
-# Cowell: RK4 with point-mass gravity, J2, drag and J3..J6, fused
+# Cowell: RK4 with point-mass gravity, J2, drag, J3..J6 and the 4x4 tesseral field, fused
 # ==================================================================================================
 
 # Highest zonal degree `zonal.zonal_kernel` evaluates (`zonal.ZONAL_DEGREES[-1]`). Restated rather than
@@ -669,6 +669,116 @@ def _zonal_term(
     return ax, ay, az
 
 
+# `tesseral.TESSERAL_PARAM_NAMES` column layout, restated like the zonal and drag layouts above:
+# `(r_eq, omega, theta0, c21, s21, c22, s22, ..., c44, s44)`, pair `j` of `tesseral.TESSERAL_PAIRS` -
+# (2,1) (2,2) (3,1) (3,2) (3,3) (4,1) (4,2) (4,3) (4,4) - with C in column 3 + 2j and S in 4 + 2j. The
+# pairs are generated below as `for n in 2..4: for m in 1..n`, which is that same order.
+_TESS_R_EQ_COL = 0
+_TESS_OMEGA_COL = 1
+_TESS_THETA0_COL = 2
+_TESS_FIRST_CS_COL = 3
+_TESS_MAX_DEGREE = 4
+# V/W are needed to degree and order `_TESS_MAX_DEGREE + 1`; the caller-owned scratch is
+# `(2, TESSERAL_VW_SIZE, TESSERAL_VW_SIZE)`, V in `[0]` and W in `[1]`, indexed `[n, m]`.
+TESSERAL_VW_SIZE = _TESS_MAX_DEGREE + 2
+
+
+@njit
+def _tesseral_angle(tesseral_params: NDArray[np.float64], row: int, t: float) -> tuple[float, float]:
+    """
+    `(cos theta, sin theta)` of the body-fixed prime meridian at time `t`, `theta = theta0 + omega * t`
+    - `tesseral.tesseral_kernel`'s own expression, `t` the absolute simulation time of the stage being
+    evaluated. Split from `_tesseral_term` so `cowell_rk4_step` evaluates it once for RK4's two
+    mid-step stages, which share the time `t + dt/2` and so the same angle bit for bit.
+    """
+    theta = tesseral_params[row, _TESS_THETA0_COL] + tesseral_params[row, _TESS_OMEGA_COL] * t
+    return math.cos(theta), math.sin(theta)
+
+
+@njit
+def _tesseral_term(
+    ax: float, ay: float, az: float,
+    px: float, py: float, pz: float,
+    cx: float, cy: float, cz: float,
+    mu_par: float, tesseral_params: NDArray[np.float64], row: int,
+    cos_t: float, sin_t: float, vw: NDArray[np.float64],
+) -> tuple[float, float, float]:
+    """
+    `(ax, ay, az)` plus the tesseral/sectoral acceleration of degrees 2..4, orders 1..n: equation (T) of
+    tesseral.py, `tesseral.tesseral_kernel` one scalar at a time - the rotation into the body frame by
+    `-theta`, the Cunningham V/W recursion to degree and order 5 in the same order with the same
+    integer factors, the nine pairs accumulated in `TESSERAL_PAIRS` order from 0.0, and the rotation back
+    by `+theta`. `(cos_t, sin_t)` is `_tesseral_angle` at this stage's own time.
+
+    `vw` is caller-owned `(2, 6, 6)` scratch the recursion fills (V then W); every entry it reads was
+    written earlier in the same call, so nothing needs clearing. Zero separation is not branched around:
+    `inv_r2 = 0` there, as in the reference's `np.divide(..., where=r2 > 0)`, which makes every V/W and
+    therefore the term exactly (signed) zero; likewise `r_eq <= 0` gives `mu / R^2 = 0`.
+    """
+    x = cx - px
+    y = cy - py
+    z = cz - pz
+    r_eq = tesseral_params[row, _TESS_R_EQ_COL]
+
+    # Inertial -> body-fixed: Rz(-theta).
+    xb = cos_t * x + sin_t * y
+    yb = -sin_t * x + cos_t * y
+    zb = z
+
+    r2 = xb * xb + yb * yb + zb * zb
+    inv_r2 = 0.0
+    if r2 > 0.0:
+        inv_r2 = 1.0 / r2
+    f = r_eq * inv_r2                                   # R / r^2
+    rr = r_eq * f                                       # R^2 / r^2
+
+    top = _TESS_MAX_DEGREE + 1
+    vw[0, 0, 0] = r_eq * math.sqrt(inv_r2)              # R / r
+    vw[1, 0, 0] = 0.0
+    for m in range(top + 1):
+        if m > 0:
+            vp = vw[0, m - 1, m - 1]
+            wp = vw[1, m - 1, m - 1]
+            vw[0, m, m] = (2 * m - 1) * (xb * f * vp - yb * f * wp)
+            vw[1, m, m] = (2 * m - 1) * (xb * f * wp + yb * f * vp)
+        if m + 1 <= top:
+            vw[0, m + 1, m] = (2 * m + 1) * zb * f * vw[0, m, m]
+            vw[1, m + 1, m] = (2 * m + 1) * zb * f * vw[1, m, m]
+        for n in range(m + 2, top + 1):
+            vw[0, n, m] = ((2 * n - 1) * zb * f * vw[0, n - 1, m]
+                           - (n + m - 1) * rr * vw[0, n - 2, m]) / (n - m)
+            vw[1, n, m] = ((2 * n - 1) * zb * f * vw[1, n - 1, m]
+                           - (n + m - 1) * rr * vw[1, n - 2, m]) / (n - m)
+
+    tx = 0.0
+    ty = 0.0
+    tz = 0.0
+    col = _TESS_FIRST_CS_COL
+    for n in range(2, _TESS_MAX_DEGREE + 1):
+        for m in range(1, n + 1):
+            c = tesseral_params[row, col]
+            s = tesseral_params[row, col + 1]
+            col += 2
+            fac = (n - m + 2) * (n - m + 1)
+            vu = vw[0, n + 1, m + 1]
+            wu = vw[1, n + 1, m + 1]
+            vd = vw[0, n + 1, m - 1]
+            wd = vw[1, n + 1, m - 1]
+            tx += 0.5 * ((-c * vu - s * wu) + fac * (c * vd + s * wd))
+            ty += 0.5 * ((-c * wu + s * vu) + fac * (-c * wd + s * vd))
+            tz += (n - m + 1) * (-c * vw[0, n + 1, m] - s * vw[1, n + 1, m])
+
+    inv_r_eq2 = 0.0
+    if r_eq > 0.0:
+        inv_r_eq2 = 1.0 / (r_eq * r_eq)
+    k = mu_par * inv_r_eq2                              # mu / R^2
+    # Body-fixed -> inertial: Rz(+theta).
+    ax += k * (cos_t * tx - sin_t * ty)
+    ay += k * (sin_t * tx + cos_t * ty)
+    az += k * tz
+    return ax, ay, az
+
+
 @njit
 def _cowell_accel(
     px: float, py: float, pz: float,
@@ -681,30 +791,37 @@ def _cowell_accel(
     drag_scale_height: float, drag_r_ref: float, drag_omega: float, drag_table: int,
     tables: NDArray[np.float64], n_nodes: int,
     has_zonal: bool, zonal_params: NDArray[np.float64], row: int,
+    has_tesseral: bool, tesseral_params: NDArray[np.float64], t: float, vw: NDArray[np.float64],
 ) -> tuple[float, float, float]:
     """
-    Acceleration on one body at candidate state `(cx, cy, cz, cvx, cvy, cvz)` with its parent at
-    `(px, py, pz, pvx, pvy, pvz)`: the sum `forces.compose_accelerations` would build from
-    `gravity.point_mass_gravity_kernel`, `geopotential.j2_kernel`, `drag.drag_kernel` and
-    `zonal.zonal_kernel`, with each term's arithmetic written in the same order as its NumPy reference
-    so the two agree to rounding. A disabled term contributes exactly `0.0`, as an absent model does.
+    Acceleration on one body at candidate state `(cx, cy, cz, cvx, cvy, cvz)` and time `t` with its
+    parent at `(px, py, pz, pvx, pvy, pvz)`: the sum `forces.compose_accelerations` would build from
+    `gravity.point_mass_gravity_kernel`, `geopotential.j2_kernel`, `drag.drag_kernel`,
+    `zonal.zonal_kernel` and `tesseral.tesseral_kernel`, with each term's arithmetic written in the same
+    order as its NumPy reference so the two agree to rounding. A disabled term contributes exactly
+    `0.0`, as an absent model does.
 
     **Composition order matters with several terms.** IEEE addition is commutative but not associative,
     so `(pm + j2) + zonal` and `pm + (j2 + zonal)` may differ in the last bit. The terms are added here
-    in registration order - `point_mass_gravity`, `j2`, `drag`, `zonal` (bits 0, 1, 2, 6) - which is
-    the order `forces.resolve_force_models` walks `registry.all_force_models()` and therefore the order
-    `compose_accelerations` accumulates them into `out`. Were the registration order ever different,
-    the two would differ by an ulp of the sum per evaluation, still far inside the 1e-12 bound.
+    in registration order - `point_mass_gravity`, `j2`, `drag`, `zonal`, `tesseral` (bits 0, 1, 2, 6,
+    7) - which is the order `forces.resolve_force_models` walks `registry.all_force_models()` and
+    therefore the order `compose_accelerations` accumulates them into `out`. Were the registration
+    order ever different, the two would differ by an ulp of the sum per evaluation, still far inside
+    the 1e-12 bound.
 
-    **This is the composition `cowell_rk4_step` performs**, stage by stage, from the same three pieces
-    in the same order - it calls them itself rather than this function only so that the density tables
-    and zonal row are never passed through a per-stage call for a body that does not use them (measured:
-    doing so tripled the per-body cost of the pm and j2 tiers). The field-level equivalence tests call
-    this function; `test_cowell_*` hold the step to the same reference.
+    **Time.** Only the tesseral term reads `t` (the field turns with its body). `cowell_rk4_step` hands
+    each stage its own time, `t`, `t + dt/2`, `t + dt/2`, `t + dt`, as `RK4Integrator` hands the
+    provider.
 
-    `zonal_params[row]` is read only behind `has_zonal`, and the drag table only behind `has_drag`, so
-    one-row dummies are safe when no body has those bits - the same convention as `j2_params` in
-    `cowell_rk4_step`.
+    **This is the composition `cowell_rk4_step` performs**, stage by stage, from the same pieces in the
+    same order - it calls them itself rather than this function only so that the density tables, zonal
+    row and tesseral row are never passed through a per-stage call for a body that does not use them
+    (measured: doing so tripled the per-body cost of the pm and j2 tiers). The field-level equivalence
+    tests call this function; `test_cowell_*` hold the step to the same reference.
+
+    `zonal_params[row]` is read only behind `has_zonal`, `tesseral_params[row]` and `vw` only behind
+    `has_tesseral`, and the drag table only behind `has_drag`, so one-row dummies are safe when no body
+    has those bits - the same convention as `j2_params` in `cowell_rk4_step`.
     """
     ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, has_point_mass, has_j2, j2, r_eq)
     if has_drag:
@@ -713,12 +830,17 @@ def _cowell_accel(
                                 drag_omega, drag_table, tables, n_nodes)
     if has_zonal:
         ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, row)
+    if has_tesseral:
+        cos_t, sin_t = _tesseral_angle(tesseral_params, row, t)
+        ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, tesseral_params, row,
+                                    cos_t, sin_t, vw)
     return ax, ay, az
 
 
 @njit
 def cowell_rk4_step(
     dt: float,
+    t: float,
     state: NDArray[np.float64],
     mu_array: NDArray[np.float64],
     parent_indices: NDArray[np.int32],
@@ -733,11 +855,15 @@ def cowell_rk4_step(
     drag_table_of: NDArray[np.int64],
     density_tables: NDArray[np.float64],
     density_meta: NDArray[np.float64],
+    has_tesseral: NDArray[np.bool_],
+    tesseral_params: NDArray[np.float64],
+    tesseral_vw: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> int:
     """
-    One classical RK4 step of every body in `indices`, integrated relative to its `parent_indices`
-    parent under any subset of `point_mass_gravity`, `j2`, `drag` and `zonal` - the compiled twin of
+    One classical RK4 step of every body in `indices` from absolute simulation time `t`, integrated
+    relative to its `parent_indices` parent under any subset of `point_mass_gravity`, `j2`, `drag`,
+    `zonal` and `tesseral` - the compiled twin of
     `integrators.RK4Integrator.step` driving `Simulation.accelerations` with exactly those models, fused
     with the subtraction `Simulation.step` performs afterwards. Held equivalent to that pair at 1e-12
     relative by `tests/validation/test_kernel_equivalence.py`.
@@ -777,14 +903,27 @@ def cowell_rk4_step(
     without, some with J3..J6 or drag - stays on the compiled path. `j2_params` is
     `force_model_params["j2"]` when any body has the J2 bit, and a one-row dummy otherwise; a row is
     only ever read behind its body's `has_j2`. `zonal_params` / `has_zonal` and `drag_params` /
-    `has_drag` follow the same convention for `force_model_params["zonal"]` and `["drag"]`. `t` is not
-    a parameter: no fused model depends on time (drag's atmosphere is steady in the frame co-rotating
-    with the parent). Scalar stage values live in registers, so unlike `RK4Integrator` this needs no
-    stage scratch and allocates nothing.
+    `has_drag` follow the same convention for `force_model_params["zonal"]` and `["drag"]`, and
+    `tesseral_params` / `has_tesseral` for `["tesseral"]`. Scalar stage values live in registers, so
+    unlike `RK4Integrator` this needs no stage scratch; the one array scratch is `tesseral_vw`, the
+    caller-owned `(2, TESSERAL_VW_SIZE, TESSERAL_VW_SIZE)` V/W table the tesseral recursion fills per
+    evaluation (arena-owned, `Simulation._cowell_tesseral_vw`), so the kernel allocates nothing.
+
+    **Time.** `t` is the absolute simulation time at the start of this step - `Simulation.t` at the
+    call, which after a manoeuvre or event split is the sub-step's own start, exactly the `t` the
+    reference path hands `RK4Integrator.step`. Stage `k` is evaluated at `RK4Integrator`'s own
+    expressions: `t`, `t + 0.5 * dt`, `t + 0.5 * dt`, `t + dt` (`half_dt` is `0.5 * dt`, so the
+    mid-step time is the same double). Only the tesseral term reads it (drag's atmosphere is steady in
+    the frame co-rotating with the parent); its rotation angle is computed once per distinct stage time,
+    since stages 2 and 3 share one.
     """
     half_dt = 0.5 * dt
     sixth_dt = dt / 6.0
     n = indices.shape[0]
+    # The four stage times, as `RK4Integrator.step` forms them.
+    t1 = t
+    t2 = t + half_dt
+    t4 = t + dt
 
     # The staleness check, before anything is written - see "Return value".
     for k in range(n):
@@ -830,6 +969,18 @@ def cowell_rk4_step(
             if law == DRAG_LAW_MSIS:
                 table = drag_table_of[s]
         n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
+        # The tesseral field's orientation at the three distinct stage times, read once per body.
+        tt = has_tesseral[s]
+        cos1 = 1.0
+        sin1 = 0.0
+        cos2 = 1.0
+        sin2 = 0.0
+        cos4 = 1.0
+        sin4 = 0.0
+        if tt:
+            cos1, sin1 = _tesseral_angle(tesseral_params, s, t1)
+            cos2, sin2 = _tesseral_angle(tesseral_params, s, t2)
+            cos4, sin4 = _tesseral_angle(tesseral_params, s, t4)
 
         px = state[par, 0]
         py = state[par, 1]
@@ -853,8 +1004,9 @@ def cowell_rk4_step(
         v0y = cvy - pvy
         v0z = cvz - pvz
 
-        # Each stage below is `_cowell_accel`'s composition - gravity, then drag, then zonal, in
-        # registration order - written out so that only a body with drag or zonal passes their tables.
+        # Each stage below is `_cowell_accel`'s composition - gravity, then drag, then zonal, then
+        # tesseral, in registration order - written out so that only a body with drag, zonal or
+        # tesseral passes their tables. Stage k's tesseral angle is that of its own time (above).
         a1x, a1y, a1z = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
         if dd:
             a1x, a1y, a1z = _drag_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, pvx, pvy, pvz,
@@ -862,6 +1014,9 @@ def cowell_rk4_step(
                                        table, density_tables, n_nodes)
         if zz:
             a1x, a1y, a1z = _zonal_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            a1x, a1y, a1z = _tesseral_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, mu_par,
+                                           tesseral_params, s, cos1, sin1, tesseral_vw)
         v1x = v0x + half_dt * a1x
         v1y = v0y + half_dt * a1y
         v1z = v0z + half_dt * a1z
@@ -882,6 +1037,9 @@ def cowell_rk4_step(
                                        table, density_tables, n_nodes)
         if zz:
             a2x, a2y, a2z = _zonal_term(a2x, a2y, a2z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            a2x, a2y, a2z = _tesseral_term(a2x, a2y, a2z, px, py, pz, cx, cy, cz, mu_par,
+                                           tesseral_params, s, cos2, sin2, tesseral_vw)
         v2x = v0x + half_dt * a2x
         v2y = v0y + half_dt * a2y
         v2z = v0z + half_dt * a2z
@@ -900,6 +1058,9 @@ def cowell_rk4_step(
                                        table, density_tables, n_nodes)
         if zz:
             a3x, a3y, a3z = _zonal_term(a3x, a3y, a3z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            a3x, a3y, a3z = _tesseral_term(a3x, a3y, a3z, px, py, pz, cx, cy, cz, mu_par,
+                                           tesseral_params, s, cos2, sin2, tesseral_vw)
         v3x = v0x + dt * a3x
         v3y = v0y + dt * a3y
         v3z = v0z + dt * a3z
@@ -918,6 +1079,9 @@ def cowell_rk4_step(
                                        table, density_tables, n_nodes)
         if zz:
             a4x, a4y, a4z = _zonal_term(a4x, a4y, a4z, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            a4x, a4y, a4z = _tesseral_term(a4x, a4y, a4z, px, py, pz, cx, cy, cz, mu_par,
+                                           tesseral_params, s, cos4, sin4, tesseral_vw)
 
         # Weighted combination on the relative state, then back onto the parent's start-of-step row.
         rnx = r0x + sixth_dt * (v0x + 2.0 * v1x + 2.0 * v2x + v3x)
