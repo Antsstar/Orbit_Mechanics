@@ -1406,6 +1406,26 @@ Found while building `msis_diurnal.py` (the diurnal-bulge density law) and its v
    rejects `PYTHONPATH=...` on a command line - use a runner that inserts the worktree's `src` into
    `sys.path` and asserts `orbital_engine.__file__` before running pytest.
 
+## Ephemeris perturbers: three measurement traps, none in the engine
+
+1. **Cubic-Hermite dense output makes a closest-approach *time* look like order loss.** Extracting the
+   flyby's closest approach from RK4 step states by cubic Hermite gave distance errors falling 15-18x
+   per halving but time errors falling only 44, 7.3, 6.8, 5.2x. The engine was fine: the closest-approach
+   time is a root of the range rate, and a cubic Hermite's *velocity* is third order
+   (`sqrt(3) h^3 max|x''''|/216`), with a coefficient that depends on where in the interval the root
+   falls - so the ratios are noisy as well as low. Distance is stationary at closest approach, so it
+   never sees that error. Quintic Hermite through `(r, v, a)` at each node (the acceleration from
+   `sim.accelerations(sim.t)`) makes the extraction O(h^6), and the time then converges at 14.4, 15.5,
+   16.0, 16.1x. Measure an event time with a dense output whose *derivative* beats the integrator.
+2. **A perturber table has to be finer than the finest step you want to see.** At a 1 h Moon table
+   (8.5e-6 km error) the 75 s flyby's end error was 2.9e-4 km; at 600 s it was 3.3e-4 km, i.e. the
+   coarse table had been moving it by ~5e-5 km. That is invisible in a convergence ratio until it
+   floors it, so the tests size the table with (E0) first.
+3. **A first-order magnitude band is not a bound at finite `r/d`.** `2(1 + 1.5 r/d) mu r/d^3`
+   (`test_third_body.py`'s tide band) is the first-order expansion. It is fine for the Moon under the Sun
+   (`r/d` = 3e-3) and wrong for GEO under the Moon (`r/d` = 0.116), where the exact near-side value
+   `((1 - x)^-2 - 1)/x` = 2.41 exceeds it. The kernel was right, and the band was replaced by the exact expression.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
