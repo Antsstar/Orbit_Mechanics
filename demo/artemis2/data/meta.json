@@ -7,9 +7,9 @@
   "frame": "Earth-centred ICRF (J2000 axes), km",
   "source": "JPL Horizons API 1.2, retrieved 2026-09-27T07:04:29Z: Orion -1024 {source: Artemis_II_merged}, object data revised Apr 20, 2026; Moon 301 and Sun 10 {source: DE441}. Models: OrbitalEngine artemis2_replay (Cowell, RK4 at 60 s, sub-stepped to 0.01 rad of turning)",
   "truth_source": "NASA/JSC Orion navigation (14 concatenated OEM/OD files) via JPL Horizons",
-  "generated_utc": "2026-09-27T21:35:10Z",
-  "engine_commit": "51962e2",
-  "engine_version": "1.1.0",
+  "generated_utc": "2026-09-27T21:41:16Z",
+  "engine_commit": "f4dbc68",
+  "engine_version": "1.5.0",
   "notes": [
     "Every model starts from NASA's exact position and velocity at 2026-04-03 00:58:51 UTC (01:00 TDB), an hour after translunar injection, and receives the same impulsive burns NASA flew afterwards, each at its measured epoch and in its measured local orbital (RSW) frame. The burns were detected in NASA's trajectory itself.",
     "One velocity change is not in NASA's event list: on 5 April NASA's navigation data switch between two solutions that differ by 1.88 m/s. Everything from the flyby on lies on the second, which is the first plus one impulse at about 01:24 UTC, so every model receives that impulse (reconstructed by OrbitalEngine). Without it the best model is 356 km off at the flyby instead of 46 km.",
