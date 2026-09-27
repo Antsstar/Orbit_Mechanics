@@ -45,7 +45,7 @@ Frame
 -----
 `REF_SYSTEM='ICRF'`, `REF_PLANE='FRAME'` gives the ICRF axes (aligned with the J2000 mean equator
 and equinox to ~0.02 arcsec). **Its +z is not the Earth's spin axis in 2026**: the mean pole of date
-has precessed ~0.146 deg away since J2000. The engine's J2, drag and tesseral models assume the frame
+has precessed 0.146 deg away since J2000, and the true pole (with nutation) sits 0.147 deg away. The engine's J2, drag and tesseral models assume the frame
 +z is the spin axis. The size and the cost are in `artemis2.py` and `docs/architecture.md`.
 """
 from __future__ import annotations

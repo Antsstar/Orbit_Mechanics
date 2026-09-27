@@ -13,10 +13,15 @@ The data (see `data/artemis2/README.md` for the provenance record)
   centred, ICRF, **1 min** from 2026-04-02 02:00 to 2026-04-10 23:54 TDB (the file covers
   01:58:32.3 to 23:54:22.9 TDB).
 - Moon (301) and Sun (10): DE441, Earth centred, ICRF, **10 min**, covering Orion's span. At 10 min
-  a cubic Hermite interpolant of the Moon's geocentric position is good to ~1e-8 km (fourth-order
+  a cubic Hermite interpolant of the Moon's geocentric position is good to ~6e-9 km (fourth-order
   error `h^4 |r''''| / 384` with `|r''''| ~ n^4 r`, `n` the lunar mean motion), so nothing is lost
   by not storing them at Orion's cadence; `tests/validation/test_artemis2.py` checks it by
-  decimation.
+  decimation (1.0e-7 km derived at 20 min, 9.1e-8 measured).
+- Why 1 min for Orion, and not finer: Horizons' interpolant of the JSC data **rings** across a burn
+  (below), so finer sampling adds no information about a burn - the Delta-v is an integral between
+  clean samples, which 1 min resolves (TLI: 388.6 m/s against NASA's 388.3). At the flyby the 1-min
+  minimum distance is within `r'' (h/2)^2 / 2` = 0.071 km of the true one before refinement, and
+  the Hermite refinement uses Orion's own velocities. The whole data set is ~0.8 MB.
 
 `EPOCH_TDB` = 2026-04-02T02:00:00 TDB is `t_s = 0` for all three tables.
 
@@ -31,7 +36,11 @@ intervals are bridged, because the data **ring** around a burn - see below), pad
 `DETECTION_PAD` clean samples, and each cluster's impulsive equivalent is found by coasting forward
 from the clean state before it and backward from the clean state after it: the epoch is where the two
 coasts pass closest (`closure_km`), and the Delta-v is the velocity jump between them there. A true
-impulse gives zero closure; a finite burn of duration `D` a closure of order `|dv| D / 4`.
+impulse gives zero closure, and so does a straight, constant-thrust finite burn to first order: the
+two coasts then meet at its midpoint (their separation is `|dv| |t - t_mid|`). What is left is the
+gravity gradient, steering and mass loss over the burn (TLI: 3.0 km, i.e. `closure_s` = 7.9 s) - or a
+**position** discontinuity in the data, which no impulse closes. `closure_s = closure_km / |dv|`
+separates the two: burns measure 0.0-109 s, discontinuities >= 1265 s; `IMPULSIVE_CLOSURE_S` = 300 s.
 `delivered_dv` is the vector sum of the per-interval residuals - the burn's integral of thrust
 acceleration, what a mission report calls its Delta-v. The two differ by the finite-burn loss.
 
@@ -50,8 +59,12 @@ Time and frame
 --------------
 All epochs here are **TDB**; `horizons_bridge.utc_to_tdb` converts the event list's UTC
 (TT - UTC = 69.184 s, TDB - TT = +1.66 ms at the replay). The frame is ICRF. Its +z is **not** the
-Earth's spin axis: `earth_orientation()` recovers the true pole and the prime meridian from the
-committed ICRF/ITRF93 frame check, and `pole_misalignment_cost()` states what using +z costs.
+Earth's spin axis: `earth_orientation()` recovers the true pole (0.1469 deg from +z, towards RA
+0.8 deg) and the prime meridian from Horizons' own Earth-orientation model (three Earth-fixed sites as
+ICRF vectors, `earth_sites.npz`), `mean_pole_of_date()` the mean pole (0.1462 deg, IAU 1976's
+`theta_A` to 0.26"), and `pole_misalignment_cost()` states what using +z costs: 0.70 km over the
+15 h coast after TLI, metres elsewhere. `gmst_iau1982_rad` less `precession_in_ra_rad` gives the
+engine's `theta0` (ICRF right ascension of the prime meridian) to 1.1" of Horizons' value.
 """
 from __future__ import annotations
 
@@ -74,13 +87,15 @@ __all__ = [
     "MU_EARTH_DE440", "MU_MOON_DE440", "MU_SUN_DE440", "MOON_MEAN_RADIUS_KM", "EARTH_MEAN_RADIUS_KM",
     "LUNAR_SOI_KM", "PUBLISHED", "PublishedFigure",
     "DETECTION_THRESHOLD_KM_S", "DETECTION_SUBSTEPS", "DETECTION_MERGE_GAP", "DETECTION_PAD",
-    "EVENT_MATCH_TOLERANCE_S",
+    "EVENT_MATCH_TOLERANCE_S", "EVENT_MATCH_WINDOW_S", "IMPULSE_STEP_S", "IMPULSIVE_CLOSURE_S",
+    "DEFAULT_REPLAY_EPOCH_TDB", "EARTH_SITE_COORDS", "ListedBurn", "listed_burns",
     "MissionEvent", "Burn", "Extremum", "EarthOrientation", "ArcCost", "TrajectoryFile",
     "load", "tdb_seconds", "tdb_instant", "hermite_position",
     "parse_major_events", "load_events", "write_events_csv", "trajectory_files",
     "CoastModel", "coast", "interval_residuals", "detect_burns", "write_burns_csv", "match_events",
     "closest_lunar_approach", "maximum_earth_distance",
-    "earth_orientation", "precession_pole_tilt_rad", "pole_misalignment_cost",
+    "earth_orientation", "mean_pole_of_date", "precession_pole_tilt_rad", "precession_in_ra_rad",
+    "gmst_iau1982_rad", "greenwich_apparent_sidereal_hours", "pole_misalignment_cost",
 ]
 
 DATA_DIR: Final[Path] = hb.DATA_DIR / "artemis2"
