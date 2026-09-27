@@ -41,7 +41,7 @@ __all__ = [
     "tle_satellites", "zonal_twins", "zonal_twin_name",
     "geostationary_satellites", "geostationary_radius_km", "geo_satellite_name",
     "sun_synchronous_satellites", "sun_synchronous_inclination_deg", "sso_satellite_name",
-    "TROPICAL_YEAR_DAYS",
+    "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -1149,4 +1149,95 @@ def zonal_twins(
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, sats)
     sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    return sim
+
+
+# --------------------------------------------------------------------------------------------------
+# Artemis II replay
+# --------------------------------------------------------------------------------------------------
+
+#: The vessel name `artemis2` gives Orion.
+ORION_NAME = "Orion"
+
+
+def artemis2(
+    session: Session,
+    *,
+    epoch_tdb: Optional[str] = None,
+    j2: bool = True,
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    Earth at the arena root plus Orion - a massless Cowell vessel (`ORION_NAME`) carrying
+    `point_mass_gravity` and, by default, `j2` (EGM96, about the frame's +z) - seeded **exactly**
+    from NASA/JSC's Cartesian state in the committed Horizons table (`artemis2.load("orion")`) at the
+    TDB instant `epoch_tdb`, which must be one of its 1-min samples. The default,
+    `artemis2.DEFAULT_REPLAY_EPOCH_TDB` (2026-04-03 01:00 TDB), is the first clean coast after
+    trans-lunar injection: the TLI residuals and the 00:03 file join have both died away by then.
+
+    Nothing external but Cartesian `(r, v)` reaches the engine (`CLAUDE.md`'s mean-elements rule, in
+    spirit): the vessel's stored elements are `rv_to_coe` of that state under `MU_EARTH`, and after
+    the arena is built its `global_states` / `local_states` rows are overwritten with the NASA state
+    itself, so the seed is bit-identical to the data rather than a `coe_to_rv` round trip of it.
+
+    **Clock.** `sim.t = 0` is `epoch_tdb`; the tables' `t_s` count from `artemis2.EPOCH_TDB`, so a
+    table time maps to sim time as `t_s - artemis2.tdb_seconds(epoch_tdb)` - which is what to hand the
+    ephemeris force model: `EphemerisTable("Moon", moon.t_s - offset, moon.position_km,
+    moon.velocity_km_s, centre="Earth")`, the tables being Earth-centred. `start_epoch` is set to
+    the epoch as a naive `datetime` **on the TDB scale**. **Frame:** ICRF, whose +z is 0.147 deg from
+    the true pole in 2026; the J2 here assumes +z (cost: `artemis2.pole_misalignment_cost`). The Moon
+    and Sun are not bodies here - their ephemeris force model is a separate module's.
+    """
+    from datetime import datetime
+
+    from . import artemis2 as a2
+    from .frames import ReferenceFrames
+    from .geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
+
+    when = epoch_tdb if epoch_tdb is not None else a2.DEFAULT_REPLAY_EPOCH_TDB
+    orion = a2.load("orion")
+    k = orion.at_tdb(when)
+    state = orion.state[k].copy()
+    coe, ok = ReferenceFrames.rv_to_coe(state[None, :3], state[None, 3:], MU_EARTH)
+    if not bool(np.all(ok)):
+        raise ValueError(f"rv_to_coe failed for Orion at {when} TDB")
+    elements = np.asarray(coe, dtype=np.float64).reshape(6)
+
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+    session.add(VesselORM(
+        name=ORION_NAME, mu=0.0, system_id=system.id, parent_id=earth.id,
+        dry_mass=0.0, fuel_mass=0.0, drag_area=0.0,
+        p=float(elements[0]), e=float(elements[1]), i=float(elements[2]),
+        raan=float(elements[3]), arg_pe=float(elements[4]), theta=float(elements[5]),
+    ))
+    session.commit()
+
+    sim = Simulation(
+        body_names=["Earth", ORION_NAME],
+        system_names=["Earth System"],
+        session=session,
+        max_capacity=capacity if capacity is not None else 10,
+        start_epoch=datetime.fromisoformat(str(np.datetime_as_string(np.asarray(when, dtype="datetime64[us]"), unit="us"))),
+    )
+    idx = np.array([sim.name_to_index[ORION_NAME]], dtype=np.int64)
+    sim.set_propagator(idx, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, idx)
+    if j2:
+        sim.enable_force_model(J2_MODEL, idx, j2=EARTH_J2, r_eq=EARTH_R_EQ)
+    # The exact seed: the same direct row write `manoeuvres.apply_delta_v` makes.
+    row = int(idx[0])
+    sim.global_states[row] = state
+    sim.local_states[row] = state - sim.global_states[sim.body_sys_map[row]]
     return sim

@@ -1584,6 +1584,66 @@ tier has no `ModelConfig` and cannot carry force models: it is whatever the exte
 
 ---
 
+## Artemis II replay data: an ephemeris at the boundary
+
+`horizons_bridge.py` turns JPL Horizons VECTORS output into plain arrays; `artemis2.py` analyses the
+committed Artemis II data set (`src/orbital_engine/data/artemis2/`, provenance in its `README.md`);
+`scenarios.artemis2` seeds Orion from it. It exists so the engine's model tiers can be replayed
+against a real crewed lunar trajectory.
+
+**Boundary only.** `CLAUDE.md` forbids reimplementing planetary ephemerides and stateful third-party
+objects inside a step. Horizons *is* the ephemeris; the bridge parses its text once, at ingest, into
+`HorizonsVectors(target, center, frame, time_scale, epoch_tdb, jd_tdb, t_s, position_km,
+velocity_km_s, header)` and stores it as `.npz`. There is no interpolation object here: the ephemeris
+force model (`ephemeris.py`, a separate module) consumes `t_s` / `position_km` / `velocity_km_s`
+directly, as `EphemerisTable(name, t_s - offset, position_km, velocity_km_s, centre="Earth")` - every
+committed table is Earth-centred, and `offset = artemis2.tdb_seconds(seed epoch)` moves the tables'
+clock onto the arena's (82,800 s for `scenarios.artemis2`'s default). The **network** is touched only by `horizons_bridge.fetch`, called only by
+`scripts/fetch_artemis2.py`; `urllib` is imported inside `fetch`, and the tests run the loaders in a
+subprocess with sockets disabled.
+
+**Provenance is data.** Each table carries Horizons' preamble verbatim (`header`: source tags such as
+`{source: Artemis_II_merged}` / `{source: DE441}`, EOP file, frame); `retrieval.json` has every URL;
+the raw object-data text is committed; two raw vector responses are committed so the parser is tested
+on Horizons' own bytes (bit-identical to the stored rows).
+
+**Time.** Horizons tabulates vectors in TDB. `t_s` counts from `EPOCH_TDB` = 2026-04-02T02:00:00 TDB,
+computed from the calendar column in integer nanoseconds (the printed JD resolves 86 us). The event
+list is in UTC: `TDB - UTC = 69.184 s + (TDB - TT)`, the periodic term +1.66 ms at the mission; the
+two-term series agrees with Horizons' own `TDB-UT` column to 2.3e-5 s. `scenarios.artemis2`'s
+`sim.t = 0` is its seed epoch; a table time maps to sim time as `t_s - tdb_seconds(epoch)`.
+
+**Frame.** ICRF, Earth-centred. **ICRF +z is not the spin axis in 2026**: Horizons' own Earth
+orientation (three Earth-fixed sites as ICRF vectors) puts the true pole 0.1469 deg from +z, towards
+RA 0.8 deg; the mean pole is 0.1462 deg (IAU 1976 `theta_A`, from memory, agrees to 0.26"), the
+difference is nutation. (The brief's "~0.36 deg" is the precession of the *equinox* in longitude,
+50.3"/yr x 26.25 yr = 0.367 deg - it enters `theta0`, not the pole.) The engine's J2 assumes +z; run
+over every coast arc between detected burns, J2 about +z instead of the true pole moves Orion's end
+state by **0.70 km over the 15 h coast after TLI** (the one near-Earth coast leaving perigee fast),
+11 m on the 80 min before TLI, and <= 4 m on every other arc - an order below the coast model's own
+miss on the same arcs (0.5 km after TLI, up to 2.6 km through the flyby without lunar harmonics).
+For ground-station work the same tilt misplaces a station by up to 0.147 deg (~16 km) if the frame is
+taken as Earth-fixed about +z; `theta0` - the ICRF right ascension of the prime meridian - is
+**219.8118 deg at `EPOCH_TDB`** (01:58:50.81 UTC) from Horizons, and IAU 1982 GMST (220.1478 deg,
+UT1 ~ UTC) less the precession in right ascension `zeta_A + z_A` (0.3363 deg) reproduces it to 1.1".
+
+**Burns from the data.** Each 1-min interval is re-predicted from its own start (Earth point mass +
+J2, Moon and Sun from the tables, RK4); clusters of residual above 0.03 m/s are scored end to end by
+coasting forward from the clean sample before and backward from the one after. The epoch is where the
+coasts pass closest; `closure / |dv|` (seconds for a burn, hours for a data jump) classifies the
+cluster. Horizons' interpolant rings across a burn (+-6 m/s^2 at TLI), so per-interval numbers inside
+a cluster mean nothing. Results (`burns.csv`): every flown burn in the event list is found; eight
+listed burns, four unlisted impulses, 26 discontinuities (every one of the 13 file joins, up to ~12 km,
+and interpolation artefacts up to 86 km of closure). TLI delivered 388.6 m/s against NASA's
+1,274 ft/s = 388.3 m/s; the return corrections 0.505 / 1.626 / 1.296 m/s against NASA's 1.6 / 5.3 /
+4.2 ft/s = 0.488 / 1.615 / 1.280 m/s.
+
+**Deliberately not built.** No interpolation class (the ephemeris module's job), no pyerfa frame
+rotation (the pole numbers above say when it will be needed), no Horizons client beyond one GET, no
+finite-burn reconstruction (the interpolant's ringing makes onset and cutoff unreliable at ~30 s).
+
+---
+
 ## Higher zonals: J3..J6 as a second model, not a wider first one
 
 `zonal.py` registers `"zonal"`: the J3..J6 perturbation of the Keplerian parent, per-body coefficients
