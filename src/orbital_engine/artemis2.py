@@ -91,6 +91,9 @@ EPOCH_TDB: Final[str] = "2026-04-02T02:00:00"
 LAUNCH_UTC: Final[str] = "2026-04-01T22:35:12"
 #: Horizons IDs whose ICRF and ITRF93 positions make up `frame_check.npz`.
 FRAME_CHECK_BODIES: Final[Tuple[str, ...]] = ("301", "10", "599")
+#: Horizons geodetic `SITE_COORD`s (E-lon deg, lat deg, alt km) of `earth_sites.npz`: the ITRF93 x
+#: axis, y axis and north pole on the WGS-84 ellipsoid.
+EARTH_SITE_COORDS: Final[Tuple[str, ...]] = ("0,0,0", "90,0,0", "0,90,0")
 
 # DE440 gravitational parameters, km^3/s^2 (Park et al. 2021, AJ 161:105, Table 8 - from memory,
 # unverified against the text). The coast model's result is insensitive to them at this level:

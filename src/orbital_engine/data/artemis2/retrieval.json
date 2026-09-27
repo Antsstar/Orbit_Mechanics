@@ -53,5 +53,24 @@
    "what": "time check",
    "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND='10'&OBJ_DATA='NO'&MAKE_EPHEM='YES'&EPHEM_TYPE='OBSERVER'&CENTER='000@399'&START_TIME='2026-04-02+00%3A00+UT'&STOP_TIME='2026-04-11+00%3A00'&STEP_SIZE='6h'&QUANTITIES='7%2C30'&CSV_FORMAT='YES'&ANG_FORMAT='DEG'&EXTRA_PREC='YES'"
   }
+ ],
+ "later": [
+  {
+   "retrieved_utc": "2026-09-27T11:23:11Z",
+   "queries": [
+    {
+     "what": "earth site 0,0,0",
+     "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND='399'&OBJ_DATA='NO'&MAKE_EPHEM='YES'&EPHEM_TYPE='VECTORS'&CENTER='coord@399'&START_TIME='2026-04-02+02%3A00'&STOP_TIME='2026-04-11+02%3A00'&STEP_SIZE='6h'&VEC_TABLE='2'&REF_PLANE='FRAME'&REF_SYSTEM='ICRF'&OUT_UNITS='KM-S'&CSV_FORMAT='YES'&VEC_LABELS='NO'&COORD_TYPE='GEODETIC'&SITE_COORD='0%2C0%2C0'"
+    },
+    {
+     "what": "earth site 90,0,0",
+     "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND='399'&OBJ_DATA='NO'&MAKE_EPHEM='YES'&EPHEM_TYPE='VECTORS'&CENTER='coord@399'&START_TIME='2026-04-02+02%3A00'&STOP_TIME='2026-04-11+02%3A00'&STEP_SIZE='6h'&VEC_TABLE='2'&REF_PLANE='FRAME'&REF_SYSTEM='ICRF'&OUT_UNITS='KM-S'&CSV_FORMAT='YES'&VEC_LABELS='NO'&COORD_TYPE='GEODETIC'&SITE_COORD='90%2C0%2C0'"
+    },
+    {
+     "what": "earth site 0,90,0",
+     "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND='399'&OBJ_DATA='NO'&MAKE_EPHEM='YES'&EPHEM_TYPE='VECTORS'&CENTER='coord@399'&START_TIME='2026-04-02+02%3A00'&STOP_TIME='2026-04-11+02%3A00'&STEP_SIZE='6h'&VEC_TABLE='2'&REF_PLANE='FRAME'&REF_SYSTEM='ICRF'&OUT_UNITS='KM-S'&CSV_FORMAT='YES'&VEC_LABELS='NO'&COORD_TYPE='GEODETIC'&SITE_COORD='0%2C90%2C0'"
+    }
+   ]
+  }
  ]
 }
