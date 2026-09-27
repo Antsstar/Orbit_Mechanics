@@ -10,7 +10,7 @@ Reports five things, because they answer five different questions:
 1. **Reference against compiled kernel** - the headline. Both compute the same thing, to within the
    tolerance asserted in `tests/validation/test_kernel_equivalence.py`, so the ratio is pure cost.
    Keplerian propagation, then the fused Cowell RK4 step per force-model set (point mass, + j2,
-   + J3..J6 zonal, + drag under each density law), with the full `step()` cost alongside so the
+   + J3..J6 zonal, + the 4x4 tesseral field, + drag under each density law), with the full `step()` cost alongside so the
    kernel's share is visible.
 2. **Cost per step by scenario** - what a performance regression would show up in.
 3. **Cost per step against body count** - separates per-body cost from fixed per-step overhead. A
@@ -38,7 +38,7 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from orbital_engine import drag, geopotential, kernels, scenarios, zonal  # noqa: E402
+from orbital_engine import drag, geopotential, kernels, scenarios, tesseral, zonal  # noqa: E402
 from orbital_engine.atmosphere import DENSITY_MODEL_LAYERED  # noqa: E402
 from orbital_engine.benchmark import measure  # noqa: E402
 from orbital_engine.custom_types import PropagatorType  # noqa: E402
@@ -114,11 +114,13 @@ def bench_propagators() -> None:
 COWELL_DT = 60.0
 
 # Cowell force-model sets the fused kernel implements, cheapest first. "zonal" is J3..J6 on top of j2;
+# "tesseral" the EGM96 4x4 m >= 1 field on top of those (the full 4x4 geopotential, turning with the Earth);
 # "drag:<law>" is drag under that density law (B = 0.05 m^2/kg, co-rotating) on top of j2.
 COWELL_MODEL_SETS: list[tuple[str, tuple[str, ...]]] = [
     ("pm", ("point_mass_gravity",)),
     ("pm+j2", ("point_mass_gravity", "j2")),
     ("pm+j2+zonal", ("point_mass_gravity", "j2", "zonal")),
+    ("pm+j2+zon+tess", ("point_mass_gravity", "j2", "zonal", "tesseral")),
     ("pm+j2+drag:exp", ("point_mass_gravity", "j2", "drag:exp")),
     ("pm+j2+drag:tab", ("point_mass_gravity", "j2", "drag:tab")),
     ("pm+j2+drag:msis", ("point_mass_gravity", "j2", "drag:msis")),
@@ -140,6 +142,7 @@ def _coefficients(model: str) -> tuple[str, dict[str, float]]:
         "point_mass_gravity": {},
         "j2": {"j2": geopotential.EARTH_J2, "r_eq": geopotential.EARTH_R_EQ},
         "zonal": {"r_eq": geopotential.EARTH_R_EQ, **zonal.EARTH_ZONALS},
+        "tesseral": {"r_eq": geopotential.EARTH_R_EQ, "omega": drag.EARTH_OMEGA, **tesseral.EARTH_TESSERALS},
     }[model]
 
 

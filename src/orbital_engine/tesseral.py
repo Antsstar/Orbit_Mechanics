@@ -112,9 +112,12 @@ coefficient; `r_eq <= 0` on a row whose effective coefficients are non-zero (the
 the unwritten column reads 0.0, so "forgot to pass `omega`" would silently freeze the Earth's field
 in inertial space - wrong by one full turn a day, and raising nothing.
 
-**Not in the fused compiled Cowell plan.** A Cowell body with `"tesseral"` sends the whole Cowell set
-down the NumPy `RK4Integrator` path (`Simulation._cowell_fused_ok` rejects the bit as foreign). A
-compiled twin would need `t` threaded into `kernels._cowell_accel`, which does not take it today.
+**In the fused compiled Cowell plan.** `kernels.cowell_rk4_step` takes the step's start time and
+evaluates this term (`kernels._tesseral_term`, per-body `has_tesseral`, after zonal in registration
+order) at each RK4 stage's own time, with the same recursion, rotation convention and accumulation
+order as `tesseral_kernel` - held to it at 1e-12 relative (measured bit-identical at field level) by
+`tests/validation/test_kernel_equivalence.py`. The 4x4 LEO tier went from 14.1 s on the NumPy path to
+0.095 s, 1.6x the fused J2..J6 tier.
 """
 from __future__ import annotations
 

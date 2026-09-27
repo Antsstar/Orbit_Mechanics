@@ -1618,7 +1618,8 @@ on tesseral truth at ratios 17.1 and 16.6; the same run with every stage handed 
 converges at 1.995 and sits 4.2e6x further off. A zero-Delta-v manoeuvre cutting 64 steps at 40 % moves
 the result 3.2e-6 km (a restart at the step's start time would be ~1e-3). Mutating stage 4 to
 `t + h/2` is caught by five tesseral tests - and by **nothing else in the suite**, since no other kernel
-reads `t`. The truth reads the clock too: `reference_for` shifts `theta0` by `omega * sim.t`, so a truth
+reads `t`. (That was the NumPy integrator; the fused twin forms its own stage times, and the same
+mutation in `kernels.cowell_rk4_step` fails 31 tests - see "Tesseral in the fused Cowell twin".) The truth reads the clock too: `reference_for` shifts `theta0` by `omega * sim.t`, so a truth
 started mid-run is in phase.
 
 **The truth's derivation.** The kernel is Cunningham's V/W recursion in body-fixed Cartesian
@@ -1675,10 +1676,38 @@ first-orbit mean-`a` offset, up to 0.068 km, predicts each satellite's 24 h alon
 tier reproduces the zonal tier's RK4 truncation (2.7e-3 km) exactly: the model error is gone and only
 the step remains.
 
-**Cost.** No compiled twin: `kernels._cowell_accel` has no `t`, so a Cowell body with `"tesseral"` sends
-the whole Cowell set down the NumPy path (`_cowell_fused_ok`). The LEO tesseral tier took 21.4 s
-against 0.066 s fused (~320x); the 49-satellite GEO scan runs in ~3 s at a 598 s step. It wants a
-`kernel-twin` job before it is timed against the analytic tiers.
+**Cost.** Originally no compiled twin: the LEO tesseral tier took 21.4 s against 0.066 s fused (~320x).
+It is now fused - next section.
+
+## Tesseral in the fused Cowell twin: time reaches the compiled step
+
+`kernels.cowell_rk4_step(dt, t, ...)` now takes the step's start time - `Simulation.t` as `_advance`
+reads it, which after a manoeuvre or event split is the sub-step's own start, the same `t` the
+reference path hands `RK4Integrator.step` - and forms the stage times with the integrator's own
+expressions: `t`, `t + 0.5 dt` (twice), `t + dt`. `_tesseral_term` is `tesseral_kernel` one scalar at a
+time (rotation by `-theta` in and `+theta` out, the Cunningham V/W recursion to degree and order 5, the
+nine pairs accumulated from 0.0 in `TESSERAL_PAIRS` order), added after zonal - bit 7 after bit 6, the
+order `compose_accelerations` sums them. The V/W table is arena-owned `(2, 6, 6)` scratch
+(`Simulation._cowell_tesseral_vw`), so the kernel still allocates nothing; the angle is evaluated once
+per distinct stage time (stages 2 and 3 share one).
+
+**Equivalence.** Field level: bit-identical to `tesseral_kernel` at all 3200 evaluations (80 points, LEO
+to GEO and the poles; five clocks including Mars and retrograde Venus rates and t0 = 1e6 s; origin and
+heliocentric parent), bound 1e-12; a (1 + 1e-9) C22 is seen at 1.6e-9. State: 0 at one step, <= 9.8e-15
+at 50, <= 1.9e-13 by norm at 500, through `Simulation.step` with ten manoeuvre splits 8.8e-15 (t0 = 0)
+and 4.8e-15 (t0 = 1e6). At t0 = 1e6 s `theta` ~ 73 rad carries an absolute rounding of ~1.4e-14 rad on
+both sides identically - a physics error of that relative size, not a twin disagreement. Mutations of
+the real source: in-rotation sign 41 failures, stage-4 time `t + h/2` 31, S read from C's column 41.
+
+**Cost.** Estimated before measuring: the recursion is 42 V/W entries (~250 flops, 20 divisions kept
+as divisions to match the reference's rounding), the nine-pair sum ~200 flops, plus sin/cos - ~150 ns
+per evaluation, ~0.6 us per body-step, against ~0.15 us for the zonal term. Measured (`bench_step.py`,
+60 satellites): `pm+j2+zon+tess` 0.742 us per body-step against `pm+j2+zonal` 0.251, +0.49 us. The three
+new array arguments cost ~0.5 us per *call* on every tier (the flag-free `pm` tier 5.05 -> 5.66 us at
+60 satellites, 2.63 -> 3.14 at 12), the per-argument dispatch cost the drag twin measured, not per-body
+work. `benchmarks/tesseral_sweep.py --leo`: the tesseral tier **14.05 s -> 0.095 s** (1.56x the fused
+J2..J6 tier's 0.061 s), the GEO scan 4.3 s -> 0.4 s, and every printed number - both tables, the
+equilibria, the LEO errors and window shifts - identical to the last digit.
 
 ---
 
