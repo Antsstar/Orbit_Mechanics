@@ -686,6 +686,22 @@ def dsn_windows(flight: Flight, rotation: EarthRotation, *, mask_deg: float = DS
     return out
 
 
+def contact_gaps(windows: Sequence[Window], t0: float, t1: float) -> List[Tuple[float, float]]:
+    """Intervals inside `[t0, t1]` when **no** station has a `dsn_contact` window."""
+    spans = sorted((w.start_s, w.end_s) for w in windows if w.kind == "dsn_contact")
+    gaps: List[Tuple[float, float]] = []
+    cursor = t0
+    for a, b in spans:
+        if a > cursor:
+            gaps.append((cursor, min(a, t1)))
+        cursor = max(cursor, b)
+        if cursor >= t1:
+            break
+    if cursor < t1:
+        gaps.append((cursor, t1))
+    return [(a, b) for a, b in gaps if b > a]
+
+
 def _intersect(p: Sequence[Tuple[float, float]], q: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """Intersection of two sorted lists of disjoint intervals."""
     out: List[Tuple[float, float]] = []
