@@ -1,0 +1,6 @@
+model_id,label,description,colour,colour_dark,is_truth
+nasa,NASA navigation,Orion's reconstructed trajectory as reported by NASA. The reference every model is scored against.,#17212e,#f2f5f8,1
+kepler,Earth only,"Two-body Kepler: Earth as a point mass, nothing else. Blind to the Moon.",#2a78d6,#3987e5,0
+j2,Earth + oblateness,"Earth point mass plus J2, the equatorial bulge. Still blind to the Moon.",#eb6834,#d95926,0
+moon,Earth + Moon,Adds the Moon's gravity. The first tier that can fly a lunar flyby.,#1baf7a,#199e70,0
+moon_sun,Earth + Moon + Sun,Adds the Sun's tidal pull on the Earth-Moon-Orion system.,#eda100,#c98500,0

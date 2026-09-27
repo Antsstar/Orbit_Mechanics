@@ -1,0 +1,1704 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Artemis II Flyby Replay</title>
+<meta name="description" content="Artemis II's lunar flyby replayed under several models of the physics, each scored against NASA's navigation data.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #eceff3;
+  --surface: #ffffff;
+  --surface-2: #f4f6f9;
+  --ink: #0f1a27;
+  --ink-2: #344355;
+  --muted: #5f6f83;
+  --rule: #d5dce5;
+  --rule-strong: #b3bfcc;
+  --accent: #1f5fcf;
+  --accent-soft: #e2ebfb;
+  --good: #0b7a3e;  --good-bg: #e2f3e8;
+  --warn: #8f5a00;  --warn-bg: #fbefd6;
+  --bad: #b8322a;   --bad-bg: #fbe4e1;
+  --space: #03060b;
+  --space-2: #0b121c;
+  --space-ink: #e3eaf3;
+  --space-muted: #93a2b6;
+  --space-rule: rgba(255, 255, 255, 0.13);
+  --hazard: #f2b01e;
+  --hazard-ink: #1b1403;
+  --font-display: "Barlow Semi Condensed", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Barlow", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #070b12;
+    --surface: #0e1520;
+    --surface-2: #121b28;
+    --ink: #e6edf5;
+    --ink-2: #b9c5d3;
+    --muted: #8a9aae;
+    --rule: #1f2b3b;
+    --rule-strong: #33445a;
+    --accent: #6ea6ff;
+    --accent-soft: #14243d;
+    --good: #52c885;  --good-bg: #0f2a1c;
+    --warn: #f0b43c;  --warn-bg: #2d2208;
+    --bad: #ff8274;   --bad-bg: #351510;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #070b12;
+  --surface: #0e1520;
+  --surface-2: #121b28;
+  --ink: #e6edf5;
+  --ink-2: #b9c5d3;
+  --muted: #8a9aae;
+  --rule: #1f2b3b;
+  --rule-strong: #33445a;
+  --accent: #6ea6ff;
+  --accent-soft: #14243d;
+  --good: #52c885;  --good-bg: #0f2a1c;
+  --warn: #f0b43c;  --warn-bg: #2d2208;
+  --bad: #ff8274;   --bad-bg: #351510;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 15px/1.5 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+p { margin: 0; }
+a { color: var(--accent); }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* --- synthetic banner ------------------------------------------------- */
+.hazard {
+  background: repeating-linear-gradient(135deg, var(--hazard) 0 14px, var(--hazard-ink) 14px 28px);
+  padding: 5px 0;
+}
+.hazard__inner {
+  background: var(--hazard);
+  color: var(--hazard-ink);
+  padding: 8px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: baseline;
+  justify-content: center;
+  text-align: center;
+}
+.hazard__tag {
+  font: 700 15px/1.2 var(--font-display);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.hazard__text { font-size: 14px; }
+
+/* --- page ------------------------------------------------------------- */
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding-inline: 16px;
+  padding-block: 0 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 28px;
+}
+@media (min-width: 760px) { .page { padding-inline: 28px; } }
+
+.masthead {
+  display: grid;
+  gap: 14px;
+  padding-block: 22px 0;
+}
+.masthead__bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 16px;
+  align-items: center;
+  font: 600 13px/1 var(--font-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.masthead__bar b { color: var(--ink); font-weight: 700; }
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--rule-strong);
+  font: 600 12px/1 var(--font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  background: var(--surface);
+}
+.pill--synthetic { background: var(--hazard); color: var(--hazard-ink); border-color: var(--hazard); }
+.masthead h1 {
+  font-size: clamp(30px, 5vw, 46px);
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: -0.005em;
+}
+.lede { max-width: 68ch; font-size: 17px; color: var(--ink-2); }
+.lede strong { color: var(--ink); font-weight: 600; }
+.howto {
+  display: grid;
+  gap: 8px 24px;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  max-width: 1100px;
+}
+.howto li {
+  font-size: 14px;
+  color: var(--ink-2);
+  padding-left: 12px;
+  border-left: 2px solid var(--rule-strong);
+}
+.howto b { color: var(--ink); font-weight: 600; }
+
+/* --- console: 3D view + side panel ------------------------------------ */
+.console {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 1040px) {
+  .console { grid-template-columns: minmax(0, 1fr) 372px; align-items: start; }
+}
+.stage {
+  background: var(--space);
+  color: var(--space-ink);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: grid;
+}
+.viewport {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  max-width: 100%;
+  min-height: 260px;
+  background: radial-gradient(ellipse at 50% 55%, #0a1220 0%, var(--space) 70%);
+}
+@media (max-width: 640px) { .viewport { aspect-ratio: 1 / 1; } }
+#globe { position: absolute; inset: 0; }
+/* minimal replacement for Cesium's widgets.css */
+.cesium-widget { position: relative; width: 100%; height: 100%; overflow: hidden; }
+.cesium-widget canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.credits {
+  position: absolute; right: 8px; bottom: 6px; pointer-events: auto;
+  font-size: 11px; color: var(--space-muted);
+  display: flex; flex-wrap: wrap; gap: 0 8px; justify-content: flex-end;
+  max-width: 70%;
+}
+.credits a { color: var(--space-muted); }
+.credits img { display: none; }
+.cesium-credit-lightbox-overlay { display: none !important; }
+.cesium-credit-expand-link { display: none !important; }
+
+.hud {
+  position: absolute;
+  top: 10px; left: 10px; right: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: flex-start;
+  pointer-events: none;
+}
+.hud > * { pointer-events: auto; }
+.hud__frame {
+  font: 600 12px/1.2 var(--font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--space-muted);
+  background: rgba(3, 6, 11, 0.6);
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+.seg {
+  display: inline-flex;
+  background: rgba(3, 6, 11, 0.7);
+  border: 1px solid var(--space-rule);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.seg button {
+  background: transparent;
+  border: 0;
+  color: var(--space-muted);
+  padding: 6px 10px;
+  font: 600 13px/1 var(--font-display);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--space-rule); }
+.seg button[aria-pressed="true"] { color: var(--space-ink); background: rgba(255, 255, 255, 0.1); }
+.seg button:hover { color: var(--space-ink); }
+.stamp {
+  position: absolute; left: 10px; bottom: 8px;
+  font: 700 12px/1 var(--font-display);
+  letter-spacing: 0.16em;
+  color: var(--hazard-ink);
+  background: var(--hazard);
+  padding: 5px 8px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+.tooltip {
+  position: absolute;
+  z-index: 3;
+  max-width: 260px;
+  background: rgba(8, 13, 22, 0.94);
+  border: 1px solid var(--space-rule);
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--space-ink);
+  pointer-events: none;
+}
+.tooltip b { font-family: var(--font-display); font-size: 14px; letter-spacing: 0.02em; }
+.tooltip .dim { color: var(--space-muted); }
+.fallback {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--space-muted);
+}
+.fallback p { max-width: 44ch; }
+
+/* transport */
+.transport {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 10px 12px;
+  align-items: center;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--space-rule);
+  background: var(--space-2);
+}
+@media (max-width: 560px) {
+  .transport { grid-template-columns: auto minmax(0, 1fr); }
+  .scrub { grid-column: 1 / -1; }
+}
+.btn-play {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--space-ink); color: var(--space);
+  border: 0; border-radius: 5px;
+  padding: 8px 14px 8px 12px;
+  font: 700 14px/1 var(--font-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  min-width: 96px;
+}
+.btn-play svg { width: 12px; height: 12px; fill: currentColor; }
+.speed {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 12px/1 var(--font-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--space-muted);
+}
+.speed select {
+  background: var(--space);
+  color: var(--space-ink);
+  border: 1px solid var(--space-rule);
+  border-radius: 4px;
+  padding: 6px 6px;
+  font: 500 13px/1 var(--font-mono);
+}
+.scrub { position: relative; padding-top: 12px; }
+.scrub__ticks { position: absolute; left: 8px; right: 8px; top: 0; height: 12px; }
+.scrub__tick {
+  position: absolute; top: 1px;
+  width: 2px; height: 9px; margin-left: -1px;
+  background: var(--space-muted);
+  border: 0; padding: 0; cursor: pointer;
+}
+.scrub__tick--burn { background: var(--hazard); }
+.scrub__tick--apsis { background: var(--space-ink); height: 11px; top: 0; }
+.scrub input[type="range"] {
+  width: 100%;
+  margin: 0;
+  height: 22px;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.scrub input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--space-rule); }
+.scrub input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--space-rule); }
+.scrub input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; margin-top: -6px;
+  border-radius: 50%;
+  background: var(--space-ink);
+  border: 3px solid var(--space);
+  box-shadow: 0 0 0 1px var(--space-muted);
+}
+.scrub input[type="range"]::-moz-range-thumb {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--space-ink);
+  border: 3px solid var(--space);
+}
+
+/* side panel */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  display: grid;
+}
+.panel section { padding: 14px 16px; }
+.panel section + section { border-top: 1px solid var(--rule); }
+.eyebrow {
+  font: 600 12px/1.2 var(--font-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.clock { display: grid; gap: 4px; }
+.clock__met { font: 500 30px/1.1 var(--font-mono); letter-spacing: -0.02em; }
+.clock__utc { font: 400 14px/1.3 var(--font-mono); color: var(--ink-2); }
+.clock__phase { font-size: 14px; color: var(--ink-2); margin-top: 6px; }
+.clock__phase b { color: var(--ink); font-weight: 600; }
+.chapters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip {
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: 500 13px/1.2 var(--font-body);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--ink); }
+.chip[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+
+.live { width: 100%; border-collapse: collapse; font-size: 13px; }
+.live th {
+  font: 600 11px/1.2 var(--font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: right;
+  padding: 0 0 6px 6px;
+  vertical-align: bottom;
+}
+.live th:first-child { text-align: left; padding-left: 0; }
+.live td { padding: 6px 0 6px 6px; border-top: 1px solid var(--rule); text-align: right; white-space: nowrap; }
+.live td:first-child { text-align: left; padding-left: 0; white-space: normal; }
+.live td.num { font-size: 12.5px; }
+.live tr.is-off td:not(:first-child) { opacity: 0.35; }
+.modeltoggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.modeltoggle input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.modeltoggle .box {
+  flex: none;
+  width: 16px; height: 16px;
+  border-radius: 3px;
+  border: 2px solid var(--c);
+  background: var(--c);
+  display: grid; place-items: center;
+}
+.modeltoggle .box svg { width: 10px; height: 10px; stroke: var(--surface); stroke-width: 3; fill: none; }
+.modeltoggle input:not(:checked) + .box { background: transparent; }
+.modeltoggle input:not(:checked) + .box svg { display: none; }
+.modeltoggle input:focus-visible + .box { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font: 700 10px/1.4 var(--font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-strong);
+  color: var(--muted);
+  vertical-align: 1px;
+}
+.tag--synthetic { background: var(--hazard); border-color: var(--hazard); color: var(--hazard-ink); }
+.note { font-size: 12.5px; color: var(--muted); }
+
+/* per-model colour: light value, dark override */
+[data-model] { --c: var(--c-light); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) [data-model] { --c: var(--c-dark); } }
+:root[data-theme="dark"] [data-model] { --c: var(--c-dark); }
+
+/* --- sections --------------------------------------------------------- */
+.section-head { display: grid; gap: 6px; margin-bottom: 14px; }
+.section-head h2 { font-size: 26px; font-weight: 600; line-height: 1.15; }
+.section-head p { max-width: 72ch; color: var(--ink-2); }
+
+/* scorecard */
+.cards {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--c);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.card--truth { border-top-width: 5px; }
+.card__head { display: grid; gap: 3px; }
+.card__title { font: 600 19px/1.15 var(--font-display); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.card__desc { font-size: 13px; color: var(--muted); }
+.facts { display: grid; gap: 8px; margin: 0; }
+.fact { display: grid; gap: 2px; padding-top: 8px; border-top: 1px solid var(--rule); }
+.fact dt { font: 600 11px/1.2 var(--font-display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.fact dd { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.fact .val { font: 500 15px/1.3 var(--font-mono); font-variant-numeric: tabular-nums; }
+.fact .sub { font-size: 12.5px; color: var(--muted); font-family: var(--font-mono); }
+.delta {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font: 500 12.5px/1.35 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.delta svg { width: 11px; height: 11px; flex: none; }
+.delta--good { color: var(--good); background: var(--good-bg); }
+.delta--warn { color: var(--warn); background: var(--warn-bg); }
+.delta--bad { color: var(--bad); background: var(--bad-bg); }
+.delta--ref { color: var(--muted); background: var(--surface-2); }
+.legend-status { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 13px; color: var(--muted); align-items: center; }
+
+/* charts */
+.chart-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; }
+.chart-legend .modeltoggle { font-size: 14px; }
+.chart-legend .line { width: 22px; height: 3px; border-radius: 2px; background: var(--c); }
+.chart-legend .line--truth { height: 5px; }
+.charts { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 980px) { .charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.chart {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 12px 12px 10px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.chart__head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 12px; padding-inline: 4px; }
+.chart__head h3 { font-size: 18px; font-weight: 600; }
+.chart__unit { font: 400 12px/1 var(--font-mono); color: var(--muted); margin-left: 6px; }
+.chart__blurb { font-size: 13.5px; color: var(--ink-2); padding-inline: 4px; max-width: 70ch; }
+.toggle {
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 3px 9px;
+  font: 600 12px/1.3 var(--font-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.toggle[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.plot-wrap { position: relative; min-width: 0; }
+.plot { width: 100%; height: 270px; }
+.cursor {
+  position: absolute;
+  width: 0;
+  border-left: 1.5px solid var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+.cursor::before {
+  content: "";
+  position: absolute; top: -4px; left: -5px;
+  border: 4px solid transparent;
+  border-top: 5px solid var(--accent);
+}
+.clipnote { font-size: 12.5px; color: var(--ink-2); padding-inline: 4px; min-height: 1em; }
+.clipnote b { font-weight: 600; }
+.rule-box {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  max-width: 900px;
+}
+.rule-box b { color: var(--ink); }
+
+/* visibility */
+.strip { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 12px; }
+.strip .plot { height: 300px; }
+
+/* footer */
+.foot {
+  border-top: 1px solid var(--rule-strong);
+  padding-top: 18px;
+  display: grid;
+  gap: 14px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+.foot h2 { font-size: 18px; font-weight: 600; }
+.prov { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr); gap: 4px 16px; margin: 0; }
+.prov dt { color: var(--muted); font: 600 12px/1.6 var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; }
+.prov dd { margin: 0; overflow-wrap: anywhere; }
+.foot ul { margin: 0; padding-left: 18px; }
+.loaderr {
+  background: var(--bad-bg); color: var(--bad);
+  border-radius: var(--radius); padding: 12px 14px;
+}
+/* single-column grids must not grow to their content's min-content width */
+.masthead, .stage, .panel, .clock, .section-head, .card, .card__head, .facts, .fact, .chart, .foot { grid-template-columns: minmax(0, 1fr); }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="hazard" id="synthBanner" hidden>
+  <div class="hazard__inner" role="note">
+    <span class="hazard__tag">Synthetic sample data</span>
+    <span class="hazard__text">Toy dynamics, invented burns and a stand-in for NASA's trajectory. Not NASA data and not OrbitalEngine output. It exists to lay out this page.</span>
+  </div>
+</div>
+
+<div class="page">
+  <header class="masthead">
+    <div class="masthead__bar">
+      <span><b>OrbitalEngine</b> · model-fidelity replay</span>
+      <span class="pill" id="dataPill">Loading data</span>
+    </div>
+    <h1 id="title">Artemis II lunar flyby</h1>
+    <p class="lede" id="lede">The same mission flown by several models of the physics, scored against NASA's navigation data.</p>
+    <ul class="howto" id="howto">
+      <li><b>The thick neutral line is NASA's track.</b> It is the answer every other line is checked against.</li>
+      <li><b>Each coloured line is a model.</b> It starts from NASA's position and velocity after the burn to the Moon, gets the same correction burns, and is then on its own.</li>
+      <li><b>Where a line peels away, that model is missing physics.</b> The scorecard turns the gap into mission terms: flyby altitude, timing, whether Orion gets home.</li>
+    </ul>
+  </header>
+
+  <div class="loaderr" id="loadErr" hidden></div>
+
+  <section class="console" aria-label="Replay">
+    <div class="stage">
+      <div class="viewport">
+        <div id="globe"></div>
+        <div class="hud">
+          <span class="hud__frame" id="frameLabel">Earth-centred inertial view</span>
+          <div class="seg" role="group" aria-label="Camera">
+            <button type="button" id="camMission" aria-pressed="true">Whole mission</button>
+            <button type="button" id="camOrion" aria-pressed="false">Follow Orion</button>
+            <button type="button" id="camMoon" aria-pressed="false">Moon</button>
+            <button type="button" id="camEarth" aria-pressed="false">Earth</button>
+          </div>
+        </div>
+        <div class="stamp" id="stamp3d" hidden>Synthetic</div>
+        <div class="credits"><span>Earth: Natural Earth II</span><span>Stars: Tycho-2</span><span id="credits"></span></div>
+        <div class="tooltip" id="tip" hidden></div>
+        <div class="fallback" id="fallback" hidden><p id="fallbackText"></p></div>
+      </div>
+      <div class="transport">
+        <button type="button" class="btn-play" id="play" aria-label="Play">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path id="playIcon" d="M2 1l9 5-9 5z"/></svg><span id="playText">Play</span>
+        </button>
+        <label class="speed">Speed
+          <select id="speed">
+            <option value="600">10 min/s</option>
+            <option value="3600" selected>1 h/s</option>
+            <option value="10800">3 h/s</option>
+            <option value="43200">12 h/s</option>
+          </select>
+        </label>
+        <div class="scrub">
+          <div class="scrub__ticks" id="ticks"></div>
+          <input type="range" id="scrubber" min="0" max="1" step="1" value="0" aria-label="Mission time">
+        </div>
+      </div>
+    </div>
+
+    <aside class="panel" aria-label="Mission clock and models">
+      <section class="clock">
+        <span class="eyebrow">Mission elapsed time</span>
+        <span class="clock__met num" id="met">T+0d 00:00:00</span>
+        <span class="clock__utc" id="utc">-</span>
+        <p class="clock__phase" id="phase"></p>
+        <div class="chapters" id="chapters" aria-label="Jump to"></div>
+      </section>
+      <section>
+        <div class="eyebrow" style="margin-bottom:8px">Models at this moment</div>
+        <table class="live">
+          <thead><tr><th>Model</th><th>Off NASA</th><th>From Earth</th><th>From Moon</th></tr></thead>
+          <tbody id="liveBody"></tbody>
+        </table>
+        <p class="note" style="margin-top:8px">Distances in km. Untick a model to hide it everywhere.</p>
+      </section>
+    </aside>
+  </section>
+
+  <section aria-labelledby="scoreHead">
+    <div class="section-head">
+      <h2 id="scoreHead">Scorecard</h2>
+      <p>What each model predicts for the moments that matter, next to NASA's figures. The chip is the model minus NASA.</p>
+    </div>
+    <div class="cards" id="cards"></div>
+    <div class="legend-status" id="statusLegend"></div>
+  </section>
+
+  <section aria-labelledby="chartHead">
+    <div class="section-head">
+      <h2 id="chartHead">How far each model drifts</h2>
+      <p>One line per model. The blue cursor is the replay clock; click a chart to move it. Drag across a chart to zoom in time, double-click to zoom back out.</p>
+    </div>
+    <div class="chart-legend" id="chartLegend"></div>
+    <div class="charts" id="charts"></div>
+    <p class="rule-box"><b>Off-scale rule.</b> Each chart fits its axis to the models whose peak values sit within a factor of 20 of one another, starting from the smallest. A model more than 20 times above that group would flatten the rest, so its line runs off the top of the axis. An arrow marks where it leaves and gives its peak value, the note under the chart names it, and the live table above still shows its value. NASA's line is never clipped. Error charts also have a log scale that shows every model on one axis.</p>
+  </section>
+
+  <section aria-labelledby="visHead">
+    <div class="section-head">
+      <h2 id="visHead">Who can hear Orion</h2>
+      <p>Contact windows with the three Deep Space Network complexes, and the stretch where the Moon blocks the line of sight to Earth. One bar per model; a model that places Orion wrongly predicts the wrong windows.</p>
+    </div>
+    <div class="strip">
+      <div class="plot-wrap"><div class="plot" id="stripPlot"></div><div class="cursor" id="stripCursor"></div></div>
+    </div>
+  </section>
+
+  <footer class="foot" aria-labelledby="provHead">
+    <h2 id="provHead">Data and provenance</h2>
+    <dl class="prov" id="prov"></dl>
+    <ul id="provNotes"></ul>
+    <p class="note">3D view: CesiumJS with Natural Earth II imagery and the Tycho-2 star map, both shipped in the CesiumJS package. Charts: Plotly. The data contract is <span class="num">demo/artemis2/SCHEMA.md</span>.</p>
+  </footer>
+</div>
+
+<script>
+// Cesium.js itself comes from the CDN, but its base URL is local: the artifact sandbox
+// blocks fetches and workers from other origins, and a same-origin base makes Cesium
+// fall back to the worker code inlined in Cesium.js. Only the IAU 2006 frame tables
+// this mission needs are shipped under cesium/Assets/.
+window.CESIUM_BASE_URL = "cesium/";
+// Knockout, bundled inside Cesium.js, finds the global object with (0,eval)("this").
+// Under a Content-Security-Policy without 'unsafe-eval' (the claude.ai artifact sandbox)
+// that throws and aborts the whole bundle. Answer that one question without evaluating
+// anything, and restore the real eval as soon as Cesium.js has run.
+window.__realEval = window.eval;
+window.eval = function (src) { if (src === "this") return window; return window.__realEval(src); };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.145.0/Build/Cesium/Cesium.js"></script>
+<script>window.eval = window.__realEval; delete window.__realEval;</script>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<script>
+"use strict";
+(function () {
+  const DATA_DIR = "data/";
+  const R_MOON_KM = 1737.4;
+  const CLIP_FACTOR = 20;
+  const $ = (id) => document.getElementById(id);
+
+  // ---------------------------------------------------------------- utils
+  function parseCSV(text) {
+    const rows = [];
+    let row = [], f = "", q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; }
+        else f += c;
+      } else if (c === '"') q = true;
+      else if (c === ",") { row.push(f); f = ""; }
+      else if (c === "\n") { row.push(f); rows.push(row); row = []; f = ""; }
+      else if (c !== "\r") f += c;
+    }
+    if (f !== "" || row.length) { row.push(f); rows.push(row); }
+    const head = (rows.shift() || []).map((s) => s.trim());
+    const out = [];
+    for (const r of rows) {
+      if (r.length === 1 && r[0].trim() === "") continue;
+      const o = {};
+      head.forEach((k, i) => { o[k] = r[i] === undefined ? "" : r[i]; });
+      out.push(o);
+    }
+    return out;
+  }
+  async function getText(name) {
+    const res = await fetch(DATA_DIR + name, { cache: "no-cache" });
+    if (!res.ok) throw new Error(name + ": HTTP " + res.status);
+    return res.text();
+  }
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  function lowerBound(a, x) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; }
+  function interp1(t, v, x) {
+    const n = t.length;
+    if (!n || x < t[0] || x > t[n - 1]) return NaN;
+    let i = lowerBound(t, x);
+    if (i === 0) return v[0];
+    const a = t[i - 1], b = t[i];
+    const u = b > a ? (x - a) / (b - a) : 0;
+    return v[i - 1] + u * (v[i] - v[i - 1]);
+  }
+  const nf0 = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 });
+  const nf1 = new Intl.NumberFormat("en-GB", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const nf2 = new Intl.NumberFormat("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function fmtNum(v) {
+    if (!isFinite(v)) return "-";
+    const a = Math.abs(v);
+    if (a >= 100) return nf0.format(v);
+    if (a >= 10) return nf1.format(v);
+    return nf2.format(v);
+  }
+  function fmtVal(v, unit) {
+    if (!isFinite(v)) return "-";
+    if (unit === "km/s") return v.toFixed(3);
+    return fmtNum(v);
+  }
+  function signed(v, unit) {
+    const s = v > 0 ? "+" : v < 0 ? "−" : "±";
+    return s + fmtVal(Math.abs(v), unit) + (unit ? " " + unit : "");
+  }
+  function fmtDur(s) {
+    const a = Math.abs(s);
+    if (a < 60) return Math.round(a) + " s";
+    if (a < 3600) return Math.round(a / 60) + " min";
+    const h = Math.floor(a / 3600), m = Math.round((a - h * 3600) / 60);
+    if (h < 48) return h + " h" + (m ? " " + m + " min" : "");
+    return (a / 86400).toFixed(1) + " d";
+  }
+  function signedDur(s) { return (s > 0 ? "+" : s < 0 ? "−" : "±") + fmtDur(s); }
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  function fmtMET(t) {
+    const neg = t < 0; let a = Math.abs(Math.round(t));
+    const d = Math.floor(a / 86400); a -= d * 86400;
+    const h = Math.floor(a / 3600); a -= h * 3600;
+    const m = Math.floor(a / 60), s = a - m * 60;
+    return (neg ? "T−" : "T+") + d + "d " + pad(h) + ":" + pad(m) + ":" + pad(s);
+  }
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function fmtUTC(ms, withDay = true) {
+    const d = new Date(ms);
+    return (withDay ? DAYS[d.getUTCDay()] + " " : "") + d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear() + ", " +
+      pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()) + " UTC";
+  }
+  function fmtShort(ms) {
+    const d = new Date(ms);
+    return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + " UTC";
+  }
+
+  // ---------------------------------------------------------------- state
+  const S = {
+    meta: {}, models: [], byId: {}, truth: null,
+    orion: {}, moon: null, metrics: {}, metricOrder: [], events: [], windows: [],
+    epochMs: 0, t0: 0, t1: 0, visible: {}, charts: [], strip: null,
+  };
+  const themeMQ = window.matchMedia("(prefers-color-scheme: dark)");
+  function isDark() {
+    const a = document.documentElement.getAttribute("data-theme");
+    if (a === "dark") return true;
+    if (a === "light") return false;
+    return themeMQ.matches;
+  }
+  const colourOf = (m, dark = isDark()) => (dark ? m.colourDark : m.colour);
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  const EVENT_LABELS = {
+    launch: "Launch", apogee_raise_burn: "Apogee raise burn", translunar_injection: "Trans-lunar injection",
+    model_seed: "Models start", closest_lunar_approach: "Closest to the Moon", max_earth_distance: "Farthest from Earth",
+    entry_interface: "Entry interface", return_perigee: "Closest return to Earth", splashdown: "Splashdown",
+  };
+  function eventLabel(key) {
+    if (EVENT_LABELS[key]) return EVENT_LABELS[key];
+    const s = key.replace(/_/g, " ");
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  const METRIC_INFO = {
+    position_error_km: { title: "Distance from NASA's Orion", blurb: "How far each model's spacecraft is from where NASA's navigation puts it at the same moment. Zero would be a perfect model.", log: true },
+    earth_range_km: { title: "Distance from Earth", blurb: "Out to the Moon's distance and back. A model that never feels the Moon keeps climbing." },
+    moon_range_km: { title: "Distance from the Moon", blurb: "The deep dip is the flyby. How low and how late each model's dip comes is its flyby prediction." },
+    speed_km_s: { title: "Speed relative to Earth", blurb: "Fast near Earth, slowest near the Moon. Its shape after the flyby decides whether Orion falls back home." },
+    delta_v_m_s: { title: "Engine burns, as total Δv", blurb: "Velocity change from engine burns so far. Big steps set Orion on course; small ones are corrections." },
+  };
+  const METRIC_ORDER = ["position_error_km", "earth_range_km", "moon_range_km", "speed_km_s", "delta_v_m_s"];
+
+  // ---------------------------------------------------------------- load
+  async function load() {
+    const [metaT, modelsT, trajT, metricsT, eventsT, windowsT] = await Promise.all(
+      ["meta.json", "models.csv", "trajectory.csv", "metrics.csv", "events.csv", "windows.csv"].map(getText));
+    S.meta = JSON.parse(metaT);
+    S.epochMs = Date.parse(S.meta.epoch_utc);
+    if (!isFinite(S.epochMs)) throw new Error("meta.json: epoch_utc is not an ISO date");
+
+    S.models = parseCSV(modelsT).map((r) => ({
+      id: r.model_id.trim(), label: r.label, description: r.description,
+      colour: r.colour || "#888888", colourDark: r.colour_dark || r.colour || "#888888",
+      isTruth: String(r.is_truth).trim() === "1" || String(r.is_truth).toLowerCase() === "true",
+    }));
+    S.models.forEach((m) => { S.byId[m.id] = m; S.visible[m.id] = true; });
+    S.truth = S.models.find((m) => m.isTruth) || S.models[0];
+
+    const acc = {};
+    for (const r of parseCSV(trajT)) {
+      const key = r.model_id + "|" + r.body;
+      (acc[key] || (acc[key] = [])).push([+r.t_s, +r.x_km, +r.y_km, +r.z_km]);
+    }
+    for (const key in acc) {
+      const rows = acc[key].sort((a, b) => a[0] - b[0]);
+      const col = (k) => Float64Array.from(rows, (r) => r[k]);
+      const tr = { t: col(0), x: col(1), y: col(2), z: col(3) };
+      const [mid, body] = key.split("|");
+      if (body === "orion" && S.byId[mid]) S.orion[mid] = tr;
+      if (body === "moon" && mid === S.truth.id) S.moon = tr;
+    }
+    if (!S.moon) for (const key in acc) if (key.endsWith("|moon")) { const rows = acc[key]; S.moon = { t: Float64Array.from(rows, (r) => r[0]), x: Float64Array.from(rows, (r) => r[1]), y: Float64Array.from(rows, (r) => r[2]), z: Float64Array.from(rows, (r) => r[3]) }; break; }
+
+    const macc = {};
+    for (const r of parseCSV(metricsT)) {
+      const v = parseFloat(r.value);
+      if (!isFinite(v) || !S.byId[r.model_id]) continue;
+      const m = macc[r.metric] || (macc[r.metric] = { unit: r.unit, series: {} });
+      (m.series[r.model_id] || (m.series[r.model_id] = [])).push([+r.t_s, v]);
+    }
+    for (const k in macc) {
+      const ser = {};
+      for (const mid in macc[k].series) {
+        const rows = macc[k].series[mid].sort((a, b) => a[0] - b[0]);
+        ser[mid] = { t: Float64Array.from(rows, (r) => r[0]), v: Float64Array.from(rows, (r) => r[1]) };
+      }
+      S.metrics[k] = { unit: macc[k].unit, series: ser };
+    }
+    S.metricOrder = METRIC_ORDER.filter((k) => S.metrics[k]).concat(Object.keys(S.metrics).filter((k) => !METRIC_ORDER.includes(k)).sort());
+
+    S.events = parseCSV(eventsT).map((r) => ({
+      t: +r.t_s, model: r.model_id, key: r.event, kind: r.kind,
+      value: r.value === "" ? NaN : +r.value, unit: r.unit, note: r.note,
+    })).filter((e) => S.byId[e.model] && isFinite(e.t)).sort((a, b) => a.t - b.t);
+    S.windows = parseCSV(windowsT).map((r) => ({ model: r.model_id, kind: r.kind, station: r.station, a: +r.start_s, b: +r.end_s }))
+      .filter((w) => S.byId[w.model] && isFinite(w.a) && isFinite(w.b));
+
+    let lo = Infinity, hi = -Infinity;
+    for (const mid in S.orion) { const t = S.orion[mid].t; lo = Math.min(lo, t[0]); hi = Math.max(hi, t[t.length - 1]); }
+    if (!isFinite(lo)) throw new Error("trajectory.csv has no orion rows");
+    S.t0 = lo; S.t1 = hi;
+  }
+
+  const truthEvent = (key) => S.events.find((e) => e.model === S.truth.id && e.key === key);
+  const modelEvent = (mid, key) => S.events.find((e) => e.model === mid && e.key === key);
+  const dateStr = (t) => new Date(S.epochMs + t * 1000).toISOString().replace("T", " ").replace("Z", "");
+  const tFromDateStr = (s) => (Date.parse(String(s).replace(" ", "T") + (String(s).endsWith("Z") ? "" : "Z")) - S.epochMs) / 1000;
+
+  // ---------------------------------------------------------------- clock
+  // One clock drives everything. It is a Cesium.Clock when CesiumJS loaded; the
+  // CesiumWidget ticks it in its render loop, and the dashboard reads it.
+  const clock = {
+    cz: null, epochJD: null, playing: false, multiplier: 3600, _t: 0, _last: 0, widgetTicks: false,
+    init(t) {
+      if (window.Cesium) {
+        const C = window.Cesium;
+        this.epochJD = C.JulianDate.fromDate(new Date(S.epochMs));
+        this.cz = new C.Clock({
+          startTime: C.JulianDate.addSeconds(this.epochJD, S.t0, new C.JulianDate()),
+          stopTime: C.JulianDate.addSeconds(this.epochJD, S.t1, new C.JulianDate()),
+          currentTime: C.JulianDate.addSeconds(this.epochJD, t, new C.JulianDate()),
+          clockRange: C.ClockRange.CLAMPED, clockStep: C.ClockStep.SYSTEM_CLOCK_MULTIPLIER,
+          multiplier: this.multiplier, shouldAnimate: false,
+        });
+      } else this._t = t;
+    },
+    get t() { return this.cz ? window.Cesium.JulianDate.secondsDifference(this.cz.currentTime, this.epochJD) : this._t; },
+    seek(t) {
+      t = Math.min(S.t1, Math.max(S.t0, t));
+      if (this.cz) this.cz.currentTime = window.Cesium.JulianDate.addSeconds(this.epochJD, t, new window.Cesium.JulianDate());
+      else this._t = t;
+    },
+    setPlaying(p) {
+      if (p && this.t >= S.t1 - 1) this.seek(S.t0);
+      this.playing = p;
+      if (this.cz) this.cz.shouldAnimate = p;
+      this._last = performance.now();
+      updatePlayButton();
+    },
+    setMultiplier(x) { this.multiplier = x; if (this.cz) this.cz.multiplier = x; },
+    frame(now) {
+      // Tick ourselves only when no CesiumWidget is doing it.
+      if (this.playing && !this.widgetTicks) {
+        if (this.cz) this.cz.tick();
+        else this._t = Math.min(S.t1, this._t + ((now - this._last) / 1000) * this.multiplier);
+      }
+      this._last = now;
+      if (this.playing && this.t >= S.t1 - 1e-3) this.setPlaying(false);
+    },
+  };
+  function updatePlayButton() {
+    $("playText").textContent = clock.playing ? "Pause" : "Play";
+    $("play").setAttribute("aria-label", clock.playing ? "Pause" : "Play");
+    $("playIcon").setAttribute("d", clock.playing ? "M2 1h3v10H2zM7 1h3v10H7z" : "M2 1l9 5-9 5z");
+  }
+
+  // ---------------------------------------------------------------- header, panel, footer
+  function renderStatic() {
+    const synthetic = S.meta.synthetic !== false;
+    const nModels = S.models.filter((m) => !m.isTruth).length;
+    $("title").textContent = S.meta.title || "Artemis II lunar flyby";
+    $("synthBanner").hidden = !synthetic;
+    $("stamp3d").hidden = !synthetic;
+    const pill = $("dataPill");
+    pill.textContent = synthetic ? "Synthetic sample data" : "Data: " + (S.meta.truth_source || "NASA");
+    pill.classList.toggle("pill--synthetic", synthetic);
+
+    const seed = truthEvent("model_seed");
+    const cla = truthEvent("closest_lunar_approach");
+    let lede = "The same mission flown by <strong>" + nModels + " model" + (nModels === 1 ? "" : "s") + " of the physics</strong>, scored against " +
+      esc(S.truth.label.startsWith("NASA") ? "NASA's navigation data" : S.truth.label) + ". ";
+    lede += "Orion launched on " + fmtShort(S.epochMs).replace(" UTC", "") + " UTC";
+    if (cla) lede += " and passed " + nf0.format(cla.value) + " km above the Moon's far side around " + fmtShort(S.epochMs + cla.t * 1000);
+    lede += ". Each model is given NASA's state";
+    lede += seed ? " at " + fmtMET(seed.t).replace(/:\d\d$/, "") : "";
+    lede += " and flies the rest of the mission with its own physics.";
+    if (synthetic) lede += " <strong>The numbers on this page are synthetic placeholders until the real data is loaded.</strong>";
+    $("lede").innerHTML = lede;
+
+    // footer
+    const prov = [
+      ["Truth", S.meta.truth_source], ["Source", S.meta.source], ["Epoch", S.meta.epoch_utc + " (" + (S.meta.epoch_label || "T+0") + "), " + (S.meta.epoch_tdb || "")],
+      ["Frame", S.meta.frame], ["Generated", S.meta.generated_utc],
+      ["Engine", (S.meta.engine_version ? "OrbitalEngine " + S.meta.engine_version + ", " : "") + "commit " + (S.meta.engine_commit || "unknown")],
+      ["Status", synthetic ? "SYNTHETIC SAMPLE DATA (meta.json: synthetic = true)" : "Real data (meta.json: synthetic = false)"],
+    ].filter((r) => r[1]);
+    $("prov").innerHTML = prov.map(([k, v]) => "<dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd>").join("");
+    $("provNotes").innerHTML = (S.meta.notes || []).map((n) => "<li>" + esc(n) + "</li>").join("");
+  }
+
+  function modelSwatchVars(m) { return "--c-light:" + m.colour + ";--c-dark:" + m.colourDark; }
+  const CHECK = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.2l2.3 2.3 4.7-5"/></svg>';
+  function truthTag(m) { return m.isTruth ? (S.meta.synthetic !== false ? '<span class="tag tag--synthetic">synthetic</span>' : '<span class="tag">truth</span>') : ""; }
+
+  function renderPanel() {
+    $("liveBody").innerHTML = S.models.map((m) =>
+      '<tr data-model="' + esc(m.id) + '" style="' + modelSwatchVars(m) + '">' +
+      '<td><label class="modeltoggle"><input type="checkbox" data-toggle="' + esc(m.id) + '" checked><span class="box">' + CHECK + "</span><span>" + esc(m.label) + truthTag(m) + "</span></label></td>" +
+      '<td class="num" data-cell="err"></td><td class="num" data-cell="earth"></td><td class="num" data-cell="moon"></td></tr>').join("");
+    $("chartLegend").innerHTML = S.models.map((m) =>
+      '<label class="modeltoggle" data-model="' + esc(m.id) + '" style="' + modelSwatchVars(m) + '"><input type="checkbox" data-toggle="' + esc(m.id) + '" checked>' +
+      '<span class="box">' + CHECK + '</span><span class="line' + (m.isTruth ? " line--truth" : "") + '"></span><span>' + esc(m.label) + truthTag(m) + "</span></label>").join("");
+    document.querySelectorAll("[data-toggle]").forEach((el) => el.addEventListener("change", () => setVisible(el.dataset.toggle, el.checked)));
+
+    // chapters + scrubber ticks from the truth's events
+    const nasaEv = S.events.filter((e) => e.model === S.truth.id);
+    const chapters = nasaEv.filter((e) => !/correction/.test(e.key) && e.key !== "model_seed");
+    $("chapters").innerHTML = chapters.map((e, i) => '<button type="button" class="chip" data-seek="' + Math.max(S.t0, e.t) + '" data-i="' + i + '">' + esc(eventLabel(e.key)) + "</button>").join("");
+    const span = S.t1 - S.t0;
+    $("ticks").innerHTML = nasaEv.filter((e) => e.t >= S.t0 && e.t <= S.t1).map((e) =>
+      '<button type="button" class="scrub__tick scrub__tick--' + esc(e.kind) + '" style="left:' + ((100 * (e.t - S.t0)) / span).toFixed(3) + '%" data-seek="' + e.t + '" title="' + esc(eventLabel(e.key) + " · " + fmtShort(S.epochMs + e.t * 1000)) + '" aria-label="' + esc(eventLabel(e.key)) + '"></button>').join("");
+    document.querySelectorAll("[data-seek]").forEach((el) => el.addEventListener("click", () => { clock.seek(+el.dataset.seek); refresh(true); }));
+    S.chapters = chapters;
+  }
+
+  function setVisible(mid, on) {
+    S.visible[mid] = on;
+    document.querySelectorAll('[data-toggle="' + mid + '"]').forEach((el) => { el.checked = on; });
+    const row = document.querySelector('#liveBody tr[data-model="' + mid + '"]');
+    if (row) row.classList.toggle("is-off", !on);
+    renderCharts();
+    renderStrip();
+    if (view3d) view3d.setVisible(mid, on);
+  }
+
+  // ---------------------------------------------------------------- scorecard
+  const ICON = {
+    good: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.3l2.6 2.6L10 3.2" stroke="currentColor" stroke-width="2" fill="none"/></svg>',
+    warn: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1l5.2 9.5H.8z" fill="currentColor"/></svg>',
+    bad: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="2"/></svg>',
+  };
+  const SEV = ["good", "warn", "bad"];
+  const worst = (...s) => SEV[Math.max(...s.map((x) => SEV.indexOf(x)))];
+  const sevKm = (d, near = 100, far = 2000) => (Math.abs(d) < near ? "good" : Math.abs(d) < far ? "warn" : "bad");
+  const sevT = (d) => (Math.abs(d) < 600 ? "good" : Math.abs(d) < 3600 ? "warn" : "bad");
+  const chip = (sev, text) => '<span class="delta delta--' + sev + '">' + ICON[sev] + text + "</span>";
+  const refChip = (text) => '<span class="delta delta--ref">' + text + "</span>";
+
+  function renderCards() {
+    const T = S.truth.id;
+    const tCla = truthEvent("closest_lunar_approach"), tMed = truthEvent("max_earth_distance");
+    const tEi = truthEvent("entry_interface");
+    const tBlack = S.windows.filter((w) => w.model === T && w.kind === "lunar_blackout");
+    const err = S.metrics.position_error_km;
+    const html = S.models.map((m) => {
+      const facts = [];
+      const cla = modelEvent(m.id, "closest_lunar_approach");
+      if (cla) {
+        let d = "";
+        if (m.isTruth) d = refChip("reference");
+        else if (tCla) d = chip(worst(sevKm(cla.value - tCla.value, 100, 2000), sevT(cla.t - tCla.t)), signed(cla.value - tCla.value, "km") + ", " + signedDur(cla.t - tCla.t));
+        facts.push(["Closest to the Moon", nf0.format(cla.value) + " km", fmtShort(S.epochMs + cla.t * 1000) + " · altitude", d]);
+      } else if (tCla) facts.push(["Closest to the Moon", "No flyby", "", chip("bad", "never reaches the Moon")]);
+      const med = modelEvent(m.id, "max_earth_distance");
+      if (med) {
+        let d = m.isTruth ? refChip("reference") : tMed ? chip(sevKm(med.value - tMed.value, 100, 2000), signed(med.value - tMed.value, "km")) : "";
+        facts.push(["Farthest from Earth", nf0.format(med.value) + " km", fmtShort(S.epochMs + med.t * 1000), d]);
+      }
+      const ei = modelEvent(m.id, "entry_interface"), rp = modelEvent(m.id, "return_perigee");
+      if (ei) {
+        const d = m.isTruth ? refChip("reference") : tEi ? chip(sevT(ei.t - tEi.t), signedDur(ei.t - tEi.t) + (ei.t > tEi.t ? " late" : ei.t < tEi.t ? " early" : "")) : "";
+        facts.push(["Back at Earth", fmtShort(S.epochMs + ei.t * 1000), "entry interface", d]);
+      } else if (rp) facts.push(["Back at Earth", "Misses", "closest return " + nf0.format(rp.value) + " km up", chip("bad", "no entry")]);
+      else if (tEi) facts.push(["Back at Earth", "Not home", "no return before the data ends", chip("bad", "no entry")]);
+      const bl = S.windows.filter((w) => w.model === m.id && w.kind === "lunar_blackout");
+      if (bl.length || tBlack.length) {
+        const dur = bl.reduce((s, w) => s + (w.b - w.a), 0), tdur = tBlack.reduce((s, w) => s + (w.b - w.a), 0);
+        let d = "";
+        if (m.isTruth) d = refChip("reference");
+        else if (!bl.length) d = chip("bad", "none predicted");
+        else if (tBlack.length) d = chip(worst(sevT(bl[0].a - tBlack[0].a), sevT(dur - tdur)), "starts " + signedDur(bl[0].a - tBlack[0].a) + ", lasts " + signedDur(dur - tdur));
+        facts.push(["Behind the Moon", bl.length ? fmtDur(dur) : "No blackout", bl.length ? "from " + fmtShort(S.epochMs + bl[0].a * 1000) : "", d]);
+      }
+      if (!m.isTruth && err && err.series[m.id]) {
+        const s = err.series[m.id], v = s.v[s.v.length - 1];
+        facts.push(["Off NASA at the end", nf0.format(v) + " km", fmtShort(S.epochMs + s.t[s.t.length - 1] * 1000), chip(sevKm(v, 100, 10000), sevKm(v, 100, 10000) === "good" ? "close" : sevKm(v, 100, 10000) === "warn" ? "drifting" : "lost")]);
+      }
+      return '<article class="card' + (m.isTruth ? " card--truth" : "") + '" data-model="' + esc(m.id) + '" style="' + modelSwatchVars(m) + '">' +
+        '<div class="card__head"><h3 class="card__title">' + esc(m.label) + truthTag(m) + '</h3><p class="card__desc">' + esc(m.description) + "</p></div>" +
+        '<dl class="facts">' + facts.map(([k, v, sub, d]) => '<div class="fact"><dt>' + esc(k) + '</dt><dd><span class="val">' + esc(v) + "</span>" + d + (sub ? '<span class="sub">' + esc(sub) + "</span>" : "") + "</dd></div>").join("") + "</dl></article>";
+    }).join("");
+    $("cards").innerHTML = html;
+    $("statusLegend").innerHTML = "<span>Chips:</span>" + chip("good", "close: within 100 km and 10 min") + chip("warn", "off: within 2,000 km and 1 h") + chip("bad", "wrong: beyond that, or the event never happens");
+  }
+
+  // ---------------------------------------------------------------- live readout
+  function metricAt(key, mid, t) {
+    const m = S.metrics[key];
+    if (!m || !m.series[mid]) return NaN;
+    return interp1(m.series[mid].t, m.series[mid].v, t);
+  }
+  function renderLive(t) {
+    for (const m of S.models) {
+      const row = document.querySelector('#liveBody tr[data-model="' + m.id + '"]');
+      if (!row) continue;
+      const e = m.isTruth ? "ref" : metricAt("position_error_km", m.id, t);
+      const set = (c, v) => { row.querySelector('[data-cell="' + c + '"]').textContent = v; };
+      set("err", e === "ref" ? "ref." : isFinite(e) ? fmtNum(e) : "-");
+      set("earth", fmtNum(metricAt("earth_range_km", m.id, t)));
+      set("moon", fmtNum(metricAt("moon_range_km", m.id, t)));
+    }
+  }
+  function renderClock(t) {
+    $("met").textContent = fmtMET(t);
+    $("utc").textContent = fmtUTC(S.epochMs + t * 1000);
+    const ev = S.events.filter((e) => e.model === S.truth.id);
+    let last = null, next = null;
+    for (const e of ev) { if (e.t <= t + 0.5) last = e; else { next = e; break; } }
+    let txt = "";
+    if (last) txt += "Last: <b>" + esc(eventLabel(last.key)) + "</b> " + fmtDur(t - last.t) + " ago";
+    if (next) txt += (txt ? ". " : "") + "Next: <b>" + esc(eventLabel(next.key)) + "</b> in " + fmtDur(next.t - t);
+    $("phase").innerHTML = txt;
+    const slider = $("scrubber");
+    if (document.activeElement !== slider) slider.value = String(t);
+    if (S.chapters) {
+      let cur = -1;
+      S.chapters.forEach((c, i) => { if (Math.abs(c.t - t) < 1800) cur = i; });
+      document.querySelectorAll("#chapters .chip").forEach((el, i) => el.setAttribute("aria-current", i === cur ? "true" : "false"));
+    }
+  }
+
+  // ---------------------------------------------------------------- charts
+  let syncing = false;
+  function axisColours() {
+    return { ink: cssVar("--ink"), ink2: cssVar("--ink-2"), muted: cssVar("--muted"), rule: cssVar("--rule"), ruleStrong: cssVar("--rule-strong"), surface: cssVar("--surface") };
+  }
+  function baseLayout(c, height) {
+    const coarse = window.matchMedia("(pointer: coarse)").matches;
+    return {
+      height, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+      margin: { l: 58, r: 14, t: 26, b: 34 },
+      font: { family: "Barlow, 'Segoe UI', system-ui, sans-serif", size: 12, color: c.ink2 },
+      xaxis: {
+        type: "date", range: [dateStr(S.t0), dateStr(S.t1)], gridcolor: c.rule, linecolor: c.ruleStrong, zeroline: false,
+        tickformat: "%-d %b", hoverformat: "%-d %b %H:%M UTC", tickfont: { color: c.muted },
+      },
+      yaxis: { gridcolor: c.rule, zeroline: false, linecolor: c.ruleStrong, tickfont: { family: "'IBM Plex Mono', monospace", size: 11, color: c.muted }, automargin: true },
+      hovermode: "x unified",
+      hoverlabel: { bgcolor: c.surface, bordercolor: c.ruleStrong, font: { color: c.ink, family: "'IBM Plex Mono', monospace", size: 12 } },
+      showlegend: false,
+      dragmode: coarse ? false : "zoom",
+    };
+  }
+  function markerShapes(c) {
+    const keys = [["model_seed", "Models start"], ["closest_lunar_approach", "Flyby"], ["entry_interface", "Entry"]];
+    const shapes = [], ann = [];
+    for (const [k, label] of keys) {
+      const e = truthEvent(k);
+      if (!e || e.t < S.t0 || e.t > S.t1) continue;
+      shapes.push({ type: "line", xref: "x", yref: "paper", x0: dateStr(e.t), x1: dateStr(e.t), y0: 0, y1: 1, line: { color: c.ruleStrong, width: 1, dash: "dot" } });
+      ann.push({ xref: "x", yref: "paper", x: dateStr(e.t), y: 1, yanchor: "bottom", xanchor: "center", text: label, showarrow: false, font: { size: 11, color: c.muted } });
+    }
+    return { shapes, ann };
+  }
+  function watermark(c) {
+    return S.meta.synthetic !== false ? [{ xref: "paper", yref: "paper", x: 1, y: 0.02, xanchor: "right", yanchor: "bottom", text: "SYNTHETIC", showarrow: false, font: { family: "'Barlow Semi Condensed', sans-serif", size: 13, color: c.muted }, opacity: 0.8 }] : [];
+  }
+
+  // The off-scale rule. Sort the visible models' peaks; walk up from the smallest and
+  // cut at the first jump of more than CLIP_FACTOR. The truth is never cut.
+  function fitAxis(key, mids) {
+    const m = S.metrics[key];
+    const peaks = mids.map((id) => {
+      const v = m.series[id].v; let hi = -Infinity, lo = Infinity;
+      for (let i = 0; i < v.length; i++) { if (v[i] > hi) hi = v[i]; if (v[i] < lo) lo = v[i]; }
+      return { id, hi, lo };
+    }).sort((a, b) => a.hi - b.hi);
+    const pos = peaks.filter((p) => p.hi > 0);
+    let cutAt = Infinity;
+    for (let i = 0; i < pos.length - 1; i++) if (pos[i + 1].hi / pos[i].hi > CLIP_FACTOR) { cutAt = pos[i].hi; break; }
+    const truthPeak = peaks.find((p) => p.id === S.truth.id);
+    if (truthPeak && truthPeak.hi > cutAt) cutAt = Infinity;
+    const kept = peaks.filter((p) => p.hi <= cutAt), off = peaks.filter((p) => p.hi > cutAt);
+    if (!off.length || !kept.length) return { range: null, off: [] };
+    const top = Math.max(...kept.map((p) => p.hi)), bottom = Math.min(0, ...kept.map((p) => p.lo));
+    return { range: [bottom, top * 1.08 || 1], off };
+  }
+
+  function chartTraces(key, dark, c) {
+    const m = S.metrics[key];
+    const mids = S.models.map((x) => x.id).filter((id) => m.series[id] && S.visible[id]);
+    const traces = [];
+    // truth last, so it draws on top
+    const order = mids.filter((id) => id !== S.truth.id).concat(mids.includes(S.truth.id) ? [S.truth.id] : []);
+    for (const id of order) {
+      const md = S.byId[id], s = m.series[id];
+      traces.push({
+        type: "scatter", mode: "lines", name: md.label, x: Array.from(s.t, dateStr), y: Array.from(s.v),
+        line: { color: colourOf(md, dark), width: md.isTruth ? 3.5 : 2, shape: key === "delta_v_m_s" ? "hv" : "linear" },
+        hovertemplate: "%{y:,.4~r} " + esc(m.unit),
+      });
+    }
+    return { traces, mids };
+  }
+
+  function buildChartDom() {
+    $("charts").innerHTML = S.metricOrder.map((k) => {
+      const info = METRIC_INFO[k] || { title: k.replace(/_/g, " "), blurb: "" };
+      const logOK = info.log || /_error_(km|s)$/.test(k);
+      return '<article class="chart" data-metric="' + esc(k) + '"><div class="chart__head"><h3>' + esc(info.title) + '<span class="chart__unit">' + esc(S.metrics[k].unit) + "</span></h3>" +
+        (logOK ? '<button type="button" class="toggle" data-log="' + esc(k) + '" aria-pressed="false">Log scale</button>' : "") + "</div>" +
+        (info.blurb ? '<p class="chart__blurb">' + esc(info.blurb) + "</p>" : "") +
+        '<div class="plot-wrap"><div class="plot"></div><div class="cursor"></div></div><p class="clipnote" aria-live="polite"></p></article>';
+    }).join("");
+    S.charts = S.metricOrder.map((k) => {
+      const el = document.querySelector('.chart[data-metric="' + k + '"]');
+      return { key: k, el, gd: el.querySelector(".plot"), cursor: el.querySelector(".cursor"), note: el.querySelector(".clipnote"), log: false, ready: false };
+    });
+    document.querySelectorAll("[data-log]").forEach((b) => b.addEventListener("click", () => {
+      const ch = S.charts.find((x) => x.key === b.dataset.log);
+      ch.log = !ch.log; b.setAttribute("aria-pressed", String(ch.log));
+      renderChart(ch);
+    }));
+  }
+
+  function renderChart(ch) {
+    const dark = isDark(), c = axisColours();
+    const { traces, mids } = chartTraces(ch.key, dark, c);
+    const layout = baseLayout(c, 270);
+    const unit = S.metrics[ch.key].unit;
+    const mk = markerShapes(c);
+    layout.shapes = mk.shapes;
+    layout.annotations = mk.ann.concat(watermark(c));
+    if (ch.xrange) layout.xaxis.range = ch.xrange;
+    let note = "";
+    if (ch.log) {
+      layout.yaxis.type = "log";
+      layout.yaxis.tickformat = ",~g";
+      note = "Log scale: each gridline is ten times the one below. Every model fits.";
+    } else {
+      const fit = fitAxis(ch.key, mids);
+      // SI suffixes read "400k" nicely but turn 0.5 km into "500m"; use them only for big ranges.
+      let hiAll = 0;
+      mids.forEach((id) => S.metrics[ch.key].series[id].v.forEach((v) => { if (v > hiAll) hiAll = v; }));
+      const top = fit.range ? fit.range[1] : hiAll;
+      layout.yaxis.tickformat = unit === "km/s" ? ".1f" : top >= 1e4 ? "~s" : ",~g";
+      if (fit.range) {
+        layout.yaxis.range = fit.range;
+        const top = fit.range[1];
+        fit.off.forEach((p, k) => {
+          const md = S.byId[p.id], s = S.metrics[ch.key].series[p.id];
+          let i = 0; while (i < s.v.length && s.v[i] <= top) i++;
+          let tx = s.t[Math.min(i, s.t.length - 1)];
+          if (i > 0 && i < s.v.length) tx = s.t[i - 1] + ((top - s.v[i - 1]) / (s.v[i] - s.v[i - 1])) * (s.t[i] - s.t[i - 1]);
+          const span = S.t1 - S.t0, frac = (tx - S.t0) / span, leftSide = frac > 0.6;
+          const narrow = (ch.gd.clientWidth || 600) < 560;
+          const label = narrow ? esc(md.label) + " ↑ " + fmtVal(p.hi, unit) + " " + esc(unit)
+                               : esc(md.label) + " ↑ off scale, peak " + fmtVal(p.hi, unit) + " " + esc(unit);
+          layout.annotations.push({
+            x: dateStr(tx), y: top, xref: "x", yref: "y", showarrow: true, arrowhead: 2, arrowsize: 1, arrowwidth: 1.5,
+            arrowcolor: colourOf(md, dark), ax: leftSide ? -34 : 34, ay: 26 + 22 * k,
+            xanchor: leftSide ? "right" : "left", text: label,
+            font: { size: 11.5, color: c.ink, family: "Barlow, sans-serif" }, bgcolor: c.surface, bordercolor: colourOf(md, dark), borderwidth: 1.2, borderpad: 3,
+          });
+        });
+        note = "<b>Off scale:</b> " + fit.off.map((p) => esc(S.byId[p.id].label) + " (peak " + fmtVal(p.hi, unit) + " " + esc(unit) + ")").join(", ") +
+          ". The axis is fitted to the others." + (ch.key.endsWith("_error_km") || METRIC_INFO[ch.key]?.log ? " Log scale shows all of them." : "");
+      }
+    }
+    ch.note.innerHTML = note;
+    const config = { displayModeBar: false, responsive: true, doubleClick: "reset" };
+    Plotly.react(ch.gd, traces, layout, config).then(() => {
+      if (!ch.ready) {
+        ch.ready = true;
+        ch.gd.on("plotly_relayout", (ev) => onRelayout(ch, ev));
+        attachSeek(ch.gd);
+      }
+      placeCursor(ch.gd, ch.cursor, clock.t);
+    });
+  }
+  function renderCharts() { S.charts.forEach(renderChart); }
+
+  function onRelayout(src, ev) {
+    if (syncing) return;
+    let range = null;
+    if (ev["xaxis.range[0]"] !== undefined) range = [ev["xaxis.range[0]"], ev["xaxis.range[1]"]];
+    else if (ev["xaxis.range"]) range = ev["xaxis.range"];
+    else if (ev["xaxis.autorange"]) range = [dateStr(S.t0), dateStr(S.t1)];
+    if (!range) { placeAllCursors(clock.t); return; }
+    syncing = true;
+    const all = S.charts.map((c) => c).concat(S.strip ? [S.strip] : []);
+    all.forEach((c) => { c.xrange = range; });
+    Promise.all(all.filter((c) => c !== src && c.ready).map((c) => Plotly.relayout(c.gd, { "xaxis.range": range.slice(), "xaxis.autorange": false })))
+      .finally(() => { syncing = false; placeAllCursors(clock.t); });
+    if (ev["xaxis.autorange"]) Plotly.relayout(src.gd, { "xaxis.range": range.slice(), "xaxis.autorange": false });
+  }
+
+  function placeCursor(gd, cur, t) {
+    const fl = gd._fullLayout;
+    if (!fl || !fl.xaxis || !fl._size) return;
+    const r = fl.xaxis.range.map((s) => tFromDateStr(s));
+    const sz = fl._size;
+    const u = (t - r[0]) / (r[1] - r[0]);
+    if (!(u >= 0 && u <= 1)) { cur.hidden = true; return; }
+    cur.hidden = false;
+    cur.style.left = (sz.l + u * sz.w).toFixed(1) + "px";
+    cur.style.top = sz.t + "px";
+    cur.style.height = sz.h + "px";
+  }
+  function placeAllCursors(t) {
+    S.charts.forEach((ch) => ch.ready && placeCursor(ch.gd, ch.cursor, t));
+    if (S.strip && S.strip.ready) placeCursor(S.strip.gd, S.strip.cursor, t);
+  }
+  // Click-to-seek from the pointer position, so a click on empty plot area works too.
+  function attachSeek(gd) {
+    let down = null;
+    gd.addEventListener("pointerdown", (e) => { down = { x: e.clientX, y: e.clientY }; }, true);
+    gd.addEventListener("pointerup", (e) => {
+      if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) { down = null; return; }
+      down = null;
+      const fl = gd._fullLayout; if (!fl || !fl._size) return;
+      const box = gd.getBoundingClientRect(), sz = fl._size;
+      const px = e.clientX - box.left - sz.l, py = e.clientY - box.top - sz.t;
+      if (px < 0 || px > sz.w || py < 0 || py > sz.h) return;
+      const r = fl.xaxis.range.map((s) => tFromDateStr(s));
+      clock.seek(r[0] + (px / sz.w) * (r[1] - r[0]));
+      refresh(true);
+    }, true);
+  }
+
+  // ---------------------------------------------------------------- visibility strip
+  function renderStrip() {
+    const dark = isDark(), c = axisColours();
+    const stations = [];
+    S.windows.forEach((w) => { if (w.kind !== "lunar_blackout" && w.station && !stations.includes(w.station)) stations.push(w.station); });
+    const BLACK = "Behind the Moon";
+    const cats = stations.concat(S.windows.some((w) => w.kind === "lunar_blackout") ? [BLACK] : []);
+    const traces = [];
+    for (const m of S.models) {
+      if (!S.visible[m.id]) continue;
+      const ws = S.windows.filter((w) => w.model === m.id);
+      if (!ws.length) continue;
+      traces.push({
+        type: "bar", orientation: "h", name: m.label,
+        y: ws.map((w) => (w.kind === "lunar_blackout" ? BLACK : w.station)),
+        base: ws.map((w) => dateStr(w.a)), x: ws.map((w) => (w.b - w.a) * 1000),
+        customdata: ws.map((w) => [fmtShort(S.epochMs + w.a * 1000), fmtShort(S.epochMs + w.b * 1000), fmtDur(w.b - w.a)]),
+        marker: { color: colourOf(m, dark), line: { width: 0 } },
+        hovertemplate: "<b>" + esc(m.label) + "</b><br>%{customdata[0]} to %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
+      });
+    }
+    const layout = baseLayout(c, 300);
+    layout.barmode = "group"; layout.bargap = 0.28; layout.bargroupgap = 0.12;
+    layout.hovermode = "closest";
+    layout.yaxis = { type: "category", categoryorder: "array", categoryarray: cats, autorange: "reversed", gridcolor: "rgba(0,0,0,0)", tickfont: { family: "'Barlow Semi Condensed', sans-serif", size: 13, color: c.ink2 }, automargin: true, fixedrange: true };
+    layout.margin.l = 110;
+    const mk = markerShapes(c);
+    layout.shapes = mk.shapes; layout.annotations = mk.ann.concat(watermark(c));
+    if (S.strip && S.strip.xrange) layout.xaxis.range = S.strip.xrange;
+    if (!S.strip) S.strip = { key: "strip", gd: $("stripPlot"), cursor: $("stripCursor"), ready: false };
+    const st = S.strip;
+    Plotly.react(st.gd, traces, layout, { displayModeBar: false, responsive: true, doubleClick: "reset" }).then(() => {
+      if (!st.ready) { st.ready = true; st.gd.on("plotly_relayout", (ev) => onRelayout(st, ev)); attachSeek(st.gd); }
+      placeCursor(st.gd, st.cursor, clock.t);
+    });
+  }
+
+  // ---------------------------------------------------------------- 3D view
+  let view3d = null;
+  function interpOrion(tr, t, out) {
+    const n = tr.t.length;
+    if (!n || t < tr.t[0] || t > tr.t[n - 1]) return null;
+    let i = lowerBound(tr.t, t);
+    if (i === 0) i = 1;
+    const a = tr.t[i - 1], b = tr.t[i], u = b > a ? (t - a) / (b - a) : 0;
+    out.x = (tr.x[i - 1] + u * (tr.x[i] - tr.x[i - 1])) * 1000;
+    out.y = (tr.y[i - 1] + u * (tr.y[i] - tr.y[i - 1])) * 1000;
+    out.z = (tr.z[i - 1] + u * (tr.z[i] - tr.z[i - 1])) * 1000;
+    return out;
+  }
+
+  function init3D() {
+    const C = window.Cesium;
+    const fb = (msg) => { $("fallback").hidden = false; $("fallbackText").textContent = msg; };
+    if (!C) { fb("The 3D view could not load CesiumJS from the CDN. The charts, scorecard and contact windows below still work."); return null; }
+    C.CreditDisplay.cesiumCredit = new C.Credit('<a href="https://cesium.com/platform/cesiumjs/" target="_blank" rel="noopener">CesiumJS</a>', true);
+    let widget;
+    try {
+      widget = new C.CesiumWidget($("globe"), {
+        clock: clock.cz,
+        // No tiled globe: it needs web workers to mesh its tiles, which the sandbox
+        // blocks. Earth is drawn below as a textured ellipsoid, like the Moon.
+        globe: false,
+        skyAtmosphere: false,
+        skyBox: new C.SkyBox({ sources: {
+          positiveX: "assets/skybox/tycho2t3_80_px.jpg", negativeX: "assets/skybox/tycho2t3_80_mx.jpg",
+          positiveY: "assets/skybox/tycho2t3_80_py.jpg", negativeY: "assets/skybox/tycho2t3_80_my.jpg",
+          positiveZ: "assets/skybox/tycho2t3_80_pz.jpg", negativeZ: "assets/skybox/tycho2t3_80_mz.jpg" } }),
+        showRenderLoopErrors: false,
+        creditContainer: $("credits"),
+        shouldAnimate: false,
+        automaticallyTrackDataSourceClocks: false,
+      });
+    } catch (e) {
+      fb("The 3D view needs WebGL, which this browser did not provide (" + (e && e.message ? e.message : e) + "). Everything below still works.");
+      return null;
+    }
+    clock.widgetTicks = true;
+    const scene = widget.scene, camera = scene.camera;
+    if (scene.moon) scene.moon = scene.moon.destroy();  // we draw the tabulated Moon ourselves
+    scene.fog.enabled = false;
+    scene.backgroundColor = C.Color.BLACK;
+    scene.renderError.addEventListener((_s, err) => fb("The 3D view stopped with a rendering error: " + (err && err.message ? err.message : err)));
+    camera.frustum.far = 1e12;
+    const ssc = scene.screenSpaceCameraController;
+    ssc.maximumZoomDistance = 4e9;
+    ssc.minimumZoomDistance = 2.5e6;
+    ssc.enableCollisionDetection = false;
+
+    // ICRF -> Earth-fixed. Full IAU 2006 when its tables load, else GMST only (TEME).
+    let icrfReady = false;
+    C.Transforms.preloadIcrfFixed(new C.TimeInterval({ start: clock.cz.startTime, stop: clock.cz.stopTime }))
+      .then(() => { icrfReady = true; })
+      .catch(() => { icrfReady = false; });
+    const M3 = new C.Matrix3(), M4 = new C.Matrix4();
+    let frameUsed = "";
+    function frameMatrix(time) {
+      let m = icrfReady ? C.Transforms.computeIcrfToFixedMatrix(time, M3) : undefined;
+      const used = m ? "icrf" : "gmst";
+      if (!m) m = C.Transforms.computeTemeToPseudoFixedMatrix(time, M3);
+      if (used !== frameUsed) {
+        frameUsed = used;
+        $("frameLabel").textContent = used === "icrf" ? "Earth-centred inertial view (ICRF)" : "Earth-centred inertial view (ICRF, GMST approx.)";
+        $("frameLabel").title = used === "icrf" ? "Earth's orientation from the IAU 2006 precession-nutation tables"
+          : "Earth's orientation from sidereal time only; precession and nutation are ignored (under 0.4 deg in 2026). Trajectories are unaffected.";
+      }
+      return m;
+    }
+
+    const tracks = scene.primitives.add(new C.PolylineCollection());
+    const points = scene.primitives.add(new C.PointPrimitiveCollection());
+    const labels = scene.primitives.add(new C.LabelCollection());
+    const colorOf = (m) => C.Color.fromCssColorString(m.colourDark);
+    const CHUNK = 48;
+    const models3d = {};
+    const toCart = (tr, i) => new C.Cartesian3(tr.x[i] * 1000, tr.y[i] * 1000, tr.z[i] * 1000);
+
+    for (const m of S.models) {
+      const tr = S.orion[m.id];
+      if (!tr) continue;
+      const col = colorOf(m), width = m.isTruth ? 3.5 : 2;
+      const dim = col.withAlpha(m.isTruth ? 0.42 : 0.3), bright = col.withAlpha(0.95);
+      const chunks = [];
+      for (let s = 0; s < tr.t.length - 1; s += CHUNK) {
+        const e = Math.min(tr.t.length - 1, s + CHUNK), pos = [];
+        for (let i = s; i <= e; i++) pos.push(toCart(tr, i));
+        const pl = tracks.add({ positions: pos, width, material: C.Material.fromType("Color", { color: dim.clone() }) });
+        chunks.push({ s, e, t0: tr.t[s], t1: tr.t[e], pl, lit: false });
+      }
+      const live = tracks.add({ positions: [toCart(tr, 0), toCart(tr, 0)], width, material: C.Material.fromType("Color", { color: bright.clone() }), show: false });
+      const pt = points.add({ position: toCart(tr, 0), pixelSize: m.isTruth ? 11 : 8, color: col, outlineColor: C.Color.BLACK, outlineWidth: 2, id: { kind: "marker", model: m.id }, disableDepthTestDistance: 0 });
+      models3d[m.id] = { m, tr, chunks, live, pt, dim, bright, cur: -2, visible: true };
+    }
+    // Orion label rides on the truth marker
+    const orionLabel = labels.add({ text: "Orion", font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.WHITE, showBackground: true, backgroundColor: new C.Color(0, 0, 0, 0.55), pixelOffset: new C.Cartesian2(10, -12), horizontalOrigin: C.HorizontalOrigin.LEFT, disableDepthTestDistance: Number.POSITIVE_INFINITY });
+    const earthLabel = labels.add({ text: "Earth", position: C.Cartesian3.ZERO, font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.fromCssColorString("#cfe1ff"), pixelOffset: new C.Cartesian2(0, 22), horizontalOrigin: C.HorizontalOrigin.CENTER, disableDepthTestDistance: Number.POSITIVE_INFINITY });
+    const moonLabel = labels.add({ text: "Moon", font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.fromCssColorString("#e6e6e6"), pixelOffset: new C.Cartesian2(0, 22), horizontalOrigin: C.HorizontalOrigin.CENTER, disableDepthTestDistance: Number.POSITIVE_INFINITY });
+
+    // Earth: textured WGS84 ellipsoid in the Earth-fixed frame, so it turns under the inertial camera
+    const eR = C.Ellipsoid.WGS84.radii;
+    scene.primitives.add(new C.Primitive({
+      geometryInstances: new C.GeometryInstance({ geometry: new C.EllipsoidGeometry({ radii: eR, vertexFormat: C.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat, stackPartitions: 96, slicePartitions: 96 }) }),
+      appearance: new C.MaterialAppearance({ material: C.Material.fromType("Image", { image: "assets/earth.jpg" }), faceForward: true, closed: true }),
+      asynchronous: false,
+    }));
+
+    // Moon: textured sphere at the tabulated position, near side toward Earth, plus its path
+    let moonPrim = null;
+    if (S.moon) {
+      const mp = [];
+      for (let i = 0; i < S.moon.t.length; i += 3) mp.push(toCart(S.moon, i));
+      tracks.add({ positions: mp, width: 1, material: C.Material.fromType("Color", { color: new C.Color(0.75, 0.8, 0.88, 0.22) }) });
+      moonPrim = scene.primitives.add(new C.Primitive({
+        geometryInstances: new C.GeometryInstance({ geometry: new C.EllipsoidGeometry({ radii: new C.Cartesian3(R_MOON_KM * 1000, R_MOON_KM * 1000, R_MOON_KM * 1000), vertexFormat: C.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat, stackPartitions: 48, slicePartitions: 48 }) }),
+        appearance: new C.MaterialAppearance({ material: C.Material.fromType("Image", { image: "assets/moon.jpg" }), faceForward: true, closed: true }),
+        asynchronous: false,
+      }));
+    }
+
+    // Event markers along the tracks (NASA's events, plus each model's apsides and entry)
+    const evPts = [];
+    for (const e of S.events) {
+      const md = models3d[e.model];
+      if (!md) continue;
+      if (e.model !== S.truth.id && e.kind !== "apsis" && e.key !== "entry_interface") continue;
+      const p = interpOrion(md.tr, e.t, {});
+      if (!p) continue;
+      const pt = points.add({ position: new C.Cartesian3(p.x, p.y, p.z), pixelSize: e.kind === "burn" ? 7 : 8, color: e.kind === "burn" ? C.Color.fromCssColorString("#f2b01e") : C.Color.WHITE,
+        outlineColor: colorOf(md.m), outlineWidth: 2.5, id: { kind: "event", ev: e } });
+      evPts.push({ pt, model: e.model });
+    }
+
+    // camera
+    let camMode = "mission";
+    const truthTr = S.orion[S.truth.id];
+    const pA = interpOrion(truthTr, (truthEvent("model_seed") || { t: truthTr.t[0] }).t, {}) || { x: 1, y: 0, z: 0 };
+    const clT = truthEvent("closest_lunar_approach");
+    const pB = interpOrion(truthTr, clT ? clT.t : truthTr.t[Math.floor(truthTr.t.length / 2)], {}) || { x: 0, y: 1, z: 0 };
+    const vA = new C.Cartesian3(pA.x, pA.y, pA.z), vB = new C.Cartesian3(pB.x, pB.y, pB.z);
+    // Look down on the Moon's orbital plane: the free return lies close to it. (Orion's
+    // seed and flyby positions are nearly opposite each other, so their cross product is
+    // ill-conditioned; the Moon's own motion is not.)
+    let normal = C.Cartesian3.normalize(C.Cartesian3.cross(vA, vB, new C.Cartesian3()), new C.Cartesian3());
+    if (S.moon && S.moon.t.length > 10) {
+      const k = Math.floor(S.moon.t.length / 2), j = Math.min(S.moon.t.length - 1, k + 6);
+      const n2 = C.Cartesian3.cross(toCart(S.moon, k), toCart(S.moon, j), new C.Cartesian3());
+      if (C.Cartesian3.magnitude(n2) > 0) normal = C.Cartesian3.normalize(n2, n2);
+    }
+    if (normal.z < 0) C.Cartesian3.negate(normal, normal);
+    const midMission = C.Cartesian3.multiplyByScalar(vB, 0.5, new C.Cartesian3());
+    const tilt = C.Cartesian3.normalize(C.Cartesian3.subtract(C.Cartesian3.ZERO, vB, new C.Cartesian3()), new C.Cartesian3());
+    function viewDir(k) { return C.Cartesian3.normalize(C.Cartesian3.add(normal, C.Cartesian3.multiplyByScalar(tilt, k, new C.Cartesian3()), new C.Cartesian3()), new C.Cartesian3()); }
+    const center = new C.Cartesian3(), centerFixed = new C.Cartesian3(), tmp = {};
+    function centerFor(t) {
+      if (camMode === "orion" && interpOrion(truthTr, Math.min(Math.max(t, truthTr.t[0]), truthTr.t[truthTr.t.length - 1]), tmp)) return C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
+      if (camMode === "moon" && S.moon && interpOrion(S.moon, Math.min(Math.max(t, S.moon.t[0]), S.moon.t[S.moon.t.length - 1]), tmp)) return C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
+      if (camMode === "mission") return C.Cartesian3.clone(midMission, center);
+      if (camMode === "earth") return C.Cartesian3.clone(C.Cartesian3.ZERO, center);
+      return C.Cartesian3.clone(C.Cartesian3.ZERO, center);
+    }
+    function transformFor(time) {
+      const m3 = frameMatrix(time);
+      C.Matrix3.multiplyByVector(m3, centerFor(clock.t), centerFixed);
+      return C.Matrix4.fromRotationTranslation(m3, centerFixed, new C.Matrix4());
+    }
+    function setCam(mode) {
+      camMode = mode;
+      ["Mission", "Orion", "Moon", "Earth"].forEach((n) => $("cam" + n).setAttribute("aria-pressed", String(mode === n.toLowerCase())));
+      const el = $("globe"), aspect = Math.max(0.3, el.clientWidth / Math.max(1, el.clientHeight));
+      // Cesium's fov spans the wider dimension; fit the span to the narrower one.
+      const halfNarrow = aspect >= 1 ? Math.atan(Math.tan(Math.PI / 6) / aspect) : Math.PI / 6;
+      const span = mode === "mission" ? 5.6e8 : mode === "orion" ? 6e7 : mode === "earth" ? 1.2e8 : 4e7;
+      const range = span / (2 * Math.tan(halfNarrow));
+      ssc.minimumZoomDistance = mode === "mission" ? 2e7 : mode === "earth" ? 9e6 : 4e6;
+      const off = C.Cartesian3.multiplyByScalar(viewDir(mode === "mission" ? 0.45 : 0.9), range, new C.Cartesian3());
+      camera.lookAtTransform(transformFor(clock.cz.currentTime), off);
+    }
+    $("camMission").addEventListener("click", () => setCam("mission"));
+    $("camOrion").addEventListener("click", () => setCam("orion"));
+    $("camMoon").addEventListener("click", () => setCam("moon"));
+    $("camEarth").addEventListener("click", () => setCam("earth"));
+
+    const pos = {}, moonP = {}, moonP2 = {};
+    const moonT = new C.Matrix4(), moonW = new C.Matrix4(), moonRot = new C.Matrix3(), mx = new C.Cartesian3(), my = new C.Cartesian3(), mz = new C.Cartesian3();
+    scene.preUpdate.addEventListener((_scene, time) => {
+      const t = C.JulianDate.secondsDifference(time, clock.epochJD);
+      const m3 = frameMatrix(time);
+      C.Matrix4.fromRotationTranslation(m3, C.Cartesian3.ZERO, M4);
+      C.Matrix4.clone(M4, tracks.modelMatrix);
+      C.Matrix4.clone(M4, points.modelMatrix);
+      C.Matrix4.clone(M4, labels.modelMatrix);
+      for (const id in models3d) {
+        const md = models3d[id];
+        const p = interpOrion(md.tr, t, pos);
+        md.pt.show = md.visible && !!p;
+        if (p) md.pt.position = new C.Cartesian3(p.x, p.y, p.z);
+        if (md.m.isTruth) { orionLabel.show = !!p && md.visible; if (p) orionLabel.position = md.pt.position; }
+        // track colouring: flown chunks bright, future chunks dim, current chunk drawn live
+        let cur = -1;
+        for (let k = 0; k < md.chunks.length; k++) if (t >= md.chunks[k].t0 && t <= md.chunks[k].t1) { cur = k; break; }
+        if (cur === -1 && md.chunks.length && t > md.chunks[md.chunks.length - 1].t1) cur = md.chunks.length;
+        if (cur !== md.cur) {
+          md.chunks.forEach((c, k) => { const lit = k < cur; if (lit !== c.lit) { c.lit = lit; c.pl.material.uniforms.color = (lit ? md.bright : md.dim).clone(); } });
+          md.cur = cur;
+        }
+        if (cur >= 0 && cur < md.chunks.length && p) {
+          const c = md.chunks[cur], arr = [];
+          for (let i = c.s; i <= c.e && md.tr.t[i] < t; i++) arr.push(toCart(md.tr, i));
+          arr.push(new C.Cartesian3(p.x, p.y, p.z));
+          if (arr.length < 2) arr.unshift(toCart(md.tr, c.s));
+          md.live.positions = arr;
+          md.live.show = md.visible;
+        } else md.live.show = false;
+      }
+      if (S.moon && interpOrion(S.moon, Math.min(Math.max(t, S.moon.t[0]), S.moon.t[S.moon.t.length - 1]), moonP)) {
+        moonLabel.position = new C.Cartesian3(moonP.x, moonP.y, moonP.z);
+        if (moonPrim) {
+          interpOrion(S.moon, Math.min(t + 600, S.moon.t[S.moon.t.length - 1]), moonP2);
+          const r = C.Cartesian3.fromElements(moonP.x, moonP.y, moonP.z, new C.Cartesian3());
+          const v = C.Cartesian3.fromElements(moonP2.x - moonP.x, moonP2.y - moonP.y, moonP2.z - moonP.z, new C.Cartesian3());
+          C.Cartesian3.normalize(C.Cartesian3.negate(r, mx), mx);           // body x toward Earth
+          C.Cartesian3.normalize(C.Cartesian3.cross(r, v, mz), mz);          // body z along orbit normal
+          if (!isFinite(mz.x)) C.Cartesian3.clone(C.Cartesian3.UNIT_Z, mz);
+          C.Cartesian3.cross(mz, mx, my);
+          C.Matrix3.setColumn(moonRot, 0, mx, moonRot); C.Matrix3.setColumn(moonRot, 1, my, moonRot); C.Matrix3.setColumn(moonRot, 2, mz, moonRot);
+          C.Matrix4.fromRotationTranslation(moonRot, r, moonT);
+          C.Matrix4.multiply(M4, moonT, moonW);
+          moonPrim.modelMatrix = moonW;
+        }
+      }
+    });
+    scene.postUpdate.addEventListener((_scene, time) => {
+      if (scene.mode !== C.SceneMode.SCENE3D) return;
+      const offset = C.Cartesian3.clone(camera.position);
+      camera.lookAtTransform(transformFor(time), offset);
+    });
+
+    // hover / tap labels
+    const tip = $("tip"), vp = $("globe");
+    const handler = new C.ScreenSpaceEventHandler(scene.canvas);
+    function showTip(position) {
+      const picked = scene.pick(position);
+      const id = picked && picked.id;
+      if (!id || !id.kind) { tip.hidden = true; return; }
+      let html = "";
+      if (id.kind === "event") {
+        const e = id.ev, md = S.byId[e.model];
+        html = "<b>" + esc(eventLabel(e.key)) + "</b><br><span class=\"dim\">" + esc(md.label) + "</span><br>" + esc(fmtShort(S.epochMs + e.t * 1000)) + " · " + esc(fmtMET(e.t)) +
+          (isFinite(e.value) ? "<br>" + esc(fmtVal(e.value, e.unit) + " " + e.unit) : "") + (e.note ? '<br><span class="dim">' + esc(e.note) + "</span>" : "");
+      } else {
+        const md = S.byId[id.model], t = clock.t;
+        const err = md.isTruth ? NaN : metricAt("position_error_km", md.id, t);
+        html = "<b>" + esc(md.label) + "</b><br><span class=\"dim\">" + (md.isTruth ? "Orion, reference track" : "Orion as this model predicts it") + "</span>" +
+          "<br>From Earth " + fmtNum(metricAt("earth_range_km", md.id, t)) + " km" + "<br>From the Moon " + fmtNum(metricAt("moon_range_km", md.id, t)) + " km" +
+          (isFinite(err) ? "<br>Off NASA " + fmtNum(err) + " km" : "");
+      }
+      tip.innerHTML = html;
+      tip.hidden = false;
+      const w = vp.clientWidth, x = position.x + 14, y = position.y + 14;
+      tip.style.left = Math.min(x, w - tip.offsetWidth - 8) + "px";
+      tip.style.top = Math.min(y, vp.clientHeight - tip.offsetHeight - 8) + "px";
+    }
+    handler.setInputAction((mv) => showTip(mv.endPosition), C.ScreenSpaceEventType.MOUSE_MOVE);
+    handler.setInputAction((ev) => showTip(ev.position), C.ScreenSpaceEventType.LEFT_CLICK);
+
+    setCam("mission");
+    return {
+      setVisible(mid, on) {
+        const md = models3d[mid];
+        if (!md) return;
+        md.visible = on;
+        md.chunks.forEach((c) => { c.pl.show = on; });
+        evPts.forEach((e) => { if (e.model === mid) e.pt.show = on; });
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------- main loop
+  let lastUi = 0;
+  function refresh(force) {
+    const t = clock.t;
+    renderClock(t);
+    renderLive(t);
+    placeAllCursors(t);
+    if (force && window.Cesium && clock.cz) clock.cz.currentTime = clock.cz.currentTime;
+  }
+  function loop(now) {
+    clock.frame(now);
+    if (now - lastUi > 66) { lastUi = now; refresh(false); }
+    requestAnimationFrame(loop);
+  }
+
+  function wireTransport() {
+    $("play").addEventListener("click", () => clock.setPlaying(!clock.playing));
+    $("speed").addEventListener("change", (e) => clock.setMultiplier(+e.target.value));
+    const sl = $("scrubber");
+    sl.min = String(S.t0); sl.max = String(S.t1); sl.step = "60";
+    sl.addEventListener("input", () => { clock.seek(+sl.value); refresh(true); });
+    document.addEventListener("keydown", (e) => {
+      if (e.code !== "Space" || e.target.closest("input, select, button, textarea, a")) return;
+      e.preventDefault(); clock.setPlaying(!clock.playing);
+    });
+  }
+
+  function onThemeChange() { renderCharts(); renderStrip(); }
+
+  async function main() {
+    try {
+      await load();
+    } catch (e) {
+      const el = $("loadErr");
+      el.hidden = false;
+      el.textContent = "Could not load the data files (" + e.message + "). Serve this folder over HTTP, for example with `python -m http.server` from demo/artemis2/, rather than opening index.html from disk.";
+      $("dataPill").textContent = "No data";
+      return;
+    }
+    renderStatic();
+    renderPanel();
+    renderCards();
+    const cla = truthEvent("closest_lunar_approach");
+    clock.init(cla ? Math.min(S.t1, Math.max(S.t0, cla.t - 3 * 3600)) : S.t0);
+    wireTransport();
+    if (window.Plotly) { buildChartDom(); renderCharts(); renderStrip(); }
+    else { $("charts").innerHTML = '<p class="loaderr">Plotly did not load from the CDN, so the charts are unavailable.</p>'; }
+    try { view3d = init3D(); } catch (e) { $("fallback").hidden = false; $("fallbackText").textContent = "The 3D view failed to start: " + e.message; console.error(e); }
+    refresh(true);
+    requestAnimationFrame(loop);
+    themeMQ.addEventListener("change", onThemeChange);
+    new MutationObserver(onThemeChange).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    let rT = 0;
+    window.addEventListener("resize", () => { clearTimeout(rT); rT = setTimeout(() => placeAllCursors(clock.t), 150); });
+  }
+  main();
+})();
+</script>
