@@ -50,13 +50,10 @@ def _git_commit() -> str:
 
 
 def _version() -> Optional[str]:
-    try:
-        from importlib.metadata import version
-        return version("orbital_engine")
-    except Exception:  # noqa: BLE001 - not installed: the pyproject version is the fallback
-        for line in (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
-            if line.startswith("version"):
-                return line.split("=", 1)[1].strip().strip('"')
+    """The checkout's own version (pyproject.toml), not an installed package's, which may be stale."""
+    for line in (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
+        if line.startswith("version"):
+            return line.split("=", 1)[1].strip().strip('"')
     return None
 
 
