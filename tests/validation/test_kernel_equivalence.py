@@ -635,6 +635,70 @@ def _build_cowell_drag_eccentric(session: Session, *, law: str) -> tuple[Simulat
     return sim, sats
 
 
+_TESSERAL_FULL = {"r_eq": geopotential.EARTH_R_EQ, "omega": drag.EARTH_OMEGA, **tesseral.EARTH_TESSERALS}
+# Body rotation rates other than the Earth's, rad/s: Mars (prograde, sidereal day 24.62 h) and Venus
+# (retrograde, 243 d) - so neither the sign nor the size of omega is the Earth's special case.
+MARS_OMEGA = 7.0882181e-5
+VENUS_OMEGA = -2.9924e-7
+
+
+def _build_cowell_tesseral(
+    session: Session, *, variant: str, theta0: float = 0.0, omega: float = drag.EARTH_OMEGA,
+) -> tuple[Simulation, np.ndarray]:
+    """
+    Cowell satellites at 550 km / 53 deg carrying `"tesseral"` (EGM96 4x4, turning at `omega` from
+    `theta0` at t = 0):
+
+    - `"alone"`: pm + tesseral, the tesseral term composed straight onto the central term.
+    - `"j2+zonal+tesseral"`: the full 4x4 field, pm + j2 + J3..J6 + tesseral.
+    - `"mixed"`: inside **one** kernel call - the full field plus exponential drag; the full field; pm
+      + j2 + J22 alone at `theta0` = 1.3; pm + tesseral turning at the Mars rate from -2.0; pm + j2 +
+      tesseral turning retrograde at the Venus rate; a tesseral body with **no** central term (the
+      term composed onto 0.0); pm + j2 without tesseral; and pm + j2 + zonal + layered drag without
+      tesseral. Per-body `theta0` and `omega` differ within the call.
+    """
+    sim = scenarios.earth_constellation(session, n_sats=8, n_planes=2, altitude_km=550.0)
+    sats = np.asarray(
+        [idx for name, idx in sim.name_to_index.items() if name.startswith("SAT-")], dtype=np.int64)
+    sim.set_propagator(sats, PropagatorType.COWELL)
+    field = {**_TESSERAL_FULL, "theta0": theta0, "omega": omega}
+    every = sats.tolist()
+    if variant == "alone":
+        sim.enable_force_model(gravity.POINT_MASS_MODEL, every)
+        sim.enable_force_model(tesseral.TESSERAL_MODEL, every, **field)
+    elif variant == "j2+zonal+tesseral":
+        sim.enable_force_model(gravity.POINT_MASS_MODEL, every)
+        sim.enable_force_model(geopotential.J2_MODEL, every, **_J2)
+        sim.enable_force_model(zonal.ZONAL_MODEL, every, **_ZONAL_FULL)
+        sim.enable_force_model(tesseral.TESSERAL_MODEL, every, **field)
+    elif variant == "mixed":
+        s = [int(i) for i in sats]
+        sim.enable_force_model(gravity.POINT_MASS_MODEL, [s[0], s[1], s[2], s[3], s[4], s[6], s[7]])
+        sim.enable_force_model(geopotential.J2_MODEL, [s[0], s[1], s[2], s[4], s[6], s[7]], **_J2)
+        sim.enable_force_model(zonal.ZONAL_MODEL, [s[0], s[1], s[7]], **_ZONAL_FULL)
+        sim.enable_force_model(drag.DRAG_MODEL, s[0], **_DRAG_COMMON, **_DRAG_EXPONENTIAL)
+        sim.enable_force_model(drag.DRAG_MODEL, s[7], **_DRAG_COMMON, **_DRAG_LAYERED)
+        sim.enable_force_model(tesseral.TESSERAL_MODEL, [s[0], s[1], s[5]], **field)
+        sim.enable_force_model(tesseral.TESSERAL_MODEL, s[2], r_eq=geopotential.EARTH_R_EQ,
+                               omega=omega, theta0=1.3, **tesseral.EARTH_J22)
+        sim.enable_force_model(tesseral.TESSERAL_MODEL, s[3], **{**field, "omega": MARS_OMEGA,
+                                                                 "theta0": -2.0})
+        sim.enable_force_model(tesseral.TESSERAL_MODEL, s[4], **{**field, "omega": VENUS_OMEGA})
+        # s[5]: tesseral alone, no central term. s[6]: pm + j2. s[7]: pm + j2 + zonal + drag.
+    else:
+        raise ValueError(variant)
+    return sim, sats
+
+
+def _build_cowell_tesseral_eccentric(session: Session) -> tuple[Simulation, np.ndarray]:
+    """The eccentric, steeply inclined orbit of the zonal case (r from 6471 to 36667 km) on pm + j2 +
+    J3..J6 + tesseral: `(R/r)^(n+1)` spans five decades at n = 4 and the V/W recursion runs over the
+    whole range of `z/r`."""
+    sim, sats = _build_cowell_zonal_eccentric(session)
+    sim.enable_force_model(tesseral.TESSERAL_MODEL, sats.tolist(), **_TESSERAL_FULL, theta0=0.7)
+    return sim, sats
+
+
 COWELL_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarray]]]] = [
     ("point_mass", lambda s: _build_cowell_constellation(s, j2_on="none")),
     ("point_mass+j2", lambda s: _build_cowell_constellation(s, j2_on="all")),
@@ -653,6 +717,10 @@ COWELL_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.ndarr
     ("drag_mixed", lambda s: _build_cowell_drag(s, variant="mixed")),
     ("drag_layered_eccentric+j2", lambda s: _build_cowell_drag_eccentric(s, law="layered")),
     ("drag_msis_eccentric+j2", lambda s: _build_cowell_drag_eccentric(s, law="msis")),
+    ("tesseral", lambda s: _build_cowell_tesseral(s, variant="alone")),
+    ("j2+zonal+tesseral", lambda s: _build_cowell_tesseral(s, variant="j2+zonal+tesseral")),
+    ("mixed_tesseral", lambda s: _build_cowell_tesseral(s, variant="mixed")),
+    ("eccentric_inclined+j2+zonal+tesseral", _build_cowell_tesseral_eccentric),
 ]
 
 
@@ -951,6 +1019,7 @@ WHOLE_STEP_SCENARIOS: list[tuple[str, Callable[[Session], tuple[Simulation, np.n
     ("constellation+mixed_zonal", lambda s: _build_cowell_zonal(s, variant="mixed")),
     ("moon_about_moving_earth", _build_cowell_moon),
     ("constellation+mixed_drag", lambda s: _build_cowell_drag(s, variant="mixed")),
+    ("constellation+mixed_tesseral", lambda s: _build_cowell_tesseral(s, variant="mixed")),
 ]
 
 
@@ -1000,13 +1069,13 @@ def test_cowell_step_paths_agree(
         f"(bound {KERNEL_AGREEMENT_REL_TOL:.1e} + re-base floor {rebase_floor:.1e})")
 
 
-def test_cowell_fused_kernel_is_selected_only_for_point_mass_j2_drag_and_zonal(
+def test_cowell_fused_kernel_is_selected_only_for_point_mass_j2_drag_zonal_and_tesseral(
     db_session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     The fallback is data: a Cowell body carrying any model outside `{point_mass_gravity, j2, drag,
-    zonal}` sends the set down the NumPy path, and enabling that model after the plan was built must
-    re-plan.
+    zonal, tesseral}` sends the set down the NumPy path, and enabling that model after the plan was
+    built must re-plan.
     Observed by spying on the name `Simulation.step` calls, so this fails if the wiring silently stops
     reaching the kernel too.
     """
@@ -1042,17 +1111,24 @@ def test_cowell_fused_kernel_is_selected_only_for_point_mass_j2_drag_and_zonal(
     sim.step(COWELL_DT)
     assert calls == [1, 1, 1], "the fused kernel was not used for a configuration with drag"
 
+    sim.enable_force_model(tesseral.TESSERAL_MODEL, [int(sats[2]), int(sats[3])], **_TESSERAL_FULL)
+    assert sim._cowell_fused_ok, "tesseral is fused; enabling it must keep the compiled plan"
+    assert sim._cowell_has_tesseral[sats[2]] and not sim._cowell_has_tesseral[sats[1]]
+    assert sim._cowell_tesseral_params is sim.force_model_params[tesseral.TESSERAL_MODEL]
+    sim.step(COWELL_DT)
+    assert calls == [1, 1, 1, 1], "the fused kernel was not used for a configuration with tesseral"
+
     sim.enable_force_model("test_constant_accel", [int(sats[0])], ax=0.0, ay=0.0, az=0.0)
     assert not sim._cowell_fused_ok, "a foreign force model must disqualify the fused kernel"
     sim.step(COWELL_DT)
-    assert calls == [1, 1, 1], "the fused kernel ran despite a model it does not implement"
+    assert calls == [1, 1, 1, 1], "the fused kernel ran despite a model it does not implement"
 
     sim.use_compiled_kernel = False
     sim.force_model_mask[:] = np.uint64(0)
     sim.enable_force_model(gravity.POINT_MASS_MODEL, sats.tolist())
     assert sim._cowell_fused_ok, "removing the foreign model must re-qualify the fused kernel"
     sim.step(COWELL_DT)
-    assert calls == [1, 1, 1], "use_compiled_kernel=False must select the NumPy path"
+    assert calls == [1, 1, 1, 1], "use_compiled_kernel=False must select the NumPy path"
 
 
 # --- The fused drag term ----------------------------------------------------------------------------
@@ -1368,6 +1444,254 @@ def test_an_unevaluated_msis_triple_written_after_planning_still_raises(
 # ==================================================================================================
 # Re-basing Cowell and secular-J2 rows onto their parents' end-of-step states
 # ==================================================================================================
+
+
+# --- The fused tesseral term, and time ----------------------------------------------------------------
+#
+# Why 1e-12 holds for the 4x4 tesseral field. `kernels._tesseral_term` is `tesseral.tesseral_kernel`
+# one scalar at a time: `theta = theta0 + omega * t`, the rotation `xb = c x + s y`, `yb = -s x + c y`,
+# `r^2 = xb*xb + yb*yb + zb*zb` (written out there too - no einsum), the V/W recursion to degree and
+# order 5 with the same integer factors converted exactly and each product evaluated left to right as
+# NumPy evaluates the array expression, the nine pairs accumulated from 0.0 in `TESSERAL_PAIRS` order,
+# and the rotation back. The only operations that may round differently are `np.cos`/`np.sin` (NumPy's
+# own loops) against `math.cos`/`math.sin` (the C library): under an ulp each, which moves the rotated
+# position by ~eps of `r` and the term by a few eps of itself. Expected ~1e-15 of the term; measured
+# **bit-identical** at every field point here (the two libraries agree on these arguments on this
+# machine), which the bound does not rely on. Composition: tesseral is bit 7, after zonal (bit 6), and
+# the twin adds it last.
+#
+# **Time is new to the fused kernel.** `RK4Integrator` hands the provider `t`, `t + 0.5 dt`,
+# `t + 0.5 dt`, `t + dt`; `cowell_rk4_step` now takes `t` and forms the same four doubles. A stage
+# handed the wrong time rotates the field by `omega dt / 2` (2.2e-3 rad at 60 s) in that stage, which
+# over 50 steps moves a 550 km satellite by ~1e-5 km - ~1e-9 of its radius, three orders above the
+# state bound (`test_tesseral_clock_error_is_visible_to_the_state_comparison` shows a clock error of
+# that size is seen). `test_tesseral.py`'s convergence test runs the compiled path too, and a stage
+# time error drops it off fourth order.
+#
+# **A clock far from zero.** At t0 = 1e6 s `theta` is ~73 rad for the Earth, where one ulp is 1.4e-14
+# rad, so `theta` carries an absolute rounding ~30x larger than near t = 0 - on **both** sides
+# identically, since both form it by the same two operations from the same doubles. That is a physics
+# error of ~1e-14 of the term (a year in, ~4.5e-13), not a twin disagreement; both argument reductions
+# are exact at these magnitudes, so the agreement is as at t = 0 (measured bit-identical again).
+#
+# **What the state comparison sees.** At 550 km the 4x4 tesseral term is ~1e-7 km/s^2 against 8e-3 for
+# the central term and moves a satellite ~0.1 km over 50 steps of 60 s, so like zonal and drag it has a
+# field-level comparison, whose negative control proves a 1e-9 change to C22 is visible, and a guard
+# that the state tests are not blind to the term.
+
+_TESSERAL_CLOCKS: list[tuple[str, float, float, float]] = [
+    # (id, theta0, omega, t0)
+    ("earth_t0=0", 0.0, drag.EARTH_OMEGA, 0.0),
+    ("earth_theta0=1.3_t0=1e6", 1.3, drag.EARTH_OMEGA, 1.0e6),
+    ("mars_theta0=-2_t0=0", -2.0, MARS_OMEGA, 0.0),
+    ("venus_retrograde_t0=1e6", 0.4, VENUS_OMEGA, 1.0e6),
+    ("fast_10x_earth_t0=37000.5", 5.9, 10.0 * drag.EARTH_OMEGA, 37000.5),
+]
+
+
+def _tesseral_params(n: int, *, theta0: float, omega: float) -> np.ndarray:
+    """`n` rows of `force_model_params["tesseral"]` carrying the EGM96 4x4 field."""
+    params = np.zeros((n, len(tesseral.TESSERAL_PARAM_NAMES)))
+    params[:, 0] = geopotential.EARTH_R_EQ
+    params[:, 1] = omega
+    params[:, 2] = theta0
+    for col, name in enumerate(tesseral.TESSERAL_PARAM_NAMES[3:], start=3):
+        params[:, col] = tesseral.EARTH_TESSERALS[name]
+    return params
+
+
+def _tesseral_fields(
+    rel: np.ndarray, parent: np.ndarray, t: float, *, theta0: float, omega: float,
+    perturb_c22: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    `(reference, twin, scale)` at every relative position in `rel`, parent at `parent`, time `t`.
+    Reference: `tesseral.tesseral_kernel` over an arena whose slot 0 is the parent. Twin:
+    `kernels._cowell_accel` with only its tesseral flag set. `scale` is `|a_ref|` floored at the
+    term's natural size `sum mu |C, S| R^n / r^(n+2)` (the kernel's rounding is relative to the
+    magnitudes it combines). `perturb_c22` multiplies C22 on the twin's side only.
+    """
+    mu = scenarios.MU_EARTH
+    n = rel.shape[0]
+    state = np.zeros((n + 1, 6))
+    state[0, :3] = parent
+    state[1:, :3] = parent + rel
+    mu_array = np.zeros(n + 1)
+    mu_array[0] = mu
+    params = _tesseral_params(n + 1, theta0=theta0, omega=omega)
+    ref = np.zeros((n + 1, 3))
+    tesseral.tesseral_kernel(np.arange(1, n + 1, dtype=np.int64), t, state, mu_array,
+                             np.zeros(n + 1, dtype=np.int32), params, ref)
+
+    twin_params = params.copy()
+    twin_params[:, tesseral.TESSERAL_PARAM_NAMES.index("c22")] *= perturb_c22
+    vw = np.zeros((2, kernels.TESSERAL_VW_SIZE, kernels.TESSERAL_VW_SIZE))
+    zp = np.zeros((1, len(zonal.ZONAL_PARAM_NAMES)))
+    twin = np.zeros((n, 3))
+    px, py, pz = (float(c) for c in state[0, :3])
+    for k in range(n):
+        cx, cy, cz = (float(c) for c in state[k + 1, :3])
+        twin[k] = kernels._cowell_accel(
+            px, py, pz, cx, cy, cz, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, mu, mu,
+            False, False, 0.0, 0.0,
+            False, kernels.DRAG_LAW_EXPONENTIAL, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            kernels.LAYERED_TABLE_ROW, _NO_TABLES.tables, int(_NO_TABLES.n_nodes[0]),
+            False, zp, 0,
+            True, twin_params[k + 1:k + 2], float(t), vw)
+
+    r = np.linalg.norm(rel, axis=1)
+    natural = sum(
+        mu * float(np.hypot(tesseral.EARTH_TESSERALS[f"c{deg}{order}"],
+                            tesseral.EARTH_TESSERALS[f"s{deg}{order}"]))
+        * geopotential.EARTH_R_EQ ** deg / r ** (deg + 2)
+        for deg, order in tesseral.TESSERAL_PAIRS)
+    scale = np.maximum(np.linalg.norm(ref[1:], axis=1), natural)
+    return ref[1:], twin, scale
+
+
+@pytest.mark.parametrize("clock,theta0,omega,t0", _TESSERAL_CLOCKS, ids=[c[0] for c in _TESSERAL_CLOCKS])
+@pytest.mark.parametrize("parent_name,parent", PARENTS, ids=[n for n, _ in PARENTS])
+def test_fused_tesseral_term_matches_tesseral_kernel(
+    clock: str, theta0: float, omega: float, t0: float, parent_name: str, parent: np.ndarray,
+) -> None:
+    """
+    The tesseral term alone, compiled against `tesseral.tesseral_kernel`, elementwise to 1e-12 of the
+    term's magnitude at every field point - LEO to GEO, the poles, the equator and a hair off it - at
+    the clock's start, at RK4's own `t + dt/2` and `t + dt`, and later.
+    """
+    rel = _zonal_field_points()
+    for t in (t0, t0 + 0.5 * COWELL_DT, t0 + COWELL_DT, t0 + 12345.678):
+        ref, twin, scale = _tesseral_fields(rel, parent, t, theta0=theta0, omega=omega)
+        assert np.all(np.isfinite(twin)) and np.all(np.isfinite(ref))
+        diff = float(np.max(np.abs(twin - ref) / scale[:, None]))
+        assert diff < KERNEL_AGREEMENT_REL_TOL, (
+            f"{clock} / {parent_name} at t={t}: fused tesseral term disagrees with tesseral_kernel by "
+            f"{diff:.3e} of |a|")
+
+
+def test_fused_tesseral_comparison_would_detect_a_perturbed_coefficient() -> None:
+    """
+    Negative control for the field-level test: C22 scaled by (1 + 1e-9) on the twin's side only. The
+    (2,2) pair carries a large share of the field at every radius (it dominates at GEO, where the
+    degree-2 terms fall off slowest), so the change is ~1e-10..1e-9 of `|a|` at many points - two
+    orders or more above the bound - and must be detected.
+    """
+    ref, twin, scale = _tesseral_fields(_zonal_field_points(), np.zeros(3), 5000.0, theta0=0.3,
+                                        omega=drag.EARTH_OMEGA, perturb_c22=1.0 + 1e-9)
+    diff = float(np.max(np.abs(twin - ref) / scale[:, None]))
+    assert diff > KERNEL_AGREEMENT_REL_TOL, (
+        f"a relative-1e-9 change to C22 was not detected (diff {diff:.3e}); the bound is vacuous")
+
+
+def test_fused_tesseral_term_is_exactly_zero_without_coefficients_or_separation() -> None:
+    """As in the reference: an all-zero C/S row adds exact zeros to the running sum, and so does the
+    parent's own position (zero separation, `inv_r2 = 0`, every V/W zero) - the sum comes back
+    bit-identical."""
+    vw = np.zeros((2, kernels.TESSERAL_VW_SIZE, kernels.TESSERAL_VW_SIZE))
+    full = _tesseral_params(1, theta0=0.2, omega=drag.EARTH_OMEGA)
+    empty = full.copy()
+    empty[:, 3:] = 0.0
+    start = (1.25e-3, -7.5e-4, 3.0e-5)
+    c, s = kernels._tesseral_angle(full, 0, 999.0)
+    got = kernels._tesseral_term(*start, 0.0, 0.0, 0.0, 6000.0, 2000.0, 1500.0, scenarios.MU_EARTH,
+                                 empty, 0, c, s, vw)
+    assert got == start
+    got = kernels._tesseral_term(*start, 10.0, -20.0, 30.0, 10.0, -20.0, 30.0, scenarios.MU_EARTH,
+                                 full, 0, c, s, vw)
+    assert got == start
+
+
+@pytest.mark.parametrize("clock,theta0,omega,t0", _TESSERAL_CLOCKS, ids=[c[0] for c in _TESSERAL_CLOCKS])
+@pytest.mark.parametrize("steps", [1, 50])
+def test_cowell_tesseral_kernel_matches_reference_across_clocks_and_rates(
+    clock: str, theta0: float, omega: float, t0: float, steps: int,
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The fused step against `RK4Integrator` over `Simulation.accelerations`, the full 4x4 field on pm +
+    j2 + J3..J6, started at `t0` and advanced `steps` steps with both clocks accumulated by the same
+    additions: several `theta0`, a Mars rate, a retrograde Venus rate, a fast field, and starts 1e6 s
+    from zero. Elementwise to 1e-12, as the other Cowell scenarios.
+    """
+    reference_sim, ref_idx = _build_cowell_tesseral(
+        db_session_factory(), variant="j2+zonal+tesseral", theta0=theta0, omega=omega)
+    kernel_sim, ker_idx = _build_cowell_tesseral(
+        db_session_factory(), variant="j2+zonal+tesseral", theta0=theta0, omega=omega)
+    assert kernel_sim._cowell_fused_ok, "guard: this scenario must qualify for the fused kernel"
+
+    ref_abs, ref_rel = _run_cowell_reference(reference_sim, ref_idx, COWELL_DT, steps, t0=t0)
+    ker_abs, ker_rel = _run_cowell_kernel(kernel_sim, ker_idx, COWELL_DT, steps, t0=t0)
+    every = np.ones(ref_idx.size, dtype=bool)
+    abs_diff = _relative_difference(ref_abs, ker_abs, every)
+    rel_diff = _relative_difference(ref_rel, ker_rel, every)
+    assert abs_diff < KERNEL_AGREEMENT_REL_TOL, f"{clock}: absolute state disagrees by {abs_diff:.3e}"
+    assert rel_diff < KERNEL_AGREEMENT_REL_TOL, f"{clock}: relative state disagrees by {rel_diff:.3e}"
+
+
+def test_tesseral_term_is_visible_to_the_state_comparison(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The Cowell state tests certify the fused tesseral path only if dropping the term would fail them:
+    over 50 steps of 60 s the 4x4 field moves each 550 km satellite by ~0.1 km, so the same compiled
+    run with every `has_tesseral` flag cleared must differ by far more than the 1e-12 bound -
+    asserted at 1e-6.
+    """
+    with_sim, idx = _build_cowell_tesseral(db_session_factory(), variant="j2+zonal+tesseral")
+    without_sim, _ = _build_cowell_tesseral(db_session_factory(), variant="j2+zonal+tesseral")
+    without_sim._cowell_has_tesseral[:] = False
+    _, with_rel = _run_cowell_kernel(with_sim, idx, COWELL_DT, 50)
+    _, without_rel = _run_cowell_kernel(without_sim, idx, COWELL_DT, 50)
+    diff = _relative_difference(with_rel, without_rel, np.ones(idx.size, dtype=bool))
+    assert diff > 1e-6, f"the tesseral term moved the state by only {diff:.3e}; the state test is blind to it"
+
+
+def test_tesseral_clock_error_is_visible_to_the_state_comparison(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    A stage-time error is the failure a fused `t` invites, and it must not hide under the bound. The
+    same compiled run started at `t0` and at `t0 + dt/2` - every stage's field rotated by `omega dt/2`
+    = 2.2e-3 rad, the size of a wrong mid-step time - differs by ~m * 2e-3 of the tesseral displacement,
+    ~1e-8 of the radius over 50 steps: four orders above the 1e-12 bound; asserted at 1e-10.
+    """
+    on_time, idx = _build_cowell_tesseral(db_session_factory(), variant="j2+zonal+tesseral")
+    late, _ = _build_cowell_tesseral(db_session_factory(), variant="j2+zonal+tesseral")
+    _, on_rel = _run_cowell_kernel(on_time, idx, COWELL_DT, 50, t0=0.0)
+    _, late_rel = _run_cowell_kernel(late, idx, COWELL_DT, 50, t0=0.5 * COWELL_DT)
+    diff = _relative_difference(on_rel, late_rel, np.ones(idx.size, dtype=bool))
+    assert diff > 1e-10, f"a half-step clock error moved the state by only {diff:.3e}; the test is blind to it"
+
+
+@pytest.mark.parametrize("t0", [0.0, 1.0e6])
+def test_cowell_tesseral_step_paths_agree_across_a_manoeuvre_split(
+    t0: float, db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    The wired path with the clock doing real work: `Simulation.step` on both paths from `sim.t = t0`,
+    50 steps with a zero Delta-v scheduled at 40 % of every fifth step, so ten steps are cut in two and
+    each second half must start at the split epoch on both paths (`_advance` hands the compiled kernel
+    `self.t`, as it hands `RK4Integrator`). The parent is at the origin, so there is no re-base floor.
+    """
+    numpy_sim, idx = _build_cowell_tesseral(db_session_factory(), variant="mixed")
+    compiled_sim, _ = _build_cowell_tesseral(db_session_factory(), variant="mixed")
+    numpy_sim.use_compiled_kernel = False
+    compiled_sim.use_compiled_kernel = True
+    assert compiled_sim._cowell_fused_ok, "guard: this scenario must qualify for the fused kernel"
+    for sim in (numpy_sim, compiled_sim):
+        sim.record_history = False
+        sim.t = t0
+        for k in range(0, 50, 5):
+            sim.schedule_delta_v(idx, [0.0, 0.0, 0.0], epoch_s=t0 + (k + 0.4) * COWELL_DT)
+
+    for _ in range(50):
+        numpy_sim.step(COWELL_DT)
+        compiled_sim.step(COWELL_DT)
+    assert not numpy_sim.pending_manoeuvres and not compiled_sim.pending_manoeuvres
+    assert numpy_sim.t == compiled_sim.t == t0 + 50 * COWELL_DT
+
+    diff = _relative_difference(numpy_sim.global_states, compiled_sim.global_states, numpy_sim.active_mask)
+    assert diff < KERNEL_AGREEMENT_REL_TOL, f"t0={t0}: split-step global state disagrees by {diff:.3e}"
 
 
 def _build_secular_j2_moon(session: Session) -> tuple[Simulation, np.ndarray]:
