@@ -10,7 +10,7 @@ a. The wrap is faithful
 -----------------------
 - **Nodes.** At a node the table *is* the zonal mean: rebuilt here independently (its own UT loop,
   `lon = 15 (s - UT)`, fly-through `pymsis` calls), equal to float64 summation rounding of identical
-  float32 MSIS values: `rtol = 1e-12`. **Measured 0.0 (bitwise).**
+  float32 MSIS values: `rtol = 1e-12`. **Measured 3.6e-15.**
 - **Off-node interpolation.** Trilinear in `ln rho`; the error at `(h, phi, s)` is to leading order
   `+ (1/2) sum_i f_ii (x_i - x_i0)(x_i1 - x_i)` (linear interpolation over-reads a convex function),
   with each `f_ii` from direct MSIS second differences across the point's own cell. The residual after
@@ -18,13 +18,16 @@ a. The wrap is faithful
   ~20 % in local time (harmonics up to 3/day over half a 30 min cell) and up to ~35 % in latitude
   (structure up to degree ~8 over 2.5 deg). So `|error - term| <= 0.4 sum |term_i| + 2e-6` (float32
   noise in three averaged values and in the curvature estimates), and `|error| <= 1.4 sum |term_i|
-  + 2e-6`. **Measured:** see `test_off_node_interpolation_is_the_derived_leading_term`.
+  + 2e-6`. **Measured** (40 random points, 150-950 km): largest error 2.8e-3; `|error - term|` at
+  most **0.057** of `sum |term_i|` (median 0.007) - the leading term *is* the error, far inside the 0.4
+  allowed; `|error| / sum |term_i|` at most 1.015.
 - **End to end, through the kernel's own geometry.** A satellite placed by an independent construction
   (IAU 1982 GMST and MSIS's `s = UT + lon / 15`) at a node's altitude, latitude and local time, at
   `t = 0` and after 5.25 days, must read the direct zonal mean there. The only mismatch is the 0.15 s
   of time between that construction and the engine's mean-Sun local time, times a largest
   `|d ln rho / d s|` of ~0.2 /h: 1e-5. `END_TO_END_TOL = 2e-5`. The apparent-Sun definition would be
   off by the equation of time (-7.5 min at this epoch, ~1 % at a steep point); a 12 h slip by 2x.
+  **Measured 7.0e-6 (t = 0) and 5.3e-6 (t = 5.25 d).**
 
 b. Physics signatures of the bulge
 ----------------------------------
@@ -50,7 +53,9 @@ time (48 nodes) and the averaged law's own 24 days must reproduce the global mea
 - **Against `msis_bridge.msis_profile` itself**, which samples 00:00 UT only: the difference is that
   profile's UT bias, the global mean's UT dependence, measured <= 0.16 / 0.08 / 0.23 % on one day at
   292 / 400 / 500 km - averaged over 24 days it can only be smaller. `PROFILE_TOL = 3e-3`.
-**Measured:** see the two tests.
+**Measured** at 150 / 292 / 400 / 600 / 900 km: sharp **-2.2e-7 / -6.5e-7 / -1.8e-6 / -2.8e-6 /
+-5.0e-7**; against the profile **-4.1e-5 / +4.6e-4 / +7.0e-4 / +1.4e-3 / +1.1e-3** - the averaged law's
+00:00 UT sampling reads up to 0.14 % low of the all-UT mean.
 
 d. Orbit-averaged density by orbit type
 ---------------------------------------
@@ -71,7 +76,12 @@ integral of `da/dt = -(a^2/mu) B' rho |v_rel| (v_rel . v)` along its own time-re
 moving, the partial last orbit included), with RK4's Kepler drift `-a (n dt)^6 / 36` per step added
 (8.2e-4 km, 9e-4 of the decay). Remaining terms: RK4's truncation of drag, 1.9e-4 of the decay
 (`test_msis.py`), and the prediction's own RK4 at 10 s (<1e-6): `DECAY_REL_TOL = 2e-3`, as
-`test_msis.py`. **Measured:** see `test_cowell_decay_confirms_the_orbit_averaged_prediction`.
+`test_msis.py`. **Measured** (Delta a over the day, km, measured / predicted): dawn-dusk -0.87327 /
+-0.87328 (-5.9e-6), noon-midnight -0.93413 / -0.93420 (-8.1e-5), averaged twin -0.77709 / -0.77701
+(+1.1e-4); 51.6 deg diurnal -0.85250 / -0.85258 (-9.3e-5), its averaged twin -0.70438 / -0.70430
+(+1.1e-4). The diurnal/averaged ratios 1.1238, 1.2021 and 1.2103 against predicted 1.1239, 1.2023 and
+1.2105 - the 400 km table predictions above, now also carrying the co-rotation weighting along a
+time-resolved track (the averaged twins sit in the same planes).
 
 e. The headline, in Delta-v
 ---------------------------
@@ -80,13 +90,22 @@ e. The headline, in Delta-v
 ~292.0 km, 96.64 deg, Cowell + pm + J2, so each plane precesses with the Sun), the `msis_sweep.py`
 band [291, 293.5] km, B = 0.05, dt = 30 s, 20 h. Predicted before running by
 `test_msis_delta_v.py`'s cycle model with each law's co-rotation-weighted orbit-averaged density:
-**dawn-dusk +0.0750, noon-midnight +0.1516** (see `PREDICTED`; committed before the first sweep ran). Tolerance: that module's 1e-2 on
+**dawn-dusk +0.0750, noon-midnight +0.1516** (see `PREDICTED`; committed before the first sweep ran).
+**Measured** (20 h, two raises each): baseline 3.346 m/s/day for both planes; diurnal dawn-dusk
+3.581 (**+0.0702**), noon-midnight 3.832 (**+0.1451**) - on `(1 + error)` -4.5e-3 and -5.7e-3 against
+the 1.3e-2 budget. Tolerance: that module's 1e-2 on
 `(1 + error)` (one cycle's endpoint term) plus 3e-3 for what the circular-orbit prediction omits under
 J2 - the 7.7 km peak-to-peak osculating altitude swing correlating with the table's latitude structure
 (`<dh dln rho>/H` with `dh` 3.9 km, `H` 45 km and a latitude swing of `ln rho` <~0.1: <= 0.4 %) and
 the same swing's convexity, common to both laws: `RATIO_TOL = 1.3e-2`. The node rate itself is checked
-first: sun-synchronous to the mean-altitude offset (`dRAAN/dt` goes as `a^-7/2`; the one-day mean orbit
-sits 5.0 km below the seed: +0.26 %) within 0.3 %.
+first. The scenario takes its inclination from the *osculating* seed radius, and `dRAAN/dt` goes as
+`a^-7/2` of the **mean** semi-major axis, which at the seeding point (`u0 = 0`) is
+`a_osc (1 - (3/2) J2 (R/a)^2 sin^2 i)` - 9.8 km below the seed (`propagators.mean_seeded_p`'s Kozai
+term). So the plane precesses **+0.513 %** faster than the mean Sun; the neglected mean-vs-osculating
+inclination and O(J2^2) terms are <~0.07 %: asserted within 0.1 % of +0.513 %. **Measured +0.520 %.**
+(The first version of this derivation used the one-period mean *altitude*, 5.0 km below the seed, and
+predicted +0.26 %; the time-averaged radius is not the mean semi-major axis - see
+`docs/engineering-log.md`.) Over 10 days that is 0.05 deg of node, 12 s of local time.
 
 The frozen season
 -----------------
@@ -680,7 +699,11 @@ def test_sso_planes_precess_with_the_mean_sun() -> None:
         nodes.append(np.arctan2(h[:, 0], -h[:, 1]))           # RAAN from the angular momentum
     rate = np.polyfit(np.array(times), np.unwrap(np.array(nodes), axis=0), 1)[0]
     sun_rate = 2.0 * math.pi / (scenarios.TROPICAL_YEAR_DAYS * 86400.0)
-    assert np.all(np.abs(rate / sun_rate - 1.0 - 0.0026) < 0.003), rate / sun_rate - 1.0
+    a = EARTH_R_EQ + SSO_SEED_KM
+    inc = math.radians(scenarios.sun_synchronous_inclination_deg(a))
+    expected = 3.5 * 1.5 * EARTH_J2 * (EARTH_R_EQ / a) ** 2 * math.sin(inc) ** 2     # a_mean below seed
+    assert expected == pytest.approx(0.00513, abs=5e-5)
+    assert np.all(np.abs(rate / sun_rate - 1.0 - expected) < 1e-3), rate / sun_rate - 1.0
 
 
 @pytest.fixture(scope="module")

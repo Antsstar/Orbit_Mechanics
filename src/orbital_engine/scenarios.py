@@ -907,11 +907,14 @@ def sun_synchronous_satellites(
     convention `solar_ephemeris.local_solar_time_hours` and NRLMSIS use. Pass the same `epoch_days` to
     the diurnal density law, or the plane and the bulge disagree about where the Sun is.
 
-    The inclination is `sun_synchronous_inclination_deg` of the **seed** radius. The one-period mean
-    orbit sits a few km lower under J2 (as in `station_keeping_satellites`); `dRAAN/dt` scales as
-    `a^-7/2`, so the precession is ~0.4 % faster than the Sun's - 0.004 deg/day, i.e. ~9 s of LTAN over
-    10 days - and a station-kept orbit oscillating in a 2.5 km band moves it by less. Both are far below
-    the diurnal table's 30 min spacing, so the plane is sun-locked for any horizon this engine runs.
+    The inclination is `sun_synchronous_inclination_deg` of the **seed** radius. Under J2 the *mean*
+    semi-major axis at the seeding point (`u0 = 0`) is `a_osc (1 - (3/2) J2 (R/a)^2 sin^2 i)`, 9.8 km
+    below a 297 km seed (the one-period mean *altitude* is only 5.0 km below - a different quantity),
+    and `dRAAN/dt` scales as `a^-7/2`: the plane precesses **+0.52 %** faster than the mean Sun
+    (measured +0.520 % against a derived +0.513 %, `tests/validation/test_msis_diurnal.py`) -
+    0.005 deg/day, 12 s of LTAN over 10 days. A station-kept orbit cycling in a 2.5 km band moves it by
+    less. Both are far below the diurnal table's 30 min spacing, so the plane is sun-locked for any
+    horizon this engine runs.
     """
     from .geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
     from .solar_ephemeris import sun_mean_longitude_deg
