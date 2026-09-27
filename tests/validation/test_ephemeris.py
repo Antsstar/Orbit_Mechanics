@@ -988,3 +988,70 @@ def test_a_row_written_directly_with_an_unknown_key_raises_at_step() -> None:
     sim.force_model_params[EPHEMERIS_MODEL][sat, EPHEMERIS_PARAM_NAMES.index("table_1")] = 31337.0
     with pytest.raises(LookupError, match="no ephemeris table"):
         sim.step(60.0)
+
+
+def test_a_nonzero_epoch_aligns_table_time_with_the_sim_clock(
+    db_session_factory: Callable[[], Session],
+) -> None:
+    """
+    `epoch_s` maps sim time to table time (`query = epoch_s + t`). Every other test in this file uses
+    `epoch_s = 0`, so in review a kernel querying `t - epoch_s` passed all 49 tests - and the Artemis
+    replay aligns NASA's TDB tables to the sim clock through exactly this coefficient.
+
+    A 550 km satellite under an analytic circular Moon tabulated at 600 s, with `epoch_s` = 123456 s
+    (the Moon then sits 0.33 rad further along its orbit than at table time 0), stepped 6 h at 5 s,
+    against a local DOP853 truth that evaluates the analytic Moon at `epoch_s + t` directly (never the
+    table). Expected agreement: RK4 truncation scaled from this repo's measured 1.88 km per 24 h at
+    60 s for this orbit: at dt = 5 s that is 1.88 / 12^4 = 9.1e-5 km per day, and the along-track
+    error grows ~t^2, so ~6e-6 km over 6 h; Hermite interpolation of the Moon at 600 s ~1e-11 km;
+    tolerance 1e-4 km. (A first draft of this test assumed ~1e-6 km at dt = 30 s and measured
+    7.8e-3 km - exactly the scaled RK4 figure, 0.117 km/day x (1/4)^2 = 7.3e-3. The step, not the
+    epoch, was wrong.) The lunar tide moves this
+    satellite ~0.1 km over the 6 h, and a sign error on `epoch_s` moves the Moon by 0.66 rad, so a
+    wrong alignment is visible at the 1e-2 km level - two orders above the tolerance (asserted).
+    """
+    from scipy.integrate import solve_ivp
+
+    mu_e, mu_m = scenarios.MU_EARTH, 4902.800066
+    r_m, inc, ph0, epoch = 384400.0, math.radians(5.1), 0.7, 123456.0
+    n_m = math.sqrt((mu_e + mu_m) / r_m**3)
+
+    def moon(tt: NDArray[np.float64]) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+        th = ph0 + n_m * tt
+        p = r_m * np.stack([np.cos(th), np.sin(th) * math.cos(inc), np.sin(th) * math.sin(inc)], -1)
+        v = r_m * n_m * np.stack([-np.sin(th), np.cos(th) * math.cos(inc), np.cos(th) * math.sin(inc)], -1)
+        return p, v
+
+    grid = np.arange(0.0, epoch + 86400.0, 600.0, dtype=np.float64)
+    pos, vel = moon(grid)
+    table = EphemerisTable("analytic-moon-epoch-test", grid, pos, vel, centre="Earth")
+
+    sim = scenarios.earth_constellation(db_session_factory(), n_sats=1, n_planes=1)
+    sat = np.array([i for n, i in sim.name_to_index.items() if n.startswith("SAT-")], dtype=np.int64)
+    earth = sim.name_to_index["Earth"]
+    sim.set_propagator(sat, PropagatorType.COWELL)
+    sim.enable_force_model(POINT_MASS_MODEL, sat)
+    x0 = (sim.global_states[sat[0]] - sim.global_states[earth]).copy()
+    sim.enable_force_model(
+        EPHEMERIS_MODEL, sat, **ephemeris_coefficients([(table, mu_m)], epoch_s=epoch))
+    sim.record_history = False
+    horizon, dt = 6 * 3600.0, 5.0
+    for _ in range(int(horizon / dt)):
+        sim.step(dt)
+    got = sim.global_states[sat[0], :3] - sim.global_states[earth, :3]
+
+    def rhs(t: float, y: NDArray[np.float64], sign: float) -> NDArray[np.float64]:
+        r = y[:3]
+        pm = moon(np.array([epoch * sign + t]))[0][0]
+        d = pm - r
+        a = (-mu_e * r / np.linalg.norm(r) ** 3
+             + mu_m * (d / np.linalg.norm(d) ** 3 - pm / np.linalg.norm(pm) ** 3))
+        out: NDArray[np.float64] = np.concatenate([y[3:], a])
+        return out
+
+    truth = solve_ivp(rhs, (0.0, horizon), x0, method="DOP853", rtol=1e-13, atol=1e-10,
+                      args=(1.0,)).y[:3, -1]
+    wrong = solve_ivp(rhs, (0.0, horizon), x0, method="DOP853", rtol=1e-13, atol=1e-10,
+                      args=(-1.0,)).y[:3, -1]
+    assert np.linalg.norm(got - truth) < 1e-4, np.linalg.norm(got - truth)
+    assert np.linalg.norm(wrong - truth) > 1e-2, np.linalg.norm(wrong - truth)
