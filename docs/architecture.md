@@ -37,6 +37,8 @@ Roles marked **unchanged** have kept their original purpose since the project be
 | `drag.py` | `drag`: atmospheric drag in a co-rotating atmosphere, composable with `point_mass_gravity` and `j2`. The density law is a per-body coefficient, not a hard-coded formula | **new** |
 | `atmosphere.py` | The density laws `drag` chooses between: one exponential band, Vallado Table 8-4's 28-band piecewise-exponential profile, or an NRLMSIS 2.0 profile - all but the first through one piecewise-exponential evaluator | **new** |
 | `msis_bridge.py` | NRLMSIS 2.0 wrapped at the boundary: `pymsis` averaged into an altitude profile at configuration time, memoised per solar-activity triple, read by `drag`'s kernel | **new** |
+| `msis_diurnal.py` | NRLMSIS 2.0 with the diurnal bulge: `pymsis` tabulated over altitude x latitude x mean local solar time (zonal mean over UT) for the epoch's day, at configuration time, memoised per `(f107, f107a, ap, day)`; the fourth density law, the only one that reads `t` | **new** |
+| `solar_ephemeris.py` | The Astronomical Almanac's low-precision Sun (0.01 deg) as a pure function of time: right ascension, declination, mean longitude, distance, equation of time, and mean local solar time | **new** |
 | `srp.py` | `srp`: cannonball solar radiation pressure from a named light source, with a cylindrical or conical shadow. The shadow geometry is a per-body coefficient, the same way `drag` selects its density law | **new** |
 | `viz.py` | Plot-*data* preparation: trajectory sampling over a time grid, ground tracks via `frames`' body-fixed transforms, altitude series, and error curves against a `reference.py` truth. No matplotlib import, so the library stays installable without it — `benchmarks/figures.py` is the consumer that draws | **new** |
 | `thrust.py` | `thrust`: continuous rocket thrust along a per-body RSW direction law, with propellant depletion. The first model whose coefficients are state | **new** |
@@ -606,11 +608,101 @@ mean ODE on the profile (moderate 3.2e-4, low 5.9e-4, each against a derived bud
 mutations each fail 9-19 tests; dropping the version pin fails none, because in `pymsis` 0.13.0 the
 2.1 mass density is bitwise 2.0's - an equivalent mutant, not a gap.
 
-**Not built.** Density as a function of the satellite's own local time and latitude (the diurnal
-bulge) - that needs the Sun's direction and an epoch inside the kernel, and a table in more than one
-dimension; time-varying indices (storms, 27-day rotation); geodetic altitude; MSIS in `reference.py`'s
-truth (truth has no drag, and the Delta-v metric compares configurations, not truth). No compiled twin,
-as for the other laws.
+**Not built** here: time-varying indices (storms, 27-day rotation); geodetic altitude; MSIS in `reference.py`'s truth (truth has no drag, and the Delta-v metric compares configurations, not truth). Density as a function of the satellite's own local time and latitude - the diurnal bulge - is now its own law, the next section.
+
+---
+
+## NRLMSIS 2.0 with the diurnal bulge: the averaged profile, tested against its own discards
+
+`msis_diurnal.py` is a fourth density law, `DENSITY_MODEL_MSIS_DIURNAL = 3.0`: NRLMSIS 2.0 as a
+function of altitude, **latitude and mean local solar time**, for the day of an epoch. It exists to
+answer, in m/s, the question the averaged law's docstring could only raise: an orbit whose plane is
+locked to one local time (sun-synchronous) never sees the global mean - does the average mislead its
+Delta-v budget?
+
+**Configuration, not code.** The same `"drag"` model and the same three solar indices, plus one new
+column, `epoch_days` (column 10): UT days from 2000-01-01T12:00 at `t = 0` - the argument the solar
+series takes natively, 1.6e-7 s resolution in float64 at 2024, and a real date at 0.0 (so, like `ap`,
+it is mandatory in the selecting call rather than inferred from non-zero). `msis_diurnal_coefficients(
+SOLAR_ACTIVITY_MODERATE, epoch_days("2024-03-20"))` is a `ForceModelSpec`'s coefficients. Rows on the
+three earlier laws are **bitwise unchanged** - the masks are the same booleans (`2.0 >= 2.5` is false),
+the new term adds `+0.0`, and a 2000-step Cowell + J2 + drag run over laws 0/1/2 matches the
+pre-change package bit for bit on both the fused compiled path and the NumPy path.
+
+**The table, at the boundary.** `validate_coefficients` evaluates, once per `(f107, f107a, ap, UT day)`,
+the **zonal mean at fixed local time** - `pymsis` averaged over 6 UT samples with `lon = 15 (s - UT)`
+- on the averaged profile's 601 altitude nodes x 37 latitudes (5 deg, poles included) x 48 local times
+(30 min, periodic): 6.4 M points, **9.4 s**, memoised, 8.5 MB. The zonal mean rather than one UT because
+MSIS keeps a real longitude/UT structure at fixed local time (1.3 % rms, 4 % max at 400 km) that a single
+UT would pin to one arbitrary longitude for a whole run; six samples reach the float32 floor. The kernel
+reads the memo (`LookupError` on a miss, never `pymsis`), trilinear in `ln rho` - the profile's own
+log-linear scheme in altitude, linear in latitude, linear and periodic in local time - with a leading
+error `(1/2) sum f_ii dx_i dx_i'` that the tests show *is* the error (residual <= 6 % of it).
+
+**Geometry is inertial.** Local time is `12 h + (alpha_sat - L(t)) / 15` with `L` the Sun's mean
+longitude from `solar_ephemeris.py` (Astronomical Almanac low-precision series, from memory; checked
+against the 2024 equinox/solstice instants to 0.004 deg, the equation-of-time extremes and perihelion)
+at `epoch_days + t / 86400`; latitude is the geocentric declination. No Earth rotation angle enters.
+**Deviation from the brief, deliberately:** the brief's `alpha_sat - alpha_sun` is *apparent* solar
+time; MSIS's own local time is `UT + lon / 15`, *mean* solar time, and the mean-Sun form reproduces it to
+0.15 s (IAU 1982 GMST, `test_solar_ephemeris.py`). The apparent form is off by the equation of time,
+up to 16 min - ~1-3 % of density on the bulge's flanks, and a test fails on it.
+
+**What is frozen.** The season: the table is built for the epoch's UT day. From the March equinox the
+global mean at 400 km drifts +1.4 % in 10 days (+0.8 % at 300 km), so a 10-day run reads ~0.7 % low of a
+season-following model. Local time is not frozen: it follows the satellite and the Sun through `t`,
+which makes this the second density-relevant kernel (after `tesseral`) that reads the clock.
+
+**Not fused.** The compiled Cowell twin knows laws 0-2 and has no `t`; it would read 3.0 as the
+averaged profile. `_refresh_cowell_plan` treats a diurnal row as foreign, sending the Cowell set down
+NumPy (1.15 ms per step for two satellites). A row switched to 3.0 by *direct assignment* into a
+`force_model_params` row that was planned as MSIS with the same indices would be read by the fused twin
+as the averaged law until the next re-plan - the same class of bypass as writing a mask bit directly;
+closing it needs a `kernels.py` change (the twin's `_drag_law` decoding 3.0 as foreign), left for the
+kernel-twin work.
+
+**Validation** (`tests/validation/test_msis_diurnal.py`, `_wiring.py`, `test_solar_ephemeris.py`).
+Table nodes equal an independently rebuilt zonal mean to 3.6e-15; off-node error up to 2.8e-3, the
+leading-term prediction within 6 % of it; oracle-placed satellites (IAU GMST, MSIS's `UT + lon/15`)
+read direct MSIS to 7e-6 at `t = 0` and after 5.25 days. The bulge: equinox peak 14.5 h on the equator,
+minimum 04 h, equatorial day/night 2.34 (the averaged law recorded 2.30 at one longitude); at the
+solstices the peak moves to +15 / -20 deg and the minimum to the winter hemisphere (Jacchia's picture).
+Averaged over latitude, local time and the averaged law's 24 days, the table reproduces that law's own
+quadrature to 2.8e-6 - and its profile to 0.14 %, the profile's 00:00 UT sampling bias. Orbit-averaged
+density confirmed by Cowell decay (J2 zeroed, 1 day, 400 km) to <= 1.1e-4 against a 2e-3 budget for
+dawn-dusk, noon-midnight and 51.6 deg planes.
+
+**The headline, in Delta-v** (`benchmarks/msis_diurnal_sweep.py`, the `msis_sweep.py` station-keeping
+band [291, 293.5] km at B = 0.05, dt = 30 s, 6 days, dawn-dusk and noon-midnight SSOs with J2 so the
+planes follow the Sun; baseline the averaged profile at moderate activity). Predicted before running
+from the table and the cycle model; the diurnal law's budget error decomposes as the **season** (that
+day's global mean over the annual mean) times the plane's **local-time factor** (its orbit average over
+that day's global mean):
+
+| epoch | plane | season | local-time factor | predicted | **measured** | raises (avg / diurnal) | m/s/day (avg / diurnal) |
+|---|---|---|---|---|---|---|---|
+| 2024-03-20 | dawn-dusk | 1.143 | 0.941 | +0.0750 | **+0.0733** | 14 / 15 | 3.341 / 3.586 |
+| 2024-03-20 | noon-midnight | 1.143 | 1.008 | +0.1516 | **+0.1459** | 14 / 16 | 3.341 / 3.829 |
+| 2024-07-01 | dawn-dusk | 0.811 | 0.964 | -0.2171 | **-0.2186** | 14 / 11 | 3.341 / 2.611 |
+| 2024-07-01 | noon-midnight | 0.811 | 1.040 | -0.1548 | **-0.1601** | 14 / 12 | 3.341 / 2.806 |
+
+On `(1 + error)` the measurements sit -1.6e-3, -4.9e-3, -1.9e-3 and -6.3e-3 from the predictions,
+inside the 1e-2 single-cycle budget `test_msis_delta_v.py` derives. The noon-midnight plane reads
+low by 0.5-0.6 % at both epochs, twice the dawn-dusk offset: a systematic the circular-orbit prediction
+omits, most likely J2's 7.7 km osculating altitude swing correlating with the table's latitude
+structure (budgeted <= 0.4 % in `test_msis_diurnal.py`; **not isolated**). The fast test (20 h, one
+steady cycle) measures +0.0702 / +0.1451 against the same predictions.
+
+Over 2024 the local-time factor is **0.935-0.965** for a dawn-dusk plane and **1.004-1.050** for
+noon-midnight, while the season swings **0.80-1.13** (292 km, monthly, from the table alone). So:
+
+- **The local-time structure the average discards is worth -4 to -7 % for a dawn-dusk SSO and 0 to
+  +5 % for noon-midnight** - a dawn-dusk budget built on the averaged profile is 4-7 % too high even on
+  a day whose global mean equals the annual one. That is half the ~14 % atmosphere-model choice
+  (table vs single band) and a twentieth of the solar-activity swing (-72 % / +134 %).
+- **The season the average also discards is larger: -20 % to +13 %.** For a sun-synchronous orbit the
+  averaged profile misleads the budget mainly through the time of year, not the local time - and
+  both are small against solar activity, which remains the dominant input.
 
 ---
 
