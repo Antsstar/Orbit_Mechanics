@@ -592,9 +592,15 @@ def write_all(runs, burns, t_tli, t_arb, dv_tli, dv_arb, t_ins, t_ei, t_seed) ->
         er = np.linalg.norm(ss[:, :3], axis=1)
         k = int(np.argmax(er))
         t_ma, r_ma = _refine_min(ts, -er, k)
-        note_pl = "Closest approach to the Moon" if run.model_id == "nasa" else "Predicted closest approach to the Moon"
-        ev.append((t_pl, run.model_id, "closest_lunar_approach", "apsis", round(d_pl - R_M, 1), "km", note_pl + " (altitude above the mean lunar radius)"))
-        ev.append((t_ma, run.model_id, "max_earth_distance", "apsis", round(-r_ma, 1), "km", "Farthest distance from Earth's centre"))
+        if run.model_id == "nasa":
+            # Reported events carry NASA's published figures, as the real file will.
+            ev.append((t_of(TARGET_PERILUNE_UTC), "nasa", "closest_lunar_approach", "apsis", TARGET_PERILUNE_ALT, "km",
+                       "Reported by NASA: 6,545 km above the lunar surface, about 23:00 UTC on 6 April"))
+            ev.append((t_ma, "nasa", "max_earth_distance", "apsis", 406740.0, "km", "Reported by NASA: 406,740 km from Earth"))
+        else:
+            ev.append((t_pl, run.model_id, "closest_lunar_approach", "apsis", round(d_pl - R_M, 1), "km",
+                       "Predicted closest approach to the Moon (altitude above the mean lunar radius)"))
+            ev.append((t_ma, run.model_id, "max_earth_distance", "apsis", round(-r_ma, 1), "km", "Farthest distance from Earth's centre"))
         r_end = float(np.linalg.norm(ss[-1, :3]))
         if r_end < R_E + EI_ALT + 50:
             ev.append((float(ts[-1]), run.model_id, "entry_interface", "milestone", EI_ALT, "km", "Reaches the top of the atmosphere (400,000 ft)"))

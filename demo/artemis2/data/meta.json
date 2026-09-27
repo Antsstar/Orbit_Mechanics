@@ -7,8 +7,8 @@
   "frame": "Earth-centred ICRF (J2000 axes), km",
   "source": "SYNTHETIC layout fixture from demo/artemis2/make_sample_data.py: toy dynamics, invented burns, a Keplerian Moon. Not NASA data and not OrbitalEngine output.",
   "truth_source": "Synthetic stand-in for NASA's reconstructed Orion trajectory",
-  "generated_utc": "2026-09-27T07:06:54Z",
-  "engine_commit": "764acb8",
+  "generated_utc": "2026-09-27T11:23:15Z",
+  "engine_commit": "52a823f",
   "engine_version": null,
   "notes": [
     "NASA-reported reference figures (6,545 km lunar periapsis altitude, 406,740 km from Earth) are targets the fixture was steered toward, not measurements."

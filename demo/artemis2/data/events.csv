@@ -6,10 +6,10 @@ t_s,model_id,event,kind,value,unit,note
 176577.4,nasa,outbound_correction_1,burn,1.29,m/s,Small trajectory correction
 320577.4,nasa,outbound_correction_2,burn,0.47,m/s,Small trajectory correction
 433438.8,moon_sun,closest_lunar_approach,apsis,6547.6,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
-433439.6,nasa,closest_lunar_approach,apsis,6547.6,km,Closest approach to the Moon (altitude above the mean lunar radius)
+433500.0,nasa,closest_lunar_approach,apsis,6545.0,km,"Reported by NASA: 6,545 km above the lunar surface, about 23:00 UTC on 6 April"
 433755.7,moon,closest_lunar_approach,apsis,7053.0,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
 434037.9,moon_sun,max_earth_distance,apsis,407092.8,km,Farthest distance from Earth's centre
-434038.5,nasa,max_earth_distance,apsis,407092.8,km,Farthest distance from Earth's centre
+434038.5,nasa,max_earth_distance,apsis,406740.0,km,"Reported by NASA: 406,740 km from Earth"
 434838.0,moon,max_earth_distance,apsis,407633.7,km,Farthest distance from Earth's centre
 445103.2,kepler,closest_lunar_approach,apsis,11870.5,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
 445202.5,j2,closest_lunar_approach,apsis,11770.5,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
