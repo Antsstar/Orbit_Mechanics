@@ -800,3 +800,277 @@ def run_replay(tiers: Sequence[Tier] = TIERS, *, reconstruct_family_switch: bool
                                   entry, perigee, wins, extended))
     return Replay(truth, results, burns, rot, t_ca_truth, max_earth_distance(truth),
                   dsn_windows(truth, rot) + lunar_blackouts(truth))
+
+
+# --------------------------------------------------------------------------------------------------
+# Export: the dashboard's data contract (demo/artemis2/SCHEMA.md)
+# --------------------------------------------------------------------------------------------------
+
+#: Dashboard `t_s = 0`: launch, 2026-04-01T22:35:12 UTC, on TDB.
+LAUNCH_TDB: Final[np.datetime64] = hb.utc_to_tdb(a2.LAUNCH_UTC)
+#: Tables' clock minus the dashboard's: add this to a table time to get the dashboard's `t_s`.
+EXPORT_OFFSET_S: Final[float] = -a2.tdb_seconds(LAUNCH_TDB)
+#: Discontinuities in NASA's data marked as `milestone` events when their closure exceeds this.
+MARK_JUMP_KM: Final[float] = 5.0
+TRUTH_ID: Final[str] = "nasa"
+
+
+def _utc_t(utc: str) -> float:
+    """Dashboard `t_s` of a UTC instant."""
+    return a2.tdb_seconds(hb.utc_to_tdb(utc)) + EXPORT_OFFSET_S
+
+
+def _near(flight: Flight) -> NDArray[np.bool_]:
+    """Within 60,000 km of Earth or 40,000 km of the Moon (the contract's dense-sampling rule)."""
+    near: NDArray[np.bool_] = np.linalg.norm(flight.state[:, :3], axis=1) < 60000.0
+    idx = np.flatnonzero(_in_moon_span(flight))
+    dm = DistanceFn(True)(flight.t_s[idx], flight.state[idx, :3])
+    near[idx] |= dm < 40000.0
+    return near
+
+
+def _on(t: ArrayFloat, step: float) -> NDArray[np.bool_]:
+    """Whole multiples of `step` seconds (the tables' clock is on whole minutes)."""
+    r = np.mod(t, step)
+    out: NDArray[np.bool_] = (r < 1e-6) | (step - r < 1e-6)
+    return out
+
+
+def _select(flight: Flight, fine: float, coarse: float,
+            extra: Sequence[Tuple[float, float]] = ()) -> NDArray[np.int64]:
+    """Sample indices: every `fine` s where `_near`, every `coarse` s elsewhere, every sample inside
+    the `extra` intervals, and both ends."""
+    t = flight.t_s
+    keep = (_near(flight) & _on(t, fine)) | _on(t, coarse)
+    for a, b in extra:
+        keep |= (t >= a) & (t <= b)
+    keep[0] = True
+    keep[-1] = True
+    out: NDArray[np.int64] = np.flatnonzero(keep).astype(np.int64)
+    return out
+
+
+def _discontinuities(after_s: float = -math.inf) -> List[Dict[str, str]]:
+    return [r for r in _read_burns_csv()
+            if r["kind"] == "discontinuity" and a2.tdb_seconds(r["epoch_tdb"]) > after_s]
+
+
+def _truth_index(truth: Flight, t: ArrayFloat) -> Tuple[NDArray[np.int64], NDArray[np.bool_]]:
+    """Indices of `truth` samples at exactly the times `t` (the shared 1-min grid), and which exist."""
+    k = np.clip(np.searchsorted(truth.t_s, t), 0, truth.t_s.size - 1).astype(np.int64)
+    ok: NDArray[np.bool_] = np.abs(truth.t_s[k] - t) < 1e-6
+    return k, ok
+
+
+def position_error(flight: Flight, truth: Flight) -> Tuple[ArrayFloat, ArrayFloat]:
+    """`(t_s, |r - r_truth|)` at every sample both have (never interpolated)."""
+    k, ok = _truth_index(truth, flight.t_s)
+    err: ArrayFloat = np.linalg.norm(flight.state[ok, :3] - truth.state[k[ok], :3], axis=1)
+    t: ArrayFloat = flight.t_s[ok]
+    return t, err
+
+
+def _fmt(x: float, nd: int) -> str:
+    s = f"{x:.{nd}f}"
+    return "0" if float(s) == 0.0 else s
+
+
+def burn_value(b: ReplayBurn) -> float:
+    """What the dashboard shows for a burn: NASA's reported Delta-v, else the data's delivered one."""
+    return b.reported_m_s if not math.isnan(b.reported_m_s) else b.delivered_m_s
+
+
+def _burn_note(b: ReplayBurn) -> str:
+    utc = str(np.datetime_as_string(a2._utc_of_tdb(b.t_s), unit="s"))
+    if b.source == "reconstructed":
+        return (f"Not in NASA's event list: the navigation data after 5 April imply a {b.dv_m_s:.2f} m/s "
+                f"velocity change at about {utc} UTC (reconstructed by OrbitalEngine; every model receives it)")
+    if not b.listed_utc:
+        return (f"Not in NASA's event list: a {b.delivered_m_s:.3f} m/s impulse in the navigation data at "
+                f"{utc} UTC (detected by OrbitalEngine)")
+    rep = f"NASA reported {b.reported_m_s:g} m/s" if not math.isnan(b.reported_m_s) else "NASA stated no delta-v"
+    return (f"{b.name}: {rep}; the data show {b.delivered_m_s:.3f} m/s delivered, impulsive equivalent at "
+            f"{utc} UTC (listed start {b.listed_utc} UTC)")
+
+
+_Event = Tuple[float, str, str, str, str, str, str]
+
+
+def _events(replay: Replay, all_burns: Sequence[ReplayBurn]) -> List[_Event]:
+    x0 = EXPORT_OFFSET_S
+    t_seed = a2.tdb_seconds(SEED_TDB)
+    ev: List[_Event] = []
+
+    def add(t: float, mid: str, key: str, kind: str, value: Optional[float], unit: str, note: str,
+            nd: int = 1) -> None:
+        ev.append((t, mid, key, kind, "" if value is None else _fmt(value, nd), unit if value is not None else "", note))
+
+    add(_utc_t(a2.LAUNCH_UTC), TRUTH_ID, "launch", "milestone", None, "",
+        "Liftoff from Kennedy Space Center LC-39B, 22:35:12 UTC (NASA)")
+    add(_utc_t("2026-04-02T01:59:30"), TRUTH_ID, "orion_icps_separation", "milestone", None, "",
+        "Orion separates from the upper stage (event list, 01:59:30 UTC); NASA's trajectory data start here")
+    for b in all_burns:
+        t = _utc_t(b.listed_utc) if b.listed_utc else b.t_s + x0
+        add(t, TRUTH_ID, b.key, "burn", burn_value(b), "m/s", _burn_note(b), 2)
+    add(t_seed + x0, TRUTH_ID, "model_seed", "milestone", None, "",
+        "Every model starts from NASA's position and velocity here (2026-04-03 00:58:51 UTC), an hour after "
+        "the translunar injection burn")
+    for key, utc, note in [
+        ("enters_lunar_sphere_of_influence", "2026-04-06T05:38:44",
+         "Enters the Moon's sphere of influence, 62,800 km from its centre (event list)"),
+        ("exits_lunar_sphere_of_influence", "2026-04-07T16:23:00", "Leaves the Moon's sphere of influence (event list)"),
+        ("crew_service_module_separation", "2026-04-10T23:33:00",
+         "The crew module separates from the European-built service module (event list)"),
+        ("splashdown", "2026-04-11T00:07:00", "Splashdown in the Pacific off Baja California (event list)"),
+    ]:
+        add(_utc_t(utc), TRUTH_ID, key, "milestone", None, "", note)
+    add(_utc_t("2026-04-06T23:01:00"), TRUTH_ID, "closest_lunar_approach", "apsis", 6545.0, "km",
+        "Reported by NASA: 4,067 mi (6,545 km) above the lunar surface; time 23:01 UTC from NASA's event list "
+        "(8,282 km from the Moon's centre). NASA's own trajectory gives "
+        f"{replay.truth_closest.value_km - a2.MOON_MEAN_RADIUS_KM:,.1f} km above the 1,737.4 km mean radius")
+    add(_utc_t("2026-04-06T23:05:00"), TRUTH_ID, "max_earth_distance", "apsis", 413146.2, "km",
+        "Reported in NASA's event list: 413,146.2 km from Earth's CENTRE at 23:05 UTC, the reference every "
+        "model here uses. NASA's public record, 252,756 mi = 406,771 km, is measured from Earth's SURFACE")
+    add(_utc_t("2026-04-10T23:53:00"), TRUTH_ID, "entry_interface", "milestone", EI_ALTITUDE_KM, "km",
+        "NASA's event list: entry interface (122 km) at 23:53 UTC. NASA's trajectory data end at 23:52:51 UTC, "
+        "172 km up")
+    for r in _discontinuities(t_seed):
+        if float(r["closure_km"]) > MARK_JUMP_KM:
+            where = f" where file {r['file_join']} takes over" if r["file_join"] else " inside one navigation file"
+            add(a2.tdb_seconds(r["cluster_start_tdb"]) + x0, TRUTH_ID, "navigation_data_jump", "milestone",
+                float(r["closure_km"]), "km",
+                f"Artefact in NASA's data, not a spacecraft event: the trajectory jumps (closure "
+                f"{float(r['closure_km']):.0f} km) between {r['cluster_start_tdb'][5:16]} and "
+                f"{r['cluster_end_tdb'][5:16]} TDB{where}. Every model's error steps here")
+    for res in replay.tiers:
+        mid = res.tier.model_id
+        add(res.closest.t_s + x0, mid, "closest_lunar_approach", "apsis",
+            res.closest.value_km - a2.MOON_MEAN_RADIUS_KM, "km",
+            f"Predicted closest approach: {res.closest.value_km:,.1f} km from the Moon's centre; the value is the "
+            "altitude above the 1,737.4 km mean radius")
+        add(res.farthest.t_s + x0, mid, "max_earth_distance", "apsis", res.farthest.value_km, "km",
+            "Predicted farthest distance from Earth's centre (within the flown span)")
+        if res.entry is not None:
+            add(res.entry.t_s + x0, mid, "entry_interface", "milestone", EI_ALTITUDE_KM, "km",
+                "Predicted entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid")
+        elif res.perigee is not None:
+            add(res.perigee.t_s + x0, mid, "return_perigee", "apsis", res.perigee.value_km - WGS84_A_KM, "km",
+                "Closest return to Earth, which misses the atmosphere (altitude above the 6,378.137 km equatorial "
+                "radius)" + (" - found by flying on past the end of the data" if res.extended is not None else ""))
+    ev.sort(key=lambda e: (e[0], e[1]))
+    return ev
+
+
+def export_dashboard(replay: Replay, out_dir: str, *, generated_utc: str, engine_commit: str,
+                     engine_version: Optional[str], notes: Sequence[str] = ()) -> Dict[str, int]:
+    """
+    Write `meta.json`, `models.csv`, `trajectory.csv`, `metrics.csv`, `events.csv`, `windows.csv`
+    to `out_dir` per `demo/artemis2/SCHEMA.md`, `t_s` counted from launch. Returns each file's size.
+    """
+    import json
+    import os
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    def path(name: str) -> str:
+        return os.path.join(out_dir, name)
+
+    x0 = EXPORT_OFFSET_S
+    truth = replay.truth
+    jumps = [(a2.tdb_seconds(r["cluster_start_tdb"]) - 120.0, a2.tdb_seconds(r["cluster_end_tdb"]) + 120.0)
+             for r in _discontinuities()]
+
+    with open(path("models.csv"), "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["model_id", "label", "description", "colour", "colour_dark", "is_truth"])
+        w.writerow([TRUTH_ID, "NASA navigation",
+                    "Orion's trajectory from NASA's navigation team, via JPL Horizons. The reference every model is "
+                    "scored against.", "#17212e", "#f2f5f8", 1])
+        for res in replay.tiers:
+            tr = res.tier
+            w.writerow([tr.model_id, tr.label, tr.description, tr.colour, tr.colour_dark, 0])
+
+    moon = a2.load("moon")
+    t_max = max(float(res.flight.t_s[-1]) for res in replay.tiers)
+    with open(path("trajectory.csv"), "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["t_s", "model_id", "body", "x_km", "y_km", "z_km"])
+        for f in [truth] + [res.flight for res in replay.tiers]:
+            for k in _select(f, 60.0, 300.0):
+                p = f.state[k]
+                w.writerow([_fmt(float(f.t_s[k]) + x0, 3), f.model_id, "orion", _fmt(p[0], 3), _fmt(p[1], 3),
+                            _fmt(p[2], 3)])
+        tm = np.arange(0.0, min(t_max, float(moon.t_s[-1])) + 1e-9, 600.0, dtype=np.float64)
+        for tq, pq in zip(tm, a2.hermite_position(moon, tm)):
+            w.writerow([_fmt(float(tq) + x0, 3), TRUTH_ID, "moon", _fmt(pq[0], 3), _fmt(pq[1], 3), _fmt(pq[2], 3)])
+
+    all_burns = replay_burns(include_before_seed=True,
+                             reconstruct_family_switch=any(b.source == "reconstructed" for b in replay.burns))
+    with open(path("metrics.csv"), "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["t_s", "model_id", "metric", "value", "unit"])
+
+        def rows(f: Flight, name: str, unit: str, idx: NDArray[np.int64], vals: ArrayFloat, nd: int) -> None:
+            for k, v in zip(idx, vals):
+                if math.isfinite(float(v)):
+                    w.writerow([_fmt(float(f.t_s[k]) + x0, 3), f.model_id, name, _fmt(float(v), nd), unit])
+
+        flights: List[Tuple[Flight, List[Flight]]] = [(truth, [])]
+        flights += [(res.flight, res.arcs) for res in replay.tiers]
+        for f, arcs in flights:
+            sel = _select(f, 120.0, 600.0, jumps)
+            if f.model_id != TRUTH_ID:
+                k, ok = _truth_index(truth, f.t_s[sel])
+                err = np.full(sel.size, np.nan)
+                err[ok] = np.linalg.norm(f.state[sel[ok], :3] - truth.state[k[ok], :3], axis=1)
+                rows(f, "position_error_km", "km", sel, err, 4)
+            rows(f, "earth_range_km", "km", sel, np.linalg.norm(f.state[sel, :3], axis=1), 1)
+            inm = sel[_in_moon_span(f)[sel]]
+            rows(f, "moon_range_km", "km", inm, DistanceFn(True)(f.t_s[inm], f.state[inm, :3]), 1)
+            rows(f, "speed_km_s", "km/s", sel, np.linalg.norm(f.state[sel, 3:], axis=1), 5)
+            if f.model_id == TRUTH_ID:
+                dv = np.array([sum(burn_value(b) for b in all_burns if b.t_s <= t + 1e-6) for t in f.t_s[sel]],
+                              dtype=np.float64)
+                rows(f, "delta_v_m_s", "m/s", sel, dv, 2)
+            for a in arcs:
+                s2 = _select(a, 120.0, 600.0, jumps)
+                k, ok = _truth_index(truth, a.t_s[s2])
+                ae = np.full(s2.size, np.nan)
+                ae[ok] = np.linalg.norm(a.state[s2[ok], :3] - truth.state[k[ok], :3], axis=1)
+                rows(Flight(f.model_id, a.t_s, a.state), "arc_error_km", "km", s2, ae, 4)
+
+    with open(path("events.csv"), "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["t_s", "model_id", "event", "kind", "value", "unit", "note"])
+        for row in _events(replay, all_burns):
+            w.writerow([_fmt(row[0], 3), *row[1:]])
+
+    with open(path("windows.csv"), "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["model_id", "kind", "station", "start_s", "end_s"])
+        groups: List[Tuple[str, List[Window]]] = [(TRUTH_ID, replay.truth_windows)]
+        groups += [(res.tier.model_id, res.windows) for res in replay.tiers]
+        for mid, wins in groups:
+            for win in wins:
+                w.writerow([mid, win.kind, win.station, _fmt(win.start_s + x0, 1), _fmt(win.end_s + x0, 1)])
+
+    meta = {
+        "synthetic": False,
+        "title": "Artemis II lunar flyby",
+        "epoch_utc": "2026-04-01T22:35:12.000Z",
+        "epoch_tdb": str(np.datetime_as_string(LAUNCH_TDB, unit="ms")) + " TDB",
+        "epoch_label": "Launch (T+0)",
+        "frame": "Earth-centred ICRF (J2000 axes), km",
+        "source": ("JPL Horizons API 1.2, retrieved 2026-09-27T07:04:29Z: Orion -1024 {source: Artemis_II_merged}, "
+                   "object data revised Apr 20, 2026; Moon 301 and Sun 10 {source: DE441}. Models: OrbitalEngine "
+                   "artemis2_replay (Cowell, RK4 at 60 s, sub-stepped to 0.01 rad of turning)"),
+        "truth_source": "NASA/JSC Orion navigation (14 concatenated OEM/OD files) via JPL Horizons",
+        "generated_utc": generated_utc,
+        "engine_commit": engine_commit,
+        "engine_version": engine_version,
+        "notes": list(notes),
+    }
+    with open(path("meta.json"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(meta, indent=2) + "\n")
+    names = ["meta.json", "models.csv", "trajectory.csv", "metrics.csv", "events.csv", "windows.csv"]
+    return {n: os.path.getsize(path(n)) for n in names}
