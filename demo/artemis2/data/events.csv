@@ -1,0 +1,21 @@
+t_s,model_id,event,kind,value,unit,note
+0.0,nasa,launch,milestone,,,"Liftoff from Kennedy Space Center, LC-39B"
+6480.0,nasa,apogee_raise_burn,burn,2827.4,m/s,Upper stage raises apogee into a high Earth orbit
+104577.4,nasa,translunar_injection,burn,322.6,m/s,Service module burn that sends Orion to the Moon
+108177.4,nasa,model_seed,milestone,,,Every model starts from NASA's state here
+176577.4,nasa,outbound_correction_1,burn,1.29,m/s,Small trajectory correction
+320577.4,nasa,outbound_correction_2,burn,0.47,m/s,Small trajectory correction
+433438.8,moon_sun,closest_lunar_approach,apsis,6547.6,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
+433439.6,nasa,closest_lunar_approach,apsis,6547.6,km,Closest approach to the Moon (altitude above the mean lunar radius)
+433755.7,moon,closest_lunar_approach,apsis,7053.0,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
+434037.9,moon_sun,max_earth_distance,apsis,407092.8,km,Farthest distance from Earth's centre
+434038.5,nasa,max_earth_distance,apsis,407092.8,km,Farthest distance from Earth's centre
+434838.0,moon,max_earth_distance,apsis,407633.7,km,Farthest distance from Earth's centre
+445103.2,kepler,closest_lunar_approach,apsis,11870.5,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
+445202.5,j2,closest_lunar_approach,apsis,11770.5,km,Predicted closest approach to the Moon (altitude above the mean lunar radius)
+608577.4,nasa,return_correction_1,burn,0.62,m/s,Small trajectory correction
+654668.9,j2,max_earth_distance,apsis,454004.9,km,Farthest distance from Earth's centre
+655173.5,kepler,max_earth_distance,apsis,454286.4,km,Farthest distance from Earth's centre
+782157.4,moon_sun,entry_interface,milestone,121.92,km,"Reaches the top of the atmosphere (400,000 ft)"
+782157.4,nasa,entry_interface,milestone,121.92,km,"Reaches the top of the atmosphere (400,000 ft)"
+790497.4,moon,entry_interface,milestone,121.92,km,"Reaches the top of the atmosphere (400,000 ft)"
