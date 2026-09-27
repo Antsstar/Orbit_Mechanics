@@ -1406,6 +1406,33 @@ Found while building `msis_diurnal.py` (the diurnal-bulge density law) and its v
    rejects `PYTHONPATH=...` on a command line - use a runner that inserts the worktree's `src` into
    `sys.path` and asserts `orbital_engine.__file__` before running pytest.
 
+## Horizons / Artemis II ingest: five things that cost time
+
+1. **Horizons' Earth "BODY EQUATOR" frame is not Earth-fixed.** Its header says `Reference frame :
+   ITRF93`, so the first frame check solved ICRF -> "ITRF93" from three bodies' positions and read
+   the prime meridian off the rotation - and got 89.83 deg at every 12 h epoch. The frame is the
+   Earth's **mean equator and node of date** (x = the node on the ICRF equator, RA = pole RA + 90 deg);
+   "ITRF93" names the pole model. **Fix:** the Earth-fixed rotation comes from `CENTER='coord@399'`
+   with `SITE_COORD` at (0E 0N), (90E 0N) and the pole - the site vectors *are* the ITRF93 axes in ICRF
+   (`earth_sites.npz`). The body-equator data are kept, honestly named, as the *mean* pole check.
+2. **Horizons rings across burns.** At 5 s around TLI the residual acceleration swings +-6 m/s^2 for
+   five minutes before the engine lights (the engine itself: ~1.07 m/s^2). Per-interval residuals are
+   meaningless inside a burn; only the end-to-end jump between clean samples is. Burn clusters are
+   bridged over one quiet interval and scored end to end. A merge gap of 5 joined RTC-2 to a ringing
+   cluster 10 min later and moved its epoch by 80 s; gap 1 with a 0.03 m/s threshold separates them.
+3. **Closure separates burns from data joins.** A finite constant-direction burn closes the forward
+   and backward coasts at its midpoint (to first order), so `closure / |dv|` is seconds for a burn
+   and hours for a position jump. The first docstring said a finite burn closes to `|dv| D / 4` -
+   wrong; the measured TLI closure (3 km on 385 m/s, 7.9 s) is gravity gradient and steering, not `D`.
+4. **Two published numbers are not what they look like.** NASA's "closest approach 6,545 km" is above
+   the lunar surface (Horizons' list: 8,282 km from the centre); NASA's maximum distance 406,771 km is
+   from the Earth's *surface* (centre distance minus 6,373.8 km). The Horizons list's perigee raise
+   time (11:30 UTC) is a planning value 38 min early, and its maximum distance is 1.3 km above the data.
+5. **Windows line endings.** `Path.write_text` on Windows turns Horizons' `\n` into `\r\n`; raw
+   responses are written with `write_bytes`. `STEP_SIZE='5s'` is refused ("Unknown units") - give an
+   interval count instead (`STEP_SIZE='276'`). And `mypy` crashed with an INTERNAL ERROR that was only
+   its own `cp1252` console failing to print a `μ` in a numpy stub note: set `PYTHONIOENCODING=utf-8`.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
