@@ -493,13 +493,18 @@ class Simulation:
         drag_params = self.force_model_params.get(drag.DRAG_MODEL)
         self._cowell_drag_params = self._no_drag_params if drag_params is None else drag_params
 
-        # The MSIS rows among the Cowell drag bodies, by `drag_kernel`'s own threshold (`>= 1.5`).
+        # The MSIS rows among the Cowell drag bodies, by `drag_kernel`'s own thresholds (`>= 1.5`,
+        # below `drag.DIURNAL_THRESHOLD`). A diurnal-MSIS row (`>= 2.5`) is foreign: the fused twin
+        # knows laws 0-2 only, has no `t`, and would read 3.0 as the averaged profile.
         self._cowell_drag_table_of.fill(-1)
         activity = np.empty((0, 3), dtype=np.float64)
         msis_rows = np.empty(0, dtype=np.int64)
         if drag_params is not None:
             with_drag = idx[self._cowell_has_drag[idx]]
-            msis_rows = with_drag[drag_params[with_drag, drag.DENSITY_MODEL_COL] >= 1.5]
+            selector = drag_params[with_drag, drag.DENSITY_MODEL_COL]
+            if bool(np.any(selector >= drag.DIURNAL_THRESHOLD)):
+                self._cowell_fused_ok = False
+            msis_rows = with_drag[(selector >= 1.5) & ~(selector >= drag.DIURNAL_THRESHOLD)]
             activity = drag_params[msis_rows][:, drag.SOLAR_COLS]
         try:
             self._cowell_drag_tables, table_of = drag.density_tables(activity)

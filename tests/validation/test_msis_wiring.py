@@ -178,7 +178,8 @@ def test_every_existing_all_zero_row_still_means_the_single_exponential() -> Non
     assert DENSITY_MODEL_MSIS == 2.0
     assert DRAG_PARAM_NAMES[:N_LEGACY_COLUMNS] == (
         "ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega", "density_model")
-    assert DRAG_PARAM_NAMES[N_LEGACY_COLUMNS:] == ("f107", "f107a", "ap")
+    assert DRAG_PARAM_NAMES[N_LEGACY_COLUMNS:N_LEGACY_COLUMNS + 3] == ("f107", "f107a", "ap")
+    assert DRAG_PARAM_NAMES[N_LEGACY_COLUMNS + 3:] == ("epoch_days",), "the diurnal law appended one"
 
 
 # ==================================================================================================
@@ -227,7 +228,7 @@ def test_out_of_range_indices_are_refused(bad: dict[str, float], no_pymsis: None
 
 def test_an_unknown_selector_is_refused() -> None:
     sim, sats = _sim()
-    for bad in (3.0, 1.5, -1.0):
+    for bad in (4.0, 2.5, 1.5, -1.0):
         with pytest.raises(ValueError, match="not a known density law"):
             sim.enable_force_model(DRAG_MODEL, sats, density_model=bad, **_COMMON)
 
@@ -245,7 +246,7 @@ def test_the_kernel_raises_on_an_unevaluated_profile_and_never_imports_pymsis(no
     state[1, :3] = [EARTH_R_EQ + 400.0, 0.0, 0.0]
     state[1, 3:] = [0.0, 7.6, 0.0]
     params = np.zeros((2, len(DRAG_PARAM_NAMES)))
-    params[1] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_MSIS,
+    params[1, :10] = [0.02, 0.0, 0.0, 0.0, EARTH_R_EQ, 0.0, DENSITY_MODEL_MSIS,
                  NEVER_EVALUATED["f107"], NEVER_EVALUATED["f107a"], NEVER_EVALUATED["ap"]]
     with pytest.raises(LookupError, match="configuration time"):
         drag.drag_kernel(np.array([1], dtype=np.int64), 0.0, state, np.zeros(2),

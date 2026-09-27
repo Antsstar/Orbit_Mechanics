@@ -345,7 +345,7 @@ def test_degenerate_rows_contribute_exactly_zero_and_the_kernel_adds() -> None:
 def test_drag_is_registered_with_its_coefficient_layout() -> None:
     model = registry.get_force_model(DRAG_MODEL)
     assert model.param_names == ("ballistic_coeff", "rho0", "h0", "scale_height", "r_ref", "omega",
-                                 "density_model", "f107", "f107a", "ap")
+                                 "density_model", "f107", "f107a", "ap", "epoch_days")
     assert model.kernel is drag.drag_kernel
     assert model.validate_bodies is not None
     assert "Vallado" in model.citation
