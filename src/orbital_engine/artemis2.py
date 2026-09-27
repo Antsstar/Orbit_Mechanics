@@ -87,6 +87,8 @@ DATA_DIR: Final[Path] = hb.DATA_DIR / "artemis2"
 
 #: `t_s = 0` for every committed table, a TDB instant.
 EPOCH_TDB: Final[str] = "2026-04-02T02:00:00"
+#: Where `scenarios.artemis2` seeds Orion by default: the first clean coast after TLI (TDB).
+DEFAULT_REPLAY_EPOCH_TDB: Final[str] = "2026-04-03T01:00:00"
 #: Launch, UTC, as the object-data header and NASA state it (22:35:12 UTC, 2026-04-01).
 LAUNCH_UTC: Final[str] = "2026-04-01T22:35:12"
 #: Horizons IDs whose ICRF and ITRF93 positions make up `frame_check.npz`.
@@ -639,12 +641,12 @@ def write_burns_csv(burns: Sequence[Burn], path: Union[str, Path]) -> None:
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(["epoch_utc", "epoch_tdb", "cluster_start_tdb", "cluster_end_tdb", "dv_m_s", "delivered_m_s",
-                    "dv_r_m_s", "dv_s_m_s", "dv_w_m_s", "central", "closure_km", "n_intervals", "file_join",
+                    "dv_r_m_s", "dv_s_m_s", "dv_w_m_s", "central", "kind", "closure_km", "closure_s", "n_intervals", "file_join",
                     "matched_event", "match_offset_s"])
         for b in matched:
             w.writerow([_iso(b.epoch_utc), _iso(b.epoch_tdb), _iso(b.start_tdb, "s"), _iso(b.end_tdb, "s"),
                         f"{b.dv_m_s:.4f}", f"{b.delivered_m_s:.4f}",
-                        *(f"{x:.4f}" for x in b.rsw_m_s), b.central, f"{b.closure_km:.4f}", b.n_intervals,
+                        *(f"{x:.4f}" for x in b.rsw_m_s), b.central, b.kind, f"{b.closure_km:.4f}", f"{b.closure_s:.1f}", b.n_intervals,
                         b.file_join, b.matched_event, "" if math.isnan(b.match_offset_s) else f"{b.match_offset_s:.1f}"])
 
 
@@ -697,59 +699,130 @@ def maximum_earth_distance(orion: Optional[hb.HorizonsVectors] = None) -> Extrem
 @dataclass(frozen=True)
 class EarthOrientation:
     """
-    The ICRF -> ITRF93 rotation recovered from `frame_check.npz` at each of its epochs: `jd_tdb`
-    `(m,)`, `rotation` `(m, 3, 3)` with `r_itrf = rotation @ r_icrf`, `pole` `(m, 3)` the Earth's
-    ITRF93 z axis in ICRF, `pole_tilt_rad` its angle from ICRF +z, `pole_ra_rad` its right ascension,
-    `prime_meridian_ra_rad` the ICRF right ascension of ITRF93's x axis (the engine's `theta0` for a
-    rotation about ICRF +z), and `residual_rad` the worst misfit of the three body directions.
+    The ICRF -> ITRF93 rotation recovered from `earth_sites.npz` at each of its epochs (6 h from
+    `EPOCH_TDB`): `jd_tdb` `(m,)`, `t_s` `(m,)` seconds from `EPOCH_TDB`, `rotation` `(m, 3, 3)` with
+    `r_itrf = rotation @ r_icrf`, `pole` `(m, 3)` the ITRF93 z axis (the true rotation pole,
+    precession + nutation + polar motion) in ICRF, `pole_tilt_rad` its angle from ICRF +z,
+    `pole_ra_rad` its right ascension, `prime_meridian_ra_rad` the ICRF right ascension of the ITRF93
+    x axis (the engine's `theta0` for a rotation about ICRF +z), and `orthogonality` the largest
+    `|cos|` between the three recovered axes (a check on the data, ~1e-16).
     """
     jd_tdb: ArrayFloat
+    t_s: ArrayFloat
     rotation: ArrayFloat
     pole: ArrayFloat
     pole_tilt_rad: ArrayFloat
     pole_ra_rad: ArrayFloat
     prime_meridian_ra_rad: ArrayFloat
-    residual_rad: ArrayFloat
+    orthogonality: ArrayFloat
 
 
 def earth_orientation() -> EarthOrientation:
-    """Solve Wahba's problem (SVD) for the rotation taking each epoch's three ICRF unit vectors to
-    their ITRF93 counterparts. Pure rotation: both tables are geometric, at the same instants."""
+    """
+    The Earth's orientation in ICRF from Horizons' own Earth-orientation model (ITRF93, IERS EOP):
+    the ICRF vectors of the geodetic sites (0 E, 0 N), (90 E, 0 N) and the north pole on the WGS-84
+    ellipsoid are the ITRF93 x, y and z axes up to their lengths (a, a, b). Geometric, same instant,
+    so a pure rotation; no memory-sourced constant enters.
+    """
+    with np.load(DATA_DIR / "earth_sites.npz", allow_pickle=False) as data:
+        jd = np.asarray(data["jd_tdb"], dtype=np.float64)
+        sites = np.asarray(data["site_icrf_km"], dtype=np.float64)  # (m, 3 sites, 3)
+    axes = sites / np.linalg.norm(sites, axis=2, keepdims=True)
+    rot: ArrayFloat = np.ascontiguousarray(axes)  # rows are the ITRF axes in ICRF: r_itrf = rot @ r_icrf
+    ortho = np.max(np.abs(np.stack([
+        np.sum(axes[:, 0] * axes[:, 1], axis=1), np.sum(axes[:, 0] * axes[:, 2], axis=1),
+        np.sum(axes[:, 1] * axes[:, 2], axis=1)], axis=1)), axis=1)
+    pole = axes[:, 2, :]
+    t_s: ArrayFloat = np.asarray((jd - hb.julian_date(EPOCH_TDB)) * hb.SECONDS_PER_DAY, dtype=np.float64)
+    return EarthOrientation(
+        jd_tdb=jd, t_s=np.round(t_s, 3), rotation=rot, pole=pole,
+        pole_tilt_rad=np.arccos(np.clip(pole[:, 2], -1.0, 1.0)),
+        pole_ra_rad=np.mod(np.arctan2(pole[:, 1], pole[:, 0]), 2.0 * math.pi),
+        prime_meridian_ra_rad=np.mod(np.arctan2(axes[:, 0, 1], axes[:, 0, 0]), 2.0 * math.pi),
+        orthogonality=ortho,
+    )
+
+
+def mean_pole_of_date() -> Tuple[ArrayFloat, ArrayFloat]:
+    """
+    `(jd_tdb (m,), pole (m, 3))`: the Earth's **mean** pole of date in ICRF, from `frame_check.npz`
+    (Moon, Sun and Jupiter in ICRF and in Horizons' Earth "BODY EQUATOR" frame, which is the mean
+    equator and node of date - it does not rotate with the Earth, whatever its header's "ITRF93"
+    suggests). Wahba's problem by SVD on the three unit vectors; the pole is the third row.
+    """
     with np.load(DATA_DIR / "frame_check.npz", allow_pickle=False) as data:
         jd = np.asarray(data["jd_tdb"], dtype=np.float64)
         a = np.asarray(data["icrf_km"], dtype=np.float64)
         b = np.asarray(data["itrf93_km"], dtype=np.float64)
     ua = a / np.linalg.norm(a, axis=2, keepdims=True)
     ub = b / np.linalg.norm(b, axis=2, keepdims=True)
-    rots = np.empty((jd.size, 3, 3), dtype=np.float64)
-    resid = np.empty(jd.size, dtype=np.float64)
+    pole = np.empty((jd.size, 3), dtype=np.float64)
     for k in range(jd.size):
         u, _, vt = np.linalg.svd(ub[k].T @ ua[k])
         d = np.sign(np.linalg.det(u @ vt))
-        rot = u @ np.diag([1.0, 1.0, d]) @ vt
-        rots[k] = rot
-        mapped = ua[k] @ rot.T
-        resid[k] = float(np.max(np.arccos(np.clip(np.sum(mapped * ub[k], axis=1), -1.0, 1.0))))
-    pole = rots[:, 2, :]
-    return EarthOrientation(
-        jd_tdb=jd, rotation=rots, pole=pole,
-        pole_tilt_rad=np.arccos(np.clip(pole[:, 2], -1.0, 1.0)),
-        pole_ra_rad=np.mod(np.arctan2(pole[:, 1], pole[:, 0]), 2.0 * math.pi),
-        prime_meridian_ra_rad=np.mod(np.arctan2(rots[:, 0, 1], rots[:, 0, 0]), 2.0 * math.pi),
-        residual_rad=resid,
-    )
+        pole[k] = (u @ np.diag([1.0, 1.0, d]) @ vt)[2]
+    return jd, pole
+
+
+def _julian_centuries_tt(jd_tt: float) -> float:
+    return (jd_tt - 2451545.0) / 36525.0
 
 
 def precession_pole_tilt_rad(jd_tt: float) -> float:
     """
     Angle between the mean pole of date and the J2000 pole: the IAU 1976 precession angle
-    `theta_A = 2004.3109" T - 0.42665" T^2 - 0.041833" T^3` (Lieske et al. 1977; T Julian centuries
-    of TT from J2000 - **from memory, unverified against the text**; checked against the ITRF93 pole
-    recovered from Horizons, which adds nutation (<= 9.2") and polar motion (<~0.5")).
+    `theta_A = 2004.3109" T - 0.42665" T^2 - 0.041833" T^3` (Lieske et al. 1977, A&A 58, 1; T Julian
+    centuries of TT from J2000 - **from memory, unverified against the text**; checked against the
+    mean pole recovered from Horizons, `mean_pole_of_date`).
     """
-    t = (jd_tt - 2451545.0) / 36525.0
-    arcsec = 2004.3109 * t - 0.42665 * t * t - 0.041833 * t ** 3
+    t = _julian_centuries_tt(jd_tt)
+    return math.radians((2004.3109 * t - 0.42665 * t * t - 0.041833 * t ** 3) / 3600.0)
+
+
+def precession_in_ra_rad(jd_tt: float) -> float:
+    """
+    `zeta_A + z_A`, the IAU 1976 general precession in right ascension (Lieske et al. 1977:
+    `zeta_A = 2306.2181" T + 0.30188" T^2 + 0.017998" T^3`, `z_A = 2306.2181" T + 1.09468" T^2 +
+    0.018203" T^3`, **from memory**): to first order the equinox of date sits at ICRF right ascension
+    `-(zeta_A + z_A)`, so an angle measured from the equinox of date (GMST) becomes one measured from
+    ICRF +x by subtracting this.
+    """
+    t = _julian_centuries_tt(jd_tt)
+    arcsec = 4612.4362 * t + 1.39656 * t * t + 0.036201 * t ** 3
     return math.radians(arcsec / 3600.0)
+
+
+def gmst_iau1982_rad(jd_ut1: float) -> float:
+    """
+    Greenwich mean sidereal time, IAU 1982 (Aoki et al. 1982), in the degree form
+    `solar_ephemeris.py` already documents: `280.46061837 + 360.98564736629 d + 0.000387933 T^2 -
+    T^3 / 38710000` deg, `d` UT1 days from J2000 and `T = d / 36525` (**from memory**; checked
+    against Horizons' apparent sidereal time in `time_check.txt`, which differs by the equation of the
+    equinoxes, <= 1.2 s of time).
+    """
+    d = jd_ut1 - 2451545.0
+    t = d / 36525.0
+    deg = 280.46061837 + 360.98564736629 * d + 0.000387933 * t * t - t ** 3 / 38710000.0
+    return math.radians(deg % 360.0)
+
+
+def greenwich_apparent_sidereal_hours() -> Tuple[List[np.datetime64], ArrayFloat, ArrayFloat]:
+    """`(utc instants, apparent sidereal time at Greenwich (h), TDB - UT (s))` from the committed
+    Horizons observer table `time_check.txt`."""
+    text = (DATA_DIR / "time_check.txt").read_text(encoding="utf-8")
+    body = text.split("$$SOE", 1)[1].split("$$EOE", 1)[0]
+    when: List[np.datetime64] = []
+    last: List[float] = []
+    dt: List[float] = []
+    for line in body.splitlines():
+        cells = [c.strip() for c in line.split(",")]
+        if len(cells) < 5:
+            continue
+        stamp = cells[0] if cells[0].count(":") == 2 else cells[0] + ":00"  # "2026-Apr-02 00:00"
+        when.append(hb.parse_calendar_tdb("A.D. " + stamp))
+        last.append(float(cells[3]))
+        dt.append(float(cells[4]))
+    return when, np.asarray(last, dtype=np.float64), np.asarray(dt, dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -763,35 +836,40 @@ class ArcCost:
     model_km: float
 
 
-def pole_misalignment_cost(step_s: float = 20.0, burns: Optional[Sequence[Burn]] = None) -> List[ArcCost]:
+def pole_misalignment_cost(
+    step_s: float = 20.0,
+    burns: Optional[Sequence[Burn]] = None,
+    arcs: Optional[Sequence[Tuple[str, str]]] = None,
+) -> List[ArcCost]:
     """
     What the engine's "J2 about the frame's +z" assumption costs on this replay: every coast arc
-    between detected burns (clean cluster ends) is propagated twice from NASA's state - J2 about ICRF
-    +z, and J2 about the true pole of date from `earth_orientation` - and the end positions compared.
+    between detected burns (clean cluster ends, arcs of 10 min or more) - or the TDB `(start, stop)`
+    pairs in `arcs` - is propagated twice from NASA's state, J2 about ICRF +z and J2 about the true
+    pole from `earth_orientation` at the replay's midpoint (the pole moves 0.0001 deg over the
+    replay), and the end positions compared. All arcs integrate together, at most `step_s` per step.
     """
     o = load("orion")
     eo = earth_orientation()
-    pole = eo.pole[int(np.argmin(np.abs(eo.jd_tdb - o.jd_tdb[o.t_s.size // 2])))]
+    pole = eo.pole[int(np.argmin(np.abs(eo.t_s - o.t_s[o.t_s.size // 2])))]
     z_model = _default_model()
     p_model = _default_model(pole)
-    bs = list(burns) if burns is not None else detect_burns(o, z_model)
-    arcs: List[Tuple[float, float]] = []
-    starts = [float(o.t_s[0])] + [tdb_seconds(b.end_tdb) for b in bs]
-    stops = [tdb_seconds(b.start_tdb) for b in bs] + [float(o.t_s[-1])]
-    for s, e in zip(starts, stops):
-        if e - s >= 600.0:
-            arcs.append((s, e))
-    out: List[ArcCost] = []
-    for s, e in arcs:
-        i0 = int(np.argmin(np.abs(o.t_s - s)))
-        i1 = int(np.argmin(np.abs(o.t_s - e)))
-        n = max(1, int(math.ceil((o.t_s[i1] - o.t_s[i0]) / step_s)))
-        t0 = np.array([o.t_s[i0]], dtype=np.float64)
-        t1 = np.array([o.t_s[i1]], dtype=np.float64)
-        y0 = o.state[i0:i0 + 1]
-        yz = coast(z_model, t0, y0, t1, n)
-        yp = coast(p_model, t0, y0, t1, n)
-        out.append(ArcCost(start_tdb=tdb_instant(float(o.t_s[i0])), end_tdb=tdb_instant(float(o.t_s[i1])),
-                           pole_km=float(np.linalg.norm(yz[0, :3] - yp[0, :3])),
-                           model_km=float(np.linalg.norm(yp[0, :3] - o.position_km[i1]))))
-    return out
+    spans: List[Tuple[float, float]] = []
+    if arcs is not None:
+        spans = [(tdb_seconds(s0), tdb_seconds(s1)) for s0, s1 in arcs]
+    else:
+        bs = list(burns) if burns is not None else detect_burns(o, z_model)
+        starts = [float(o.t_s[0])] + [tdb_seconds(b.end_tdb) for b in bs]
+        stops = [tdb_seconds(b.start_tdb) for b in bs] + [float(o.t_s[-1])]
+        spans = [(s0, s1) for s0, s1 in zip(starts, stops) if s1 - s0 >= 600.0]
+    i0 = np.array([int(np.argmin(np.abs(o.t_s - s0))) for s0, _ in spans], dtype=np.int64)
+    i1 = np.array([int(np.argmin(np.abs(o.t_s - s1))) for _, s1 in spans], dtype=np.int64)
+    t0: ArrayFloat = np.asarray(o.t_s[i0], dtype=np.float64)
+    t1: ArrayFloat = np.asarray(o.t_s[i1], dtype=np.float64)
+    n = max(1, int(math.ceil(float(np.max(t1 - t0)) / step_s)))
+    y0: ArrayFloat = np.asarray(o.state[i0], dtype=np.float64)
+    yz = coast(z_model, t0, y0, t1, n)
+    yp = coast(p_model, t0, y0, t1, n)
+    return [ArcCost(start_tdb=tdb_instant(float(t0[k])), end_tdb=tdb_instant(float(t1[k])),
+                    pole_km=float(np.linalg.norm(yz[k, :3] - yp[k, :3])),
+                    model_km=float(np.linalg.norm(yp[k, :3] - o.position_km[i1[k]])))
+            for k in range(len(spans))]
