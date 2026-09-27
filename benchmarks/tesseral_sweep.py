@@ -26,8 +26,9 @@ worst case should sit ~10-20 % higher, near 2 m/s/yr, and the four maxima should
 **Part 2 (--leo) - does omitting tesserals move LEO contact windows?** The `benchmarks/zonal_sweep.py`
 setup (12 satellites, one plane, 550 km / 53 deg, 24 h; Kiruna, Wallops, Santiago, 5 deg mask, 60 s
 grid) against a truth carrying J2 + J3..J6 + the 4x4 tesseral field, with Cowell + pm + j2 + zonal at
-15 s with and without `"tesseral"`. The tesseral tier runs the NumPy Cowell path (no compiled twin),
-so its wall time is not comparable with the fused tier's.
+15 s with and without `"tesseral"`. Both tiers run the fused compiled Cowell kernel (the tesseral term
+is fused since the `kernel-twin` job), so their wall times are comparable: 0.095 s against 0.061 s,
+where the NumPy path took 14.1 s.
 
 *Estimate before the run* (circular, a = 6921 km, n = 1.10e-3 rad/s): the osculating seed is shared,
 and J22's short-period variation of `a` (the J2 analogue scaled by J22/J2 ~ 1.7e-3: ~2 a J22 (R/a)^2
@@ -144,7 +145,7 @@ def geo_scan() -> None:
     ddot = ddot - control
 
     print(f"GEO scan: {len(lons)} Cowell satellites, {DAYS} sidereal days at dt = {dt:.1f} s, wall {wall:.1f} s "
-          f"(NumPy path); control (RK4) lambda_ddot {control:.4e} rad/s^2, subtracted")
+          f"(fused compiled path when numba is present); control (RK4) lambda_ddot {control:.4e} rad/s^2, subtracted")
     print(f"J22 = {J22:.5e}, lambda22 = {math.degrees(LAMBDA22):.3f} deg, K = {K_J22:.4e} rad/s^2 "
           f"= {K_J22 * 86400 ** 2 * 180 / math.pi:.4e} deg/day^2, a = {GEO_A:.3f} km")
     print(f"{'slot':>7} | {'J22 closed':>10} {'J22 meas':>10} | {'4x4 closed':>10} {'4x4 meas':>10}   m/s/yr"

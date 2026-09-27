@@ -6,7 +6,7 @@ Every tolerance is a named constant derived in the comment above it *before* mea
 value is quoted next to it. The checks, in order:
 
 0. Registration, the EGM96 table's normalisation against an independently remembered unnormalised
-   table, refusals, exact-zero behaviour, and fallback off the fused compiled plan.
+   table, refusals, exact-zero behaviour, and membership of the fused compiled plan.
 a. Field: the kernel (Cunningham V/W recursion, rotation matrices) against `reference.tesseral_field`
    (explicit d^m P_n/ds^m polynomials, complex phase, monomial gradient) per pair and rotation angle;
    against a Richardson central difference of the potential built on `numpy.polynomial.legendre` (a
@@ -14,7 +14,8 @@ a. Field: the kernel (Cunningham V/W recursion, rotation matrices) against `refe
    invariance check (a point co-rotating with the Earth sees a constant body-frame field).
 b. Time: Cowell + tesseral converges on tesseral truth at fourth order - so every RK4 stage gets its
    own time - while freezing the rotation at the step's start is first order (negative control); and
-   a step split by a manoeuvre starts its second half at its own clock.
+   a step split by a manoeuvre starts its second half at its own clock. Both on the NumPy path and on
+   the fused compiled kernel, which forms its stage times itself.
 c-f. GEO longitude drift, one shared 6-day run (`scenarios.geostationary_satellites`): the J22
    equilibria and the sign of the drift on either side; the drift acceleration against first-order
    theory at several longitudes; the full 4x4 stable points (verification against the closed form,
@@ -230,17 +231,22 @@ def test_zero_coefficients_and_zero_separation_contribute_exactly_nothing() -> N
     assert np.array_equal(out, before)
 
 
-def test_cowell_body_with_tesseral_falls_back_to_the_numpy_path(
+def test_cowell_body_with_tesseral_stays_on_the_fused_compiled_path(
     db_session_factory: Callable[[], Session],
 ) -> None:
-    """The fused compiled Cowell kernel has no `t` and no tesseral term, so the bit is foreign to its
-    plan: the whole Cowell set runs `RK4Integrator` over `forces.compose_accelerations`."""
+    """The fused compiled Cowell kernel carries the tesseral term (`kernels._tesseral_term`, fed each
+    RK4 stage's own time), so the bit keeps the plan compiled and binds the coefficient array; a model
+    outside the fused set (`thrust` here) still sends the whole Cowell set down the NumPy path."""
     sim, sats = _constellation(db_session_factory())
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, sats)
     sim.enable_force_model(J2_MODEL, sats, j2=EARTH_J2, r_eq=R)
     assert sim._cowell_fused_ok
     sim.enable_force_model(TESSERAL_MODEL, sats[:1], r_eq=R, omega=EARTH_OMEGA, **tesseral.EARTH_TESSERALS)
+    assert sim._cowell_fused_ok
+    assert sim._cowell_has_tesseral[sats[0]] and not sim._cowell_has_tesseral[sats[1]]
+    assert sim._cowell_tesseral_params is sim.force_model_params[TESSERAL_MODEL]
+    sim.enable_force_model("thrust", sats[1:], thrust_n=0.0, isp_s=300.0, mass_kg=100.0, dry_mass_kg=50.0)
     assert not sim._cowell_fused_ok
 
 
@@ -435,6 +441,10 @@ LOUD_OMEGA, LOUD_THETA0 = 10.0 * EARTH_OMEGA, 0.4
 ORBIT_RADIUS = scenarios.EARTH_RADIUS + 550.0
 PERIOD = 2.0 * math.pi * math.sqrt(ORBIT_RADIUS ** 3 / MU)
 STEP_COUNTS = [256, 512, 1024]
+# Both Cowell paths are run: the NumPy `RK4Integrator` (the reference) and the fused compiled kernel
+# (`kernels.cowell_rk4_step`, which forms its own stage times). Without numba the second is the same
+# kernel interpreted - slower, still the code under test.
+PATHS = ["numpy", "compiled"]
 # Fourth order: halving gives 16, and the zonal/J2 tests' band [12, 24] allows the leading term's
 # neighbours. Frozen time is first order: effective stage lag h/2, so the acceleration is wrong by
 # ~ m omega (h/2) |a| - at 1024 steps 4 x 7.3e-4 x 2.8 s x 2e-5 ~ 2e-7 km/s^2, ~km over an orbit if
@@ -454,18 +464,21 @@ class _FrozenTimeIntegrator:
         self._inner.step(lambda _t, s: provider(t, s), t, state, dt, indices, primaries)  # type: ignore[attr-defined]
 
 
-def _loud_sim(session: Session) -> Tuple[Simulation, NDArray[np.int64]]:
+def _loud_sim(session: Session, path: str = "numpy") -> Tuple[Simulation, NDArray[np.int64]]:
     sim, sats = _constellation(session, n_sats=1)
     sim.record_history = False
+    sim.use_compiled_kernel = path == "compiled"
     sim.set_propagator(sats, PropagatorType.COWELL)
     sim.enable_force_model(POINT_MASS_MODEL, sats)
     coefficients = {f"{cs}{n}{m}": v for (n, m), pair in LOUD_CS.items() for cs, v in zip("cs", pair)}
     sim.enable_force_model(TESSERAL_MODEL, sats, r_eq=R, omega=LOUD_OMEGA, theta0=LOUD_THETA0, **coefficients)
+    assert sim._cowell_fused_ok, "guard: pm + tesseral must qualify for the fused kernel"
     return sim, sats
 
 
-def _loud_error(session: Session, n_steps: int, truth: ArrF, frozen: bool = False) -> float:
-    sim, sats = _loud_sim(session)
+def _loud_error(session: Session, n_steps: int, truth: ArrF, frozen: bool = False, path: str = "numpy") -> float:
+    """`frozen` wraps the NumPy integrator, so it forces the NumPy path whatever `path` says."""
+    sim, sats = _loud_sim(session, "numpy" if frozen else path)
     if frozen:
         sim._cowell_integrator = _FrozenTimeIntegrator(sim._cowell_integrator)  # type: ignore[assignment]
     for _ in range(n_steps):
@@ -480,14 +493,17 @@ def _loud_truth(session: Session) -> ArrF:
     return ref.positions[-1, ref.index_of("SAT-00-000")].copy()
 
 
+@pytest.mark.parametrize("path", PATHS)
 def test_cowell_tesseral_is_fourth_order_and_frozen_time_is_first_order(
-    db_session_factory: Callable[[], Session],
+    path: str, db_session_factory: Callable[[], Session],
 ) -> None:
     """Measured: 256/512/1024 steps -> 4.75e-4, 2.77e-5, 1.67e-6 km (ratios 17.1, 16.6 - the size of the
     J2 test's 4.2e-4, 2.4e-5, 1.5e-6, as the J2-sized field suggests); frozen time at 512/1024 ->
-    14.2, 7.10 km (ratio 1.995), 4.2e6x the correct run and twice the coherent estimate."""
+    14.2, 7.10 km (ratio 1.995), 4.2e6x the correct run and twice the coherent estimate. On the
+    compiled path this is the test that sees the kernel's own stage times: a stage handed the wrong
+    time drops it off fourth order."""
     truth = _loud_truth(db_session_factory())
-    errors = [_loud_error(db_session_factory(), k, truth) for k in STEP_COUNTS]
+    errors = [_loud_error(db_session_factory(), k, truth, path=path) for k in STEP_COUNTS]
     ratios = [errors[k] / errors[k + 1] for k in range(len(errors) - 1)]
     assert all(ORDER_BAND[0] < q < ORDER_BAND[1] for q in ratios), (ratios, errors)
 
@@ -504,7 +520,10 @@ def test_cowell_tesseral_is_fourth_order_and_frozen_time_is_first_order(
 SPLIT_TOL_KM = 2e-5
 
 
-def test_a_manoeuvre_split_substep_starts_at_its_own_time(db_session_factory: Callable[[], Session]) -> None:
+@pytest.mark.parametrize("path", PATHS)
+def test_a_manoeuvre_split_substep_starts_at_its_own_time(
+    path: str, db_session_factory: Callable[[], Session],
+) -> None:
     """Zero-Delta-v manoeuvres at 40 % of every 8th step cut 64 steps in two; the second half must start
     at the split epoch. Measured difference against the unsplit run 3.2e-6 km, inside the 1.4e-5 km
     all-coherent estimate (the unsplit run sits 2.8e-5 km from truth)."""
@@ -512,7 +531,7 @@ def test_a_manoeuvre_split_substep_starts_at_its_own_time(db_session_factory: Ca
     dt = PERIOD / n_steps
 
     def run(split: bool) -> ArrF:
-        sim, sats = _loud_sim(db_session_factory())
+        sim, sats = _loud_sim(db_session_factory(), path)
         if split:
             for k in range(0, n_steps, 8):
                 sim.schedule_delta_v(sats, [0.0, 0.0, 0.0], epoch_s=(k + 0.4) * dt)
