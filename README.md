@@ -301,6 +301,23 @@ evaluated once at configuration time (1.3 s) into a mean profile over latitude, 
 year, which the kernel then interpolates. What that average discards is listed under
 [Known limitations](#known-limitations).
 
+**Does the average mislead a sun-synchronous orbit?** A second MSIS law keeps the day/night bulge. It
+tabulates density by altitude, latitude and local solar time for a given date, at configuration time
+as before. At step time it reads the table using the satellite's latitude and its local time, taken
+from a low-precision solar ephemeris. Two sun-synchronous orbits at the same 292 km station were run
+against the averaged law, at two dates, for 6 days (`benchmarks/msis_diurnal_sweep.py`):
+
+| Date | Dawn–dusk orbit | Noon–midnight orbit |
+|---|---|---|
+| 20 March 2024 | +7.3 % | +14.6 % |
+| 1 July 2024 | −21.9 % | −16.0 % |
+
+Each is within 0.7 % of the prediction the script committed before the run. The average does
+mislead, but mostly through the **season** (a factor of 0.80 to 1.13 over 2024) rather than local
+time. Local time alone makes the averaged law over-budget a dawn–dusk orbit by 4 to 7 %. Both effects
+are small next to the solar-activity assumption. The two figures in each row differ by local time
+alone, and the two rows differ by season.
+
 ### The two parent graphs
 
 ![Hierarchy](docs/figures/hierarchy.png)
@@ -424,8 +441,8 @@ that works without the editable checkout.
 
 | | |
 |---|---|
-| Tests | 772 passing |
-| Type checking | `mypy --strict`, clean across 36 source files |
+| Tests | 871 passing |
+| Type checking | `mypy --strict`, clean across 38 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
 | Coverage | 92%, measured with Numba disabled at 696 tests (timing tests deselected) |
 | Published reference | Vallado et al. (2006) SGP4 verification vectors, all in-tolerance cases |
@@ -543,6 +560,7 @@ Orbit_Mechanics/
 │   │                        #   station-keeping, solar activity
 │   ├── frontier_plot.py     # Runs the sweep and writes docs/figures/frontier.png
 │   ├── msis_sweep.py        # Solar activity against the atmosphere model, in station-keeping Δv
+│   ├── msis_diurnal_sweep.py # Averaged against diurnal MSIS for sun-synchronous orbits
 │   ├── tesseral_sweep.py    # GEO slot longitudes in m/s per year; --leo for contact windows
 │   └── zonal_sweep.py       # J2 against J2..J6 truth, in km and in contact windows
 ├── docs/
@@ -564,6 +582,8 @@ Orbit_Mechanics/
 │   ├── tesseral.py          # tesseral: orders m >= 1 to degree 4, rotating with the Earth
 │   ├── drag.py, atmosphere.py  # drag and its density laws
 │   ├── msis_bridge.py       # NRLMSIS 2.0 via pymsis, evaluated at configuration time (optional)
+│   ├── msis_diurnal.py      # NRLMSIS 2.0 with the diurnal bulge: altitude x latitude x local time
+│   ├── solar_ephemeris.py   # Low-precision Sun position and local solar time
 │   ├── thirdbody.py         # third_body
 │   ├── srp.py               # Solar radiation pressure, cylindrical and conical shadow
 │   ├── thrust.py            # Continuous thrust with propellant depletion
@@ -705,14 +725,16 @@ Coordinate singularities resolve through analytic fallbacks rather than raising.
 - **J2 and the higher zonals assume a fixed spin axis.** The parent's spin axis is taken as the
   frame's z-axis. That is exact for the Earth-centred scenarios and 23.4° off in the ecliptic
   Sun–Earth–Moon scenario. The geopotential stops at degree 6 for the zonal terms and degree and
-  order 4 for the tesseral ones. The tesseral model runs on the NumPy path, with no compiled twin yet,
-  so its timings are not comparable with the fused tiers.
-- **NRLMSIS 2.0 is averaged, by choice.** Each solar-activity setting becomes one global-mean density
+  order 4 for the tesseral ones.
+- **The default NRLMSIS 2.0 law is averaged, by choice.** Each solar-activity setting becomes one global-mean density
   profile, averaged over latitude, local time and day of year, with the indices held constant. That
   discards the diurnal bulge (day/night **2.3×** at 400 km on the equator), the semi-annual season
   (**1.6×** in the global mean at 400 km) and any
   time variation of the indices, such as storms or the 27-day solar rotation. An orbit whose plane
-  sweeps all local times sees the mean on average; a dawn-dusk sun-synchronous orbit never does.
+  sweeps all local times sees the mean on average; a dawn-dusk sun-synchronous orbit never does. The
+  diurnal law keeps the bulge and the season, but freezes the table at the start date (+1.4 % of
+  seasonal drift over 10 days from the March equinox). It runs on the NumPy path, and the solar
+  ephemeris behind it was written from memory, though it matches an independent one to 0.01°.
 - **Secular J2 is first order.** Mean seeding corrects only the semi-latus rectum `p` (and so the mean motion), never `e` or `i`.
 - **TEME is treated as inertial.** SGP4's output frame drifts against a true inertial frame by about
   0.31 arcsec per day, roughly 11 m per day in LEO. That is negligible over the day-scale horizons
@@ -747,17 +769,17 @@ Ordered so that each stage makes the next one safe rather than merely possible.
    - **Done:**
      - J2 (force model, secular propagator and reference)
      - zonal harmonics J3..J6 (force model, compiled twin and reference)
-     - tesseral harmonics to degree and order 4 (force model and reference)
+     - tesseral harmonics to degree and order 4 (force model, compiled twin and reference)
      - Cowell RK4
      - third-body perturbations
      - drag with exponential and tabulated atmospheres, compiled
-     - NRLMSIS 2.0 through `pymsis`, with solar activity as a sweep axis
+     - NRLMSIS 2.0 through `pymsis`, with solar activity as a sweep axis, averaged or with the
+       diurnal bulge
      - solar radiation pressure with shadow geometry
      - continuous and impulsive thrust
      - the SGP4 bridge
      - inter-satellite link visibility, its contact dataset and sweep metric
    - **Planned:**
-     - a compiled twin for the tesseral model
      - perturbers advanced per integrator stage
      - Encke
      - symplectic integrators

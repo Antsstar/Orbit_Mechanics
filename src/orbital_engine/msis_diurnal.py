@@ -122,7 +122,7 @@ __all__ = [
 
 #: Latitude nodes, degrees - both poles included, so latitude is never extrapolated.
 DIURNAL_LATITUDE_STEP_DEG: Final[float] = 5.0
-DIURNAL_LATITUDE_GRID_DEG: Final[ArrayFloat] = np.linspace(-90.0, 90.0, 37)
+DIURNAL_LATITUDE_GRID_DEG: Final[ArrayFloat] = np.linspace(-90.0, 90.0, 37, dtype=np.float64)
 DIURNAL_LATITUDE_GRID_DEG.flags.writeable = False
 #: Mean local solar time nodes, hours; periodic (the node after 23.5 h is 0 h).
 DIURNAL_LST_STEP_HOURS: Final[float] = 0.5
