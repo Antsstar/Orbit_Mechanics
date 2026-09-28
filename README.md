@@ -22,6 +22,45 @@ Python 3.10+, NumPy and SQLAlchemy 2.0. Numba (compiled kernels), SciPy (referen
 
 ---
 
+## Artemis II, replayed against NASA's navigation data
+
+**[Open the interactive replay →](https://claude.ai/artifact/RZeBUybyrvZiFuk32yLjei)** (3D view,
+scorecard, one chart per quantity, ground-station coverage)
+
+The same idea applied to a real mission. Orion's April 2026 lunar flyby is flown four times, each
+under more physics, and each flight is scored against the trajectory NASA's navigation team
+published through JPL Horizons (object -1024, 1-minute samples). Every model starts from NASA's
+state after translunar injection, bit-identical, and flies the recorded correction burns. After that
+it relies on its own physics.
+
+| Model | Closest approach to the Moon (altitude) | Error at the flyby | Back at Earth |
+|---|---|---|---|
+| NASA navigation data | 6,545 km | reference | entry interface 10 Apr 23:53 UTC |
+| Earth only (point mass) | 11,638 km | 16,093 km | misses the atmosphere |
+| Earth + J2 | 11,545 km | 16,129 km | misses the atmosphere |
+| Earth + Moon (DE441) | 6,765 km | 1,045 km | never returns inside the data span |
+| Earth + Moon + Sun | **6,557 km**, 0.8 min early | **46 km** | entry **1.8 min late** |
+
+The best model also puts the radio blackout behind the Moon at 39.9 minutes, against the ~40 minutes
+NASA reported. Flown coast by coast (re-seeded from NASA after every burn), its median error is
+**15 m**, and 2.65 km across the flyby itself.
+
+Two findings came out of the data rather than the models:
+
+- **NASA's published files switch between two navigation solutions** about 1.8 m/s apart on
+  5 April. Without a reconstructed 1.88 m/s impulse at that switch, even the best model sits 356 km
+  off at the flyby.
+- **Horizons' interpolant rings across burns** (±6 m/s² at TLI), so burns are detected by scoring
+  coasts end to end, never from per-interval residuals. All 8 flown burns are recovered: TLI
+  delivered 388.6 m/s against NASA's 388.3.
+
+The Moon and Sun enter through `ephemeris.py`, which evaluates tabulated DE441 positions at every
+RK4 stage time. That keeps the integration fourth order, where the arena-body `third_body` model is
+first order. Source: `artemis2_replay.py`. Data provenance: `src/orbital_engine/data/artemis2/`.
+Dashboard: `demo/artemis2/`, a single page using CesiumJS and Plotly.
+
+---
+
 ## The model-fidelity frontier
 
 `orbital_engine.sweep` runs one scenario under several model configurations and scores each against a
@@ -441,8 +480,8 @@ that works without the editable checkout.
 
 | | |
 |---|---|
-| Tests | 871 passing |
-| Type checking | `mypy --strict`, clean across 38 source files |
+| Tests | 973 passing |
+| Type checking | `mypy --strict`, clean across 42 source files |
 | CI | Python 3.10 / 3.11 / 3.12 with compiled kernels, plus a job without Numba |
 | Coverage | 92%, measured with Numba disabled at 696 tests (timing tests deselected) |
 | Published reference | Vallado et al. (2006) SGP4 verification vectors, all in-tolerance cases |
@@ -584,6 +623,9 @@ Orbit_Mechanics/
 │   ├── msis_bridge.py       # NRLMSIS 2.0 via pymsis, evaluated at configuration time (optional)
 │   ├── msis_diurnal.py      # NRLMSIS 2.0 with the diurnal bulge: altitude x latitude x local time
 │   ├── solar_ephemeris.py   # Low-precision Sun position and local solar time
+│   ├── ephemeris.py         # Tabulated perturbers (Hermite) evaluated at every RK4 stage time
+│   ├── horizons_bridge.py   # JPL Horizons vector tables in, plain arrays out (boundary only)
+│   ├── artemis2.py, artemis2_replay.py  # Artemis II: burn detection, Earth orientation, replay
 │   ├── thirdbody.py         # third_body
 │   ├── srp.py               # Solar radiation pressure, cylindrical and conical shadow
 │   ├── thrust.py            # Continuous thrust with propellant depletion
@@ -605,6 +647,7 @@ Orbit_Mechanics/
 │   ├── database.py          # Polymorphic SQLAlchemy 2.0 ORM
 │   ├── body.py, constants.py, custom_types.py, exceptions.py
 │   └── data/planets.db
+├── demo/artemis2/           # The interactive replay page (CesiumJS + Plotly) and its data
 ├── tests/
 ├── CLAUDE.md                # Engine ground truth: invariants, conventions, known-broken code
 └── pyproject.toml
@@ -779,8 +822,11 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - continuous and impulsive thrust
      - the SGP4 bridge
      - inter-satellite link visibility, its contact dataset and sweep metric
+     - tabulated ephemeris perturbers advanced per integrator stage
+     - JPL Horizons ingest and the Artemis II replay
    - **Planned:**
-     - perturbers advanced per integrator stage
+     - per-model course-correction Δv for the Artemis II replay
+     - an Artemis III (2027, low Earth orbit docking test) scenario
      - Encke
      - symplectic integrators
      - SGP4 on the frontier plot
