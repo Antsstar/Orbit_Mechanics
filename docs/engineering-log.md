@@ -1470,6 +1470,28 @@ Found while building `msis_diurnal.py` (the diurnal-bulge density law) and its v
 3. **Bash heredocs containing apostrophes failed** in the Bash tool ("unexpected EOF while looking for
    matching `'`") even with a quoted delimiter; write the file with the editor tool instead.
 
+## Artemis II dashboard: screenshots and two numeric traps
+
+1. **Headless Edge screenshots of the dashboard hang, or capture "Loading data".** `--screenshot` with
+   `--timeout=N` worked once and then captured the page before its `fetch`es finished, even for the
+   committed version. That ruled out the change under test, which cost half an hour of bisecting.
+   `--dump-dom` without virtual time also fires too early. What works, served by `python -m
+   http.server` from `demo/artemis2/`:
+   `msedge --headless=new --hide-scrollbars --user-data-dir=<fresh scratch dir> --window-size=1400,7600
+   --virtual-time-budget=15000 --screenshot=<png> http://localhost:<port>/`. The 3D view is blank
+   there (no WebGL); everything else renders. Use `--dump-dom` with the same budget to grep the cards'
+   text. Kill stray headless Edge and `http.server` processes afterwards.
+2. **`acos` of the cosine at an apsis loses half its digits.** `conic_to_radius` first took the current
+   eccentric anomaly as `acos((1 - r/a)/e)`. From apogee, where the argument is -1, that is off by
+   sqrt(eps), about 1.5e-8 rad: 4 ms of a 5.3-day flight. The test against `utilities.Anomalies`
+   caught it. `atan2(r.v / sqrt(mu a), 1 - r/a)` is well conditioned everywhere.
+3. **A `python - <<'EOF'` heredoc from Git Bash writes an escaped backslash-n as a real line break.**
+   Even a doubled backslash came out as a newline, presumably because the heredoc text passes through
+   one more unescaping layer before Python sees it. One such break landed inside an f-string in
+   `build_artemis2_demo.py`, and the background build died with a `SyntaxError`; another landed in this
+   very entry. Make edits containing backslashes with the Edit tool, and `py_compile` a script before a
+   long run.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

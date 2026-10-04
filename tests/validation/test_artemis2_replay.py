@@ -31,6 +31,12 @@ Expected magnitudes, each derived before measuring (the module docstring has the
   `arccos`); hold it to 0.2 min and 5 s. The penumbral phase adds `4 alpha / w`, ~4 min. Inside the
   windows `srp.shadow_factor` (separate code for the same disc geometry) must read exactly 0 (total)
   and below 1 (partial), and outside them 1 and above 0.
+- **The free trajectory**: OTC-3 (3.017 m/s, 19.95 h before closest approach) displaces Orion at the
+  Moon by about `|dv| t` = 217 km (182 km from its radial and normal parts alone), lunar focusing aside:
+  hold the gap between flights with and without it to 150-300 km. The conic helpers are checked against
+  `utilities.Anomalies` and the closed-form `tan(gamma) = e sin(theta) / (1 + e cos(theta))`, and the
+  extrapolation of NASA's last sample against the event list's entry interface (23:53 UTC, given to the
+  minute, so within 60 s).
 """
 from __future__ import annotations
 
@@ -160,6 +166,57 @@ def test_closest_approach_of_nasas_trajectory() -> None:
     assert abs(ca.value_km - 8281.94) < 0.05
     utc = a2._utc_of_tdb(ca.t_s)
     assert abs(float((utc - np.datetime64("2026-04-06T23:01:00")).astype("timedelta64[ms]").astype(np.int64)) / 1e3) < 90.0
+
+
+# --- the free trajectory --------------------------------------------------------------------------------
+
+def test_without_corrections_drops_exactly_the_four_corrections() -> None:
+    burns = R.replay_burns()
+    keys = R.correction_keys(burns)
+    assert keys == ["outbound_correction_burn_3", "return_correction_burn_1", "return_correction_burn_2",
+                    "return_correction_burn_3"]
+    free = R.without_corrections(burns)
+    assert [b.key for b in free] == ["unlisted_velocity_change", "crew_module_raise_burn"]
+    assert [b.key for b in R.without_corrections(burns, keys[:1])] == [
+        "unlisted_velocity_change", "outbound_correction_burn_3", "crew_module_raise_burn"]
+
+
+def test_conic_helpers_against_closed_forms() -> None:
+    from orbital_engine import scenarios
+    from orbital_engine.utilities import Anomalies
+
+    mu, rp, ra = scenarios.MU_EARTH, 6400.0, 400000.0
+    a, e = 0.5 * (rp + ra), (ra - rp) / (ra + rp)
+    va = math.sqrt(mu * (2.0 / ra - 1.0 / a))
+    apogee = np.array([-ra, 0.0, 0.0, 0.0, -va, 0.0])
+    assert abs(R.vacuum_perigee_km(apogee) - (rp - R.WGS84_A_KM)) < 1e-6
+    r = 6500.0
+    out = R.conic_to_radius(apogee, r)
+    assert out is not None
+    theta = -math.acos((a * (1.0 - e * e) / r - 1.0) / e)          # inbound: negative true anomaly
+    m = float(Anomalies.eccentric_to_mean(Anomalies.true_to_eccentric(theta, e), e)) % (2.0 * math.pi)
+    n = math.sqrt(mu / a ** 3)
+    assert abs(out[0] - (m - math.pi) / n) < 1e-6
+    gamma = math.degrees(math.atan(e * math.sin(theta) / (1.0 + e * math.cos(theta))))
+    assert abs(out[1] - gamma) < 1e-9 and out[1] < 0.0
+    assert R.conic_to_radius(apogee, rp - 1.0) is None
+
+
+def test_nasas_entry_from_its_last_sample() -> None:
+    aim = R.entry_aim(R.truth_flight())
+    assert aim.extrapolated and aim.entry_t_s is not None and aim.entry_fpa_deg is not None
+    assert abs(aim.entry_t_s - a2.tdb_seconds(hb.utc_to_tdb("2026-04-10T23:53:00"))) < 60.0
+    assert aim.entry_fpa_deg < 0.0 and aim.vacuum_perigee_km < R.EI_ALTITUDE_KM
+
+
+def test_otc3_moves_the_flyby_by_its_lead_times_delta_v() -> None:
+    burns = [b for b in R.replay_burns() if b.key == "outbound_correction_burn_3"]
+    t_ca = R.closest_lunar_approach(R.truth_flight()).t_s
+    seed = "2026-04-06T02:00:00"
+    with_burn = R.fly(BEST, t_ca + 600.0, burns, seed_tdb=seed)
+    without = R.fly(BEST, t_ca + 600.0, seed_tdb=seed)
+    k = int(np.argmin(np.abs(with_burn.t_s - t_ca)))
+    assert 150.0 < float(np.linalg.norm(with_burn.state[k, :3] - without.state[k, :3])) < 300.0
 
 
 # --- visibility ---------------------------------------------------------------------------------------

@@ -1739,6 +1739,40 @@ harmonics; J2 about +z (0.70 km over the first post-TLI hours, metres here). Ear
 `scenarios.MU_EARTH`, 1.6e-8 from DE440's (3 m over the first arc against `artemis2.coast`, which uses
 DE440's).
 
+### The free trajectory: what the correction burns bought
+
+The best tier flown again with NASA's four course corrections removed one by one from the end
+(`without_corrections`; OTC-1 and OTC-2 were cancelled). Against the replay, which is the same physics
+with every burn, the model's own error cancels to first order. Entry is scored two ways: by the vacuum
+perigee at 23:20 TDB on 10 April (after RTC-3, before the crew-module raise burn), and by the
+flight-path angle at entry interface. Past the tables' end, entry is extrapolated on the Earth conic
+(`conic_to_radius`); that extrapolation puts NASA's own entry at 23:53:30 UTC, against the event
+list's 23:53.
+
+| flown with | CA altitude | shift at CA vs replay | vacuum perigee | entry interface | entry angle |
+|---|---|---|---|---|---|
+| NASA (truth) | 6,544.5 km | - | +47.2 km | 23:53:30 (conic) | -5.95 deg |
+| no corrections | 6,511.9 km | 223 km | -278.9 km | 23:35:08, **-18 min** | **-14.30 deg** |
+| no corrections, no 5 Apr change | 6,618.7 km | 190 km | -123.3 km | 00:10:17 (conic), +17 min | -10.90 deg |
+| + OTC-3 | 6,557.1 km | 0 | +19.6 km | 23:55:57 | -7.03 deg |
+| + RTC-1 | 6,557.1 km | 0 | +0.2 km | 23:55:30 | -7.70 deg |
+| + RTC-2 | 6,557.1 km | 0 | -46.5 km | 23:54:35 | -9.11 deg |
+| + RTC-3 (= replay) | 6,557.1 km | 0 | -32.7 km | 23:54:46 | -8.71 deg |
+
+Against the estimate made before the run, the displacement at the Moon came out as derived: OTC-3's
+3.0 m/s, 20 h out, gives ~180-220 km against 223 km measured. The estimate was wrong at Earth. The
+~8 m/s that the flyby makes of that miss was expected to carry Orion past the atmosphere. Instead it
+comes in 18 min early at more than twice NASA's angle. Each return correction moves the vacuum perigee
+by 14-47 km, against 25-125 km of displacement at Earth: Earth's gravity focuses the incoming
+trajectory, so perigee moves less than the aim point does.
+
+**The replay does not land on NASA's corridor even with every burn** (-8.7 deg against -5.95). NASA
+designed the corrections for its own trajectory. Replayed open loop into a model already ~1,400 km off
+at the end, they correct the wrong error. That is a property of replaying burns, not of the physics,
+and it is why the next step re-targets the corrections inside each model (Lambert first guess, then
+shooting). No entry corridor is graded here: no published width is used, so the dashboard shows the
+angle and its difference from NASA without a verdict.
+
 ---
 
 ## Higher zonals: J3..J6 as a second model, not a wider first one

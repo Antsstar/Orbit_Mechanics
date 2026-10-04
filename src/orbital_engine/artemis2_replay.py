@@ -54,6 +54,25 @@ Two views
   self-consistent navigation solution, so its error is the model's alone (the `artemis2` ingest used the
   same arcs for its coast-model misses, 0.5 km after TLI and 2.6 km through the flyby).
 
+The free trajectory (`FREE_TIER`, `without_corrections`, `entry_aim`)
+--------------------------------------------------------------------
+The best tier flown without NASA's four course corrections (OTC-3 and RTC-1..3; OTC-1 and OTC-2 were
+cancelled), keeping the 5 April change and the crew-module raise burn, which are not corrections. Set
+against the replay (the same physics with every burn), the model's own error cancels to first order,
+so the gap is what the corrections bought. Entry is scored by the vacuum perigee at `ENTRY_REF_TDB`
+and by the flight-path angle at entry interface; past the tables' end it comes from the Earth conic
+(`conic_to_radius`), which puts NASA's own entry at 23:53:30 UTC against the event list's 23:53.
+
+Estimated before the run: OTC-3 (3.0 m/s, 20 h out) moves Orion ~180-220 km at the Moon and the flyby
+by minutes; the flyby's 6e-5 rad/km then turns that into ~8 m/s and thousands of km at Earth, **no
+entry**. Measured: 223 km at closest approach, 45 km lower and 2 min earlier; 8,800 km off NASA at the
+end, but it **does** enter, 20 min early and at -14.3 deg against NASA's -5.95 deg (vacuum perigee -279
+km against +47). Without the 5 April change as well: 190 km at the Moon, entry 17 min late at -10.9 deg.
+Each return correction moves the vacuum perigee by 14-47 km. Even with every correction, the replay
+enters at -8.7 deg: NASA designed the burns for its own trajectory, and replayed open loop into a
+model already ~1,400 km off they do not put it on NASA's corridor. Re-targeting them per model is the
+targeter's job, not the replay's.
+
 Definitions
 -----------
 - Altitude is above the WGS-84 ellipsoid (`a` 6378.137 km, `f` 1/298.257223563) at the geocentric
@@ -144,12 +163,13 @@ from .simulator import Simulation
 from .srp import SUN_RADIUS
 
 __all__ = [
-    "SEED_TDB", "EI_ALTITUDE_KM", "WGS84_A_KM", "WGS84_F", "DSN_MASK_DEG", "MAX_TURN_PER_STEP", "GRID_S",
+    "SEED_TDB", "ENTRY_REF_TDB", "FREE_TIER", "EntryAim", "EI_ALTITUDE_KM", "WGS84_A_KM", "WGS84_F", "DSN_MASK_DEG", "MAX_TURN_PER_STEP", "GRID_S",
     "FAMILY_SWITCH", "Tier", "TIERS", "ReplayBurn", "Station", "DSN_STATIONS", "Flight", "Extremum",
     "EarthRotation", "Window", "TierResult", "Replay",
     "new_session", "moon_table", "sun_table", "replay_burns", "build_simulation", "fly", "truth_flight",
     "altitude_km", "closest_lunar_approach", "max_earth_distance", "entry_interface", "return_perigee",
-    "earth_rotation", "dsn_windows", "lunar_blackouts", "solar_eclipses", "arc_spans", "fly_arcs", "run_replay",
+    "earth_rotation", "dsn_windows", "lunar_blackouts", "solar_eclipses", "correction_keys",
+    "without_corrections", "vacuum_perigee_km", "conic_to_radius", "entry_aim", "arc_spans", "fly_arcs", "run_replay",
 ]
 
 SEED_TDB: Final[str] = a2.DEFAULT_REPLAY_EPOCH_TDB
@@ -200,6 +220,15 @@ TIERS: Final[Tuple[Tier, ...]] = (
          "Adds the Sun's pull, which differs slightly between Earth and Orion. The engine's best model here.",
          "#eda100", "#c98500", True, True, True),
 )
+
+#: The best tier flown without NASA's four correction burns (`without_corrections`). Not a physics
+#: tier: it differs from `earth_moon_sun` only in the burns, so the gap between the two is what the
+#: corrections bought, free of the model's own error to first order.
+FREE_TIER: Final[Tier] = Tier(
+    "no_corrections", "No corrections",
+    "The best model again, but flown without NASA's four course-correction burns. How far off Orion would have been if "
+    "nobody had corrected its course.",
+    "#7b4fd6", "#9b7bea", True, True, True)
 
 
 @dataclass(frozen=True)
@@ -549,6 +578,95 @@ def return_perigee(flight: Flight, after_s: float) -> Optional[Extremum]:
 
 
 # --------------------------------------------------------------------------------------------------
+# The free trajectory: what the correction burns bought
+# --------------------------------------------------------------------------------------------------
+
+#: Every vacuum perigee is read here: after the last return correction (18:54 UTC) and before the
+#: crew-module raise burn's cluster (23:24 TDB), so a flight's value is its entry aim alone.
+ENTRY_REF_TDB: Final[str] = "2026-04-10T23:20:00"
+
+
+def correction_keys(burns: Sequence[ReplayBurn]) -> List[str]:
+    """The trajectory-correction burns among `burns` (OTC-3 and RTC-1..3 after the seed; OTC-1 and
+    OTC-2 were cancelled), in time order."""
+    return [b.key for b in burns if "correction" in b.key]
+
+
+def without_corrections(burns: Sequence[ReplayBurn], keep: Sequence[str] = ()) -> List[ReplayBurn]:
+    """`burns` minus every correction burn not named in `keep`. The 5 April change (a navigation
+    solution switch or an unlisted manoeuvre; `replay_burns` decides whether it is there) and the
+    crew-module raise burn (part of the entry sequence, not a course correction) are kept."""
+    return [b for b in burns if "correction" not in b.key or b.key in keep]
+
+
+def vacuum_perigee_km(state: ArrayFloat) -> float:
+    """Altitude above the 6,378.137 km equatorial radius of the Earth point-mass conic's perigee
+    through `state` `(6,)` (negative: the conic dips below the surface)."""
+    r, v = state[:3], state[3:]
+    h = np.cross(r, v)
+    e = np.cross(v, h) / scenarios.MU_EARTH - r / np.linalg.norm(r)
+    return float(h @ h / scenarios.MU_EARTH / (1.0 + np.linalg.norm(e))) - WGS84_A_KM
+
+
+def conic_to_radius(state: ArrayFloat, radius_km: float) -> Optional[Tuple[float, float]]:
+    """
+    `(seconds, flight-path angle deg)` to the next inbound crossing of `radius_km` on the Earth
+    point-mass ellipse through `state` `(6,)`, or `None` if its perigee is above `radius_km` or the
+    conic is not an ellipse. The angle is between velocity and local horizontal, negative descending.
+    Used only over the last minutes before entry, where the Moon and Sun change nothing visible.
+    """
+    mu = scenarios.MU_EARTH
+    r, v = state[:3], state[3:]
+    rn, vn = float(np.linalg.norm(r)), float(np.linalg.norm(v))
+    energy = 0.5 * vn * vn - mu / rn
+    h = float(np.linalg.norm(np.cross(r, v)))
+    a = -mu / (2.0 * energy) if energy < 0.0 else math.inf
+    p = h * h / mu
+    e = math.sqrt(max(0.0, 1.0 - p / a)) if math.isfinite(a) else math.inf
+    if not math.isfinite(a) or a * (1.0 - e) >= radius_km or rn < radius_km:
+        return None
+    n = math.sqrt(mu / a ** 3)
+    # Now: e sin E = r.v / sqrt(mu a), e cos E = 1 - r/a, by atan2 (an acos of the cosine alone loses
+    # half its digits at an apsis). Target: inbound, cos E = (1 - radius/a) / e, well inside (-1, 1).
+    e_now = math.atan2(float(r @ v) / math.sqrt(mu * a), 1.0 - rn / a)
+    e_to = 2.0 * math.pi - math.acos((1.0 - radius_km / a) / e)
+    dm = ((e_to - e * math.sin(e_to)) - (e_now - e * math.sin(e_now))) % (2.0 * math.pi)
+    v_ei = math.sqrt(2.0 * (energy + mu / radius_km))
+    gamma = -math.degrees(math.acos(min(1.0, h / (radius_km * v_ei))))
+    return dm / n, gamma
+
+
+@dataclass(frozen=True)
+class EntryAim:
+    """Where a flight aims at Earth: the vacuum perigee at `ENTRY_REF_TDB`, and the entry-interface
+    time and flight-path angle, flown (`extrapolated` False) or on the conic past the data."""
+    vacuum_perigee_km: float
+    entry_t_s: Optional[float]
+    entry_fpa_deg: Optional[float]
+    extrapolated: bool
+
+
+def entry_aim(flight: Flight) -> EntryAim:
+    """`EntryAim` of `flight`; its entry interface is flown where the flight reaches it, else taken
+    from the conic through its last state (`conic_to_radius`, at the ellipsoid radius under it)."""
+    t_ref = a2.tdb_seconds(ENTRY_REF_TDB)
+    tab = flight.table()
+    tt = np.array([t_ref])
+    rp = vacuum_perigee_km(np.concatenate([tab.position(tt)[0], tab.velocity(tt)[0]]))
+    ei = entry_interface(flight)
+    x = flight.state[-1] if ei is None else np.concatenate(
+        [tab.position(np.array([ei.t_s - 120.0]))[0], tab.velocity(np.array([ei.t_s - 120.0]))[0]])
+    t_x = float(flight.t_s[-1]) if ei is None else ei.t_s - 120.0
+    r_ei = float(np.linalg.norm(x[:3]) - altitude_km(x[:3])[0]) + EI_ALTITUDE_KM
+    hit = conic_to_radius(x, r_ei)
+    if ei is not None:
+        return EntryAim(rp, ei.t_s, None if hit is None else hit[1], False)
+    if hit is None:
+        return EntryAim(rp, None, None, True)
+    return EntryAim(rp, t_x + hit[0], hit[1], True)
+
+
+# --------------------------------------------------------------------------------------------------
 # Visibility
 # --------------------------------------------------------------------------------------------------
 
@@ -848,12 +966,13 @@ def _end_for(tier: Tier) -> float:
 
 
 def run_replay(tiers: Sequence[Tier] = TIERS, *, reconstruct_family_switch: bool = True,
-               arcs: bool = True, extend_days: float = 16.0) -> Replay:
+               arcs: bool = True, extend_days: float = 16.0, free: bool = True) -> Replay:
     """
     Fly every tier (the replay view and, with `arcs`, the per-arc view), find its events and windows.
     A tier that neither enters nor turns round before its end is flown on, unexported, to at most
     `extend_days` after the seed to find its return perigee (Earth-only tiers only: the others would
-    leave the tables).
+    leave the tables). With `free`, `FREE_TIER` is appended: the last tier's physics without the
+    correction burns, no per-arc view (its arcs would be the last tier's).
     """
     truth = truth_flight()
     rot = earth_rotation()
@@ -861,20 +980,25 @@ def run_replay(tiers: Sequence[Tier] = TIERS, *, reconstruct_family_switch: bool
     spans = arc_spans() if arcs else []
     t_ca_truth = closest_lunar_approach(truth)
     results: List[TierResult] = []
-    for tier in tiers:
-        flight = fly(tier, _end_for(tier), burns)
+    plan: List[Tuple[Tier, List[ReplayBurn], bool]] = [(tier, burns, arcs) for tier in tiers]
+    if free and tiers:
+        last = tiers[-1]
+        plan.append((Tier(FREE_TIER.model_id, FREE_TIER.label, FREE_TIER.description, FREE_TIER.colour,
+                          FREE_TIER.colour_dark, last.j2, last.moon, last.sun), without_corrections(burns), False))
+    for tier, tier_burns, tier_arcs in plan:
+        flight = fly(tier, _end_for(tier), tier_burns)
         closest = closest_lunar_approach(flight)
         farthest = max_earth_distance(flight)
         entry = entry_interface(flight)
         perigee = None if entry is not None else return_perigee(flight, farthest.t_s)
         extended: Optional[Flight] = None
         if entry is None and perigee is None and not (tier.moon or tier.sun):
-            extended = fly(tier, a2.tdb_seconds(SEED_TDB) + extend_days * 86400.0, burns, grid_s=GRID_S)
+            extended = fly(tier, a2.tdb_seconds(SEED_TDB) + extend_days * 86400.0, tier_burns, grid_s=GRID_S)
             entry = entry_interface(extended)
             if entry is None:
                 perigee = return_perigee(extended, max_earth_distance(extended).t_s)
         wins = dsn_windows(flight, rot) + lunar_blackouts(flight) + solar_eclipses(flight)
-        results.append(TierResult(tier, flight, fly_arcs(tier, spans) if arcs else [], closest, farthest,
+        results.append(TierResult(tier, flight, fly_arcs(tier, spans) if tier_arcs else [], closest, farthest,
                                   entry, perigee, wins, extended))
     return Replay(truth, results, burns, rot, t_ca_truth, max_earth_distance(truth),
                   dsn_windows(truth, rot) + lunar_blackouts(truth) + solar_eclipses(truth))
@@ -948,6 +1072,11 @@ def position_error(flight: Flight, truth: Flight) -> Tuple[ArrayFloat, ArrayFloa
     return t, err
 
 
+def _utc_s(t_s: float) -> str:
+    """UTC `HH:MM:SS` of a tables'-clock time."""
+    return str(np.datetime_as_string(a2._utc_of_tdb(t_s), unit="s"))[11:19]
+
+
 def _fmt(x: float, nd: int) -> str:
     s = f"{x:.{nd}f}"
     return "0" if float(s) == 0.0 else s
@@ -1012,6 +1141,11 @@ def _events(replay: Replay, all_burns: Sequence[ReplayBurn]) -> List[_Event]:
     add(_utc_t("2026-04-10T23:53:00"), TRUTH_ID, "entry_interface", "milestone", EI_ALTITUDE_KM, "km",
         "NASA's event list: entry interface (122 km) at 23:53 UTC. NASA's trajectory data end at 23:52:51 UTC, "
         "172 km up")
+    ta = entry_aim(replay.truth)
+    if ta.entry_fpa_deg is not None and ta.entry_t_s is not None:
+        add(ta.entry_t_s + x0, TRUTH_ID, "entry_angle", "milestone", ta.entry_fpa_deg, "deg",
+            "Flight-path angle at entry interface (below horizontal), from the Earth conic through NASA's last sample, "
+            f"172 km up; that conic reaches 121.92 km at {_utc_s(ta.entry_t_s)} UTC (event list: 23:53)", 2)
     for r in _discontinuities(t_seed):
         if float(r["closure_km"]) > MARK_JUMP_KM:
             where = f" where file {r['file_join']} takes over" if r["file_join"] else " inside one navigation file"
@@ -1031,6 +1165,10 @@ def _events(replay: Replay, all_burns: Sequence[ReplayBurn]) -> List[_Event]:
         if res.entry is not None:
             add(res.entry.t_s + x0, mid, "entry_interface", "milestone", EI_ALTITUDE_KM, "km",
                 "Predicted entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid")
+            aim = entry_aim(res.flight)
+            if aim.entry_fpa_deg is not None:
+                add(res.entry.t_s + x0, mid, "entry_angle", "milestone", aim.entry_fpa_deg, "deg",
+                    "Predicted flight-path angle at entry interface (below horizontal)", 2)
         elif res.perigee is not None:
             add(res.perigee.t_s + x0, mid, "return_perigee", "apsis", res.perigee.value_km - WGS84_A_KM, "km",
                 "Closest return to Earth, which misses the atmosphere (altitude above the 6,378.137 km equatorial "

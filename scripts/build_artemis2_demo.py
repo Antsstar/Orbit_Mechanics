@@ -2,7 +2,7 @@
 Build the Artemis II dashboard's real data set: fly every model tier through NASA's burns, score it
 against NASA's navigation trajectory, and write `demo/artemis2/data/` per `demo/artemis2/SCHEMA.md`.
 
-    python scripts/build_artemis2_demo.py                 # ~3 min: replay, arcs, windows, export
+    python scripts/build_artemis2_demo.py                 # ~5 min: replay, arcs, windows, correction ladder, export
     python scripts/build_artemis2_demo.py --convergence   # + the best tier at half the step (~1 min)
 
 All the physics and every definition live in `orbital_engine.artemis2_replay` (its docstring carries
@@ -34,6 +34,8 @@ ESTIMATES = {
     "earth_j2": "as Earth only, to tens of km",
     "earth_moon": "CA err ~750 km, CA alt off by hundreds of km / minutes, end ~1e4 km, entry probably missed",
     "earth_moon_sun": "arcs 0.5 / 2.6 km; replay tens of km at CA, hundreds by entry, entry within minutes",
+    "no_corrections": "OTC-3 is 3.0 m/s 20 h before CA: ~180 km at the Moon, minutes; then ~8 m/s after the flyby, "
+                      "thousands of km at Earth, no entry",
 }
 
 
@@ -129,11 +131,37 @@ def main() -> None:
             print(f"   arcs: {len(arc_end)}, end error median {np.median(arc_end):.3f} km, max {max(arc_end):.3f} km")
 
     best = R.TIERS[-1]
+    full = rep.tiers[len(R.TIERS) - 1].flight
     plain = R.fly(best, R._end_for(best), R.replay_burns(reconstruct_family_switch=False))
     ent = R.entry_interface(plain)
     print(f"\nWithout the reconstructed 5 April velocity change ({best.label}): error at CA "
           f"{_err_at(plain, truth, rep.truth_closest.t_s):,.1f} km, at the data end "
           f"{R.position_error(plain, truth)[1][-1]:,.0f} km, entry {'none' if ent is None else _utc(ent.t_s)}")
+    # The correction ladder: the best tier with none of NASA's corrections, then each one added in turn.
+    t_ref_ca = rep.truth_closest.t_s
+    corr = R.correction_keys(rep.burns)
+    ladder = [("no corrections", next(r.flight for r in rep.tiers if r.tier.model_id == R.FREE_TIER.model_id)),
+              ("no corrections, no 5 Apr change",
+               R.fly(best, R._end_for(best), R.without_corrections(R.replay_burns(reconstruct_family_switch=False))))]
+    for k in range(1, len(corr)):
+        ladder.append(("+ " + corr[k - 1], R.fly(best, R._end_for(best), R.without_corrections(rep.burns, corr[:k]))))
+    ladder.append(("+ " + corr[-1] + " (= replay)", full))
+    ta = R.entry_aim(truth)
+    print(f"\nCorrection ladder ({best.label}). Vacuum perigee at {R.ENTRY_REF_TDB} TDB; '*' = entry extrapolated on "
+          "the Earth conic past the tables")
+    print(f"  {'NASA':40s} vac perigee {ta.vacuum_perigee_km:7.1f} km, EI {_utc(ta.entry_t_s or 0.0)[11:19]}* "
+          f"{ta.entry_fpa_deg:6.2f} deg")
+    for name, f in ladder:
+        ca = R.closest_lunar_approach(f)
+        aim = R.entry_aim(f)
+        k = int(np.argmin(np.abs(f.t_s - t_ref_ca)))
+        j = int(np.argmin(np.abs(full.t_s - t_ref_ca)))
+        shift = float(np.linalg.norm(f.state[k, :3] - full.state[j, :3]))
+        ei = "none" if aim.entry_t_s is None else (
+            f"{_utc(aim.entry_t_s)[5:19]}{'*' if aim.extrapolated else ' '} {aim.entry_fpa_deg:6.2f} deg")
+        print(f"  {name:40s} CA alt {ca.value_km - a2.MOON_MEAN_RADIUS_KM:7.1f} km {_utc(ca.t_s)[11:19]}, "
+              f"{shift:6.1f} km from the replay at CA; vac perigee {aim.vacuum_perigee_km:7.1f} km, EI {ei}")
+
     notes: List[str] = [
         "Every model starts from NASA's exact position and velocity at 2026-04-03 00:58:51 UTC (01:00 TDB), an hour "
         "after translunar injection, and receives the same impulsive burns NASA flew afterwards, each at its measured "
@@ -143,7 +171,7 @@ def main() -> None:
         "which is the first plus one impulse at about 01:24 UTC, so every model receives that impulse (reconstructed "
         "by OrbitalEngine). Without it the best model is "
         f"{_err_at(plain, truth, rep.truth_closest.t_s):,.0f} km off at the flyby instead of "
-        f"{_err_at(rep.tiers[-1].flight, truth, rep.truth_closest.t_s):,.0f} km.",
+        f"{_err_at(full, truth, rep.truth_closest.t_s):,.0f} km.",
         "NASA's trajectory is 14 navigation files joined end to end. Where one hands over to the next, the trajectory "
         "jumps (up to ~12 km, and ~90 km inside one file on 5 April); these are marked 'Navigation data jump' and every "
         "model's error steps there. They are artefacts of the data, not of any model, and are not smoothed.",
@@ -158,6 +186,13 @@ def main() -> None:
         "Solar eclipse: the Moon (mean radius) or Earth (equatorial radius, no atmosphere) covers all of the Sun's "
         "disc seen from Orion ('total'), or part of it ('partial', which includes the total phase); DE441 Sun and Moon. "
         "Earth's eclipse on 3 April began before the models start, so their bars begin at the seed.",
+        "No corrections: the Earth + Moon + Sun model flown without NASA's four course corrections (outbound correction "
+        "3 and return corrections 1-3; corrections 1 and 2 were cancelled). It keeps the 5 April velocity change and the "
+        "crew module raise burn, which are not course corrections. Its gap from the Earth + Moon + Sun line is what the "
+        "corrections bought.",
+        "Entry angle: flight-path angle below horizontal at entry interface. NASA's is from the Earth conic through its "
+        "last data sample (172 km up), which reaches entry interface at 23:53:30 UTC against the event list's 23:53. "
+        "Shown without a verdict: no published entry corridor is used here.",
         "Closest approach is altitude above the Moon's mean radius (1,737.4 km). Farthest distance is from Earth's "
         "centre for every row, NASA's included (event list, 413,146.2 km); NASA's public 252,756 mi (406,771 km) is from "
         "the surface. Entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid.",
@@ -168,7 +203,7 @@ def main() -> None:
     ]
     if args.convergence:
         half = R.fly(best, R._end_for(best), rep.burns, grid_s=30.0, max_turn=R.MAX_TURN_PER_STEP / 2.0)
-        full = rep.tiers[-1].flight
+        full = rep.tiers[len(R.TIERS) - 1].flight
         k = np.searchsorted(half.t_s, full.t_s)
         ok = (k < half.t_s.size)
         ok[ok] &= np.abs(half.t_s[k[ok]] - full.t_s[ok]) < 1e-6
