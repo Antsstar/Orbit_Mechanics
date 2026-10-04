@@ -138,6 +138,7 @@ module's row there before changing that module or writing a test against it.
 |---|---|
 | `frames.ReferenceFrames` | `rv_to_coe` / `coe_to_rv` (vectorised, degenerate fallbacks, success mask); body-fixed, RaDec, long/lat; RSW: `RSW_basis` (rows R, S, W), `cart_to_RSW`, `RSW_to_cart`. Undefined RSW frames return exactly zero; its rectilinear test is relative, `rv_to_coe`'s is absolute |
 | `utilities` | `Transformations` (batched `Rx`..`Rzxz`, spherical), `Anomalies` (true/eccentric/mean incl. hyperbolic and parabolic; `"S.S"` diverges on hyperbolic, use `"N-R"`), `Kepler` / `Barker` |
+| `iod.py` | `lambert` (bisection, zero-rev), `gibbs`, `herrick_gibbs`, `gauss` (+ improvement). Two-body, boundary only. **Gibbs ignores time**: on a perturbed arc prefer Lambert or Herrick-Gibbs |
 | `simulator._topological_sort` | Vectorised BFS tiering over any parent-index array |
 | `database.py` | Polymorphic ORM (`CelestialBodyORM` / `VesselORM` / `VirtualBodyORM`, `SystemORM`) |
 | `kernels.py` | The compiled twins — see the two-implementation rule |
