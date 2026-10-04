@@ -154,6 +154,7 @@ from sqlalchemy.pool import StaticPool
 
 from . import artemis2 as a2
 from . import horizons_bridge as hb
+from . import iod
 from . import scenarios
 from .custom_types import ArrayFloat
 from .database import Base
@@ -667,6 +668,132 @@ def entry_aim(flight: Flight) -> EntryAim:
 
 
 # --------------------------------------------------------------------------------------------------
+# Targeting the corrections: what each model says the burn should have been
+# --------------------------------------------------------------------------------------------------
+
+#: A data discontinuity smaller than this does not end a targeting arc (its jump is absorbed into
+#: the target; at 1 km over hours that is ~0.01 m/s).
+TARGET_JUMP_KM: Final[float] = 1.0
+
+
+@dataclass(frozen=True)
+class BurnArc:
+    """
+    One correction burn as a targeting problem: from NASA's clean state at `seed_tdb` (the minute the
+    burn's cluster starts), coast to the impulse epoch `t_burn`, apply the burn, and arrive at NASA's
+    position at `t_end` (the next burn, or the next data jump over `TARGET_JUMP_KM`). In NASA's own
+    trajectory that arc is the burn plus a coast, so the right answer is NASA's burn.
+    """
+    key: str
+    seed_tdb: str
+    t_burn: float
+    t_end: float
+    nasa_rsw_m_s: Tuple[float, float, float]
+    nasa_dv_m_s: float
+
+
+def burn_arcs(seed_tdb: str = SEED_TDB) -> List[BurnArc]:
+    """The targeting arc of every correction burn after `seed_tdb`, in time order."""
+    rows = sorted(_read_burns_csv(), key=lambda r: r["cluster_start_tdb"])
+    by_epoch = {b.t_s: b for b in replay_burns(seed_tdb, reconstruct_family_switch=False)}
+    out: List[BurnArc] = []
+    for k, row in enumerate(rows):
+        t_b = a2.tdb_seconds(row["epoch_tdb"])
+        b = by_epoch.get(t_b)
+        if row["kind"] != "burn" or b is None or "correction" not in b.key:
+            continue
+        end = next(r for r in rows[k + 1:] if r["kind"] == "burn" or float(r["closure_km"]) > TARGET_JUMP_KM)
+        out.append(BurnArc(b.key, row["cluster_start_tdb"], t_b, a2.tdb_seconds(end["cluster_start_tdb"]),
+                           b.rsw_m_s, b.dv_m_s))
+    return out
+
+
+def _nasa_state(t_s: float) -> ArrayFloat:
+    orion = a2.load("orion")
+    k = int(np.argmin(np.abs(orion.t_s - t_s)))
+    if abs(float(orion.t_s[k]) - t_s) > 1e-6:
+        raise ValueError(f"no NASA sample at {t_s}")
+    out: ArrayFloat = orion.state[k].copy()
+    return out
+
+
+def _to_rsw(r: ArrayFloat, v: ArrayFloat, dv: ArrayFloat) -> ArrayFloat:
+    """Inertial `dv` in the RSW frame of `(r, v)` (rows R = r/|r|, W = h/|h|, S = W x R)."""
+    rr = r / np.linalg.norm(r)
+    w = np.cross(r, v)
+    w = w / np.linalg.norm(w)
+    out: ArrayFloat = np.array([dv @ rr, dv @ np.cross(w, rr), dv @ w])
+    return out
+
+
+def lambert_burn(arc: BurnArc, mu: float = scenarios.MU_EARTH) -> ArrayFloat:
+    """
+    The two-body answer, RSW m/s: NASA's clean state coasted on the Earth conic to the burn epoch, and
+    `iod.lambert` from there to NASA's position at `t_end`. Earth's gravity only: what a planner without
+    the Moon and Sun would command.
+    """
+    x0 = _nasa_state(a2.tdb_seconds(arc.seed_tdb))
+    r_b, v_b = iod.kepler_universal(x0[:3], x0[3:], arc.t_burn - a2.tdb_seconds(arc.seed_tdb), mu)
+    r_t = _nasa_state(arc.t_end)[:3]
+    v1, _ = iod.lambert(r_b, r_t, arc.t_end - arc.t_burn, mu, prograde=float(np.cross(r_b, v_b)[2]) > 0.0)
+    out: ArrayFloat = _to_rsw(r_b, v_b, v1 - v_b) * 1e3
+    return out
+
+
+@dataclass(frozen=True)
+class TargetedBurn:
+    """A shooting solution: the burn in RSW m/s, the final miss, the iterations and flights spent."""
+    rsw_m_s: Tuple[float, float, float]
+    miss_km: float
+    iterations: int
+    flights: int
+
+    @property
+    def dv_m_s(self) -> float:
+        return float(np.linalg.norm(self.rsw_m_s))
+
+
+def target_burn(tier: Tier, arc: BurnArc, *, guess_m_s: Sequence[float] = (0.0, 0.0, 0.0),
+                step_m_s: float = 0.01, tol_km: float = 1e-3, max_iter: int = 12) -> TargetedBurn:
+    """
+    Shoot the burn so that `tier`'s Orion reaches NASA's position at `arc.t_end`: Newton on the three RSW
+    components with a forward-difference Jacobian (`step_m_s`), then Broyden updates, one flight each,
+    until the miss is under `tol_km`. The default guess is no burn at all: the targeter is told nothing
+    of NASA's answer.
+    """
+    target = _nasa_state(arc.t_end)[:3]
+
+    def miss(x: ArrayFloat) -> ArrayFloat:
+        burn = ReplayBurn(arc.key, "targeted", arc.t_burn, (float(x[0]), float(x[1]), float(x[2])),
+                          float(np.linalg.norm(x)), float(np.linalg.norm(x)), math.nan, "", "targeted")
+        f = fly(tier, arc.t_end, [burn], seed_tdb=arc.seed_tdb, stop_at_entry=False)
+        if abs(float(f.t_s[-1]) - arc.t_end) > 1e-6:
+            raise RuntimeError("targeting flight did not end at the arc's end")
+        out: ArrayFloat = f.state[-1, :3] - target
+        return out
+
+    x = np.asarray(guess_m_s, dtype=np.float64)
+    res = miss(x)
+    jac = np.empty((3, 3))
+    for i in range(3):
+        e = np.zeros(3)
+        e[i] = step_m_s
+        jac[:, i] = (miss(x + e) - res) / step_m_s
+    flights = 4
+    it = 0
+    while float(np.linalg.norm(res)) > tol_km and it < max_iter:
+        dx = np.linalg.solve(jac, -res)
+        new = miss(x + dx)
+        flights += 1
+        jac += np.outer(new - res - jac @ dx, dx) / float(dx @ dx)
+        x, res = x + dx, new
+        it += 1
+    if float(np.linalg.norm(res)) > tol_km:
+        raise RuntimeError(f"targeting {arc.key} under {tier.model_id} did not converge: miss {np.linalg.norm(res):.3g} km")
+    return TargetedBurn((float(x[0]), float(x[1]), float(x[2])), float(np.linalg.norm(res)), it, flights)
+
+
+# --------------------------------------------------------------------------------------------------
 # Visibility
 # --------------------------------------------------------------------------------------------------
 
@@ -954,6 +1081,8 @@ class Replay:
     truth_farthest: Extremum
     truth_windows: List[Window]
     notes: List[str] = field(default_factory=list)
+    #: `{burn key: {model_id: RSW m/s}}` from `target_burn`, NASA's delivered burn under `TRUTH_ID`.
+    targeting: Dict[str, Dict[str, Tuple[float, float, float]]] = field(default_factory=dict)
 
 
 def _end_for(tier: Tier) -> float:
@@ -966,13 +1095,15 @@ def _end_for(tier: Tier) -> float:
 
 
 def run_replay(tiers: Sequence[Tier] = TIERS, *, reconstruct_family_switch: bool = True,
-               arcs: bool = True, extend_days: float = 16.0, free: bool = True) -> Replay:
+               arcs: bool = True, extend_days: float = 16.0, free: bool = True,
+               targeting: bool = True) -> Replay:
     """
     Fly every tier (the replay view and, with `arcs`, the per-arc view), find its events and windows.
     A tier that neither enters nor turns round before its end is flown on, unexported, to at most
     `extend_days` after the seed to find its return perigee (Earth-only tiers only: the others would
     leave the tables). With `free`, `FREE_TIER` is appended: the last tier's physics without the
-    correction burns, no per-arc view (its arcs would be the last tier's).
+    correction burns, no per-arc view (its arcs would be the last tier's). With `targeting`, every
+    correction burn is re-targeted under every tier in `tiers` (`target_burn`).
     """
     truth = truth_flight()
     rot = earth_rotation()
@@ -1000,8 +1131,14 @@ def run_replay(tiers: Sequence[Tier] = TIERS, *, reconstruct_family_switch: bool
         wins = dsn_windows(flight, rot) + lunar_blackouts(flight) + solar_eclipses(flight)
         results.append(TierResult(tier, flight, fly_arcs(tier, spans) if tier_arcs else [], closest, farthest,
                                   entry, perigee, wins, extended))
+    targeted: Dict[str, Dict[str, Tuple[float, float, float]]] = {}
+    if targeting:
+        for arc in burn_arcs():
+            row = {tier.model_id: target_burn(tier, arc).rsw_m_s for tier in tiers}
+            row[TRUTH_ID] = arc.nasa_rsw_m_s
+            targeted[arc.key] = row
     return Replay(truth, results, burns, rot, t_ca_truth, max_earth_distance(truth),
-                  dsn_windows(truth, rot) + lunar_blackouts(truth) + solar_eclipses(truth))
+                  dsn_windows(truth, rot) + lunar_blackouts(truth) + solar_eclipses(truth), targeting=targeted)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -1270,6 +1407,17 @@ def export_dashboard(replay: Replay, out_dir: str, *, generated_utc: str, engine
             for win in wins:
                 w.writerow([mid, win.kind, win.station, _fmt(win.start_s + x0, 1), _fmt(win.end_s + x0, 1)])
 
+    if replay.targeting:
+        with open(path("targeting.csv"), "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh, lineterminator="\n")
+            w.writerow(["burn", "model_id", "dv_m_s", "dv_r_m_s", "dv_s_m_s", "dv_w_m_s", "error_m_s"])
+            for key, per_model in replay.targeting.items():
+                nasa = np.asarray(per_model[TRUTH_ID])
+                for mid, rsw in per_model.items():
+                    v = np.asarray(rsw)
+                    err_s = "" if mid == TRUTH_ID else _fmt(float(np.linalg.norm(v - nasa)), 4)
+                    w.writerow([key, mid, _fmt(float(np.linalg.norm(v)), 4), *(_fmt(float(c), 4) for c in v), err_s])
+
     meta = {
         "synthetic": False,
         "title": "Artemis II lunar flyby",
@@ -1289,4 +1437,5 @@ def export_dashboard(replay: Replay, out_dir: str, *, generated_utc: str, engine
     with open(path("meta.json"), "w", encoding="utf-8") as fh:
         fh.write(json.dumps(meta, indent=2) + "\n")
     names = ["meta.json", "models.csv", "trajectory.csv", "metrics.csv", "events.csv", "windows.csv"]
+    names += ["targeting.csv"] if replay.targeting else []
     return {n: os.path.getsize(path(n)) for n in names}

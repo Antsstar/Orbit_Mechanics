@@ -219,6 +219,38 @@ def test_otc3_moves_the_flyby_by_its_lead_times_delta_v() -> None:
     assert 150.0 < float(np.linalg.norm(with_burn.state[k, :3] - without.state[k, :3])) < 300.0
 
 
+# --- targeting the corrections ------------------------------------------------------------------------
+
+def test_burn_arcs_are_the_four_corrections() -> None:
+    arcs = R.burn_arcs()
+    assert [a.key for a in arcs] == ["outbound_correction_burn_3", "return_correction_burn_1",
+                                     "return_correction_burn_2", "return_correction_burn_3"]
+    ends = ["2026-04-06T17:34:00", "2026-04-08T04:37:00", "2026-04-10T18:49:00", "2026-04-10T23:24:00"]
+    assert [a.t_end for a in arcs] == [a2.tdb_seconds(e) for e in ends]
+    assert all(a2.tdb_seconds(a.seed_tdb) < a.t_burn < a.t_end for a in arcs)
+
+
+def test_earth_only_shooting_is_lambert() -> None:
+    """Two independent codes, one physics: the engine's RK4 shot to the target (Earth point mass) and
+    `iod.lambert`. Expected agreement: the shooting tolerance, 1e-3 km over 4.5 h, is 6e-5 m/s."""
+    arc = R.burn_arcs()[3]
+    shot = R.target_burn(R.TIERS[0], arc)
+    assert float(np.linalg.norm(np.subtract(shot.rsw_m_s, R.lambert_burn(arc)))) < 1e-3
+
+
+def test_targeting_rtc1_reproduces_nasas_burn_and_needs_the_sun_and_moon() -> None:
+    """RTC-1, 4.5 h arc (module docstring of `artemis2_replay`): the full model's error is the per-arc
+    model miss over the arc, ~1 mm/s; without the Sun, `a t / 2` with the Sun's tide ~2e-8 km/s^2 is
+    ~0.17 m/s; two-body Lambert misses the Moon's ~5e-7 km/s^2 at ~1e5 km, ~4 m/s, against a 0.5 m/s burn."""
+    arc = R.burn_arcs()[1]
+    nasa = np.asarray(arc.nasa_rsw_m_s)
+    best = R.target_burn(R.TIERS[3], arc)
+    no_sun = R.target_burn(R.TIERS[2], arc)
+    assert float(np.linalg.norm(np.subtract(best.rsw_m_s, nasa))) < 0.01
+    assert 0.08 < float(np.linalg.norm(np.subtract(no_sun.rsw_m_s, nasa))) < 0.35
+    assert 2.0 < float(np.linalg.norm(R.lambert_burn(arc) - nasa)) < 8.0
+
+
 # --- visibility ---------------------------------------------------------------------------------------
 
 def test_earth_rotation_reproduces_horizons() -> None:

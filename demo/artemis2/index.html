@@ -560,6 +560,10 @@ button, select, input { font: inherit; color: inherit; }
 /* visibility */
 .strip { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 12px; }
 .strip .plot { height: 420px; }
+#planPlot { height: 340px; }
+.scroll-x { overflow-x: auto; margin-top: 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 12px; }
+.plan-table { min-width: 560px; }
+.plan-table td .err { color: var(--muted); font-size: 12px; margin-left: 6px; }
 
 /* footer */
 .foot {
@@ -671,6 +675,18 @@ button, select, input { font: inherit; color: inherit; }
     </div>
     <div class="cards" id="cards"></div>
     <div class="legend-status" id="statusLegend"></div>
+  </section>
+
+  <section aria-labelledby="planHead" id="planSection" hidden>
+    <div class="section-head">
+      <h2 id="planHead">Planning the course corrections</h2>
+      <p>Each of NASA's four correction burns, worked out again by each model from where Orion really was just before it. The burn is found by trial: fly, measure the miss, correct, starting from no burn at all. A model with the right physics should land on NASA's own burn; the gap is what its missing physics would have cost, in m/s of propellant. Earth only is the textbook two-body answer (Lambert's problem).</p>
+    </div>
+    <div class="strip">
+      <div class="plot-wrap"><div class="plot" id="planPlot"></div></div>
+      <p class="clipnote">Log scale. Each bar is how far the model's burn is from NASA's, as a velocity difference; the number above each group is the burn NASA flew.</p>
+    </div>
+    <div class="scroll-x"><table class="live plan-table" id="planTable"></table></div>
   </section>
 
   <section aria-labelledby="chartHead">
@@ -1031,6 +1047,7 @@ window.eval = function (src) { if (src === "this") return window; return window.
     if (row) row.classList.toggle("is-off", !on);
     renderCharts();
     renderStrip();
+    renderPlan();
     if (view3d) view3d.setVisible(mid, on);
   }
 
@@ -1704,7 +1721,44 @@ window.eval = function (src) { if (src === "this") return window; return window.
     });
   }
 
-  function onThemeChange() { renderCharts(); renderStrip(); }
+  function onThemeChange() { renderCharts(); renderStrip(); renderPlan(); }
+
+  // ---------------------------------------------------------------- planning the corrections
+  // targeting.csv (optional): one row per (burn, model) with the model's re-targeted burn and its
+  // distance from NASA's; the truth's row is the burn NASA flew.
+  const burnLabel = (k) => { const m = /^(outbound|return)_correction_burn_(\d+)$/.exec(k); return m ? (m[1] === "outbound" ? "OTC-" : "RTC-") + m[2] : eventLabel(k); };
+  function renderPlan() {
+    const rows = S.targeting;
+    if (!rows || !rows.length || !window.Plotly) return;
+    $("planSection").hidden = false;
+    const dark = isDark(), c = axisColours();
+    const burns = [...new Set(rows.map((r) => r.burn))];
+    const nasa = Object.fromEntries(rows.filter((r) => r.model_id === S.truth.id).map((r) => [r.burn, +r.dv_m_s]));
+    const models = S.models.filter((m) => !m.isTruth && rows.some((r) => r.model_id === m.id) && S.visible[m.id]);
+    const traces = models.map((m) => {
+      const mr = burns.map((b) => rows.find((r) => r.burn === b && r.model_id === m.id));
+      return {
+        type: "bar", name: m.label, x: burns.map(burnLabel), y: mr.map((r) => (r ? Math.max(+r.error_m_s, 1e-4) : null)),
+        customdata: mr.map((r) => (r ? [(+r.dv_m_s).toFixed(3), (+r.error_m_s).toFixed(3)] : ["-", "-"])),
+        marker: { color: colourOf(m, dark), line: { width: 0 } },
+        hovertemplate: "<b>" + esc(m.label) + "</b><br>commands %{customdata[0]} m/s<br>off NASA's by %{customdata[1]} m/s<extra></extra>",
+      };
+    });
+    const layout = baseLayout(c, 340);
+    layout.xaxis = { type: "category", tickfont: { family: "'Barlow Semi Condensed', sans-serif", size: 14, color: c.ink2 }, fixedrange: true };
+    layout.yaxis = { type: "log", title: { text: "off NASA's burn, m/s", font: { size: 12, color: c.muted } }, gridcolor: c.rule, tickformat: ",~g", tickfont: { family: "'IBM Plex Mono', monospace", size: 11, color: c.muted }, fixedrange: true };
+    const errs = rows.filter((r) => r.error_m_s !== "").map((r) => Math.max(+r.error_m_s, 1e-4));
+    layout.yaxis.range = [Math.log10(Math.min(...errs)) - 0.3, Math.log10(Math.max(...errs)) + 0.35];
+    layout.barmode = "group"; layout.bargap = 0.25; layout.hovermode = "closest"; layout.dragmode = false;
+    layout.annotations = burns.map((b) => ({ x: burnLabel(b), y: 1, yref: "paper", yanchor: "bottom", showarrow: false,
+      text: "NASA " + (nasa[b] !== undefined ? nasa[b].toFixed(2) : "?") + " m/s", font: { size: 12, color: c.ink2, family: "'IBM Plex Mono', monospace" } }));
+    Plotly.react($("planPlot"), traces, layout, { displayModeBar: false, responsive: true });
+    const head = "<thead><tr><th>Model</th>" + burns.map((b) => "<th>" + esc(burnLabel(b)) + "</th>").join("") + "</tr></thead>";
+    const body = S.models.filter((m) => rows.some((r) => r.model_id === m.id)).map((m) =>
+      '<tr data-model="' + esc(m.id) + '" style="' + modelSwatchVars(m) + '"><td><span class="modeltoggle"><span class="box" style="width:12px;height:12px"></span><span>' + esc(m.label) + truthTag(m) + "</span></span></td>" +
+      burns.map((b) => { const r = rows.find((x) => x.burn === b && x.model_id === m.id); return '<td class="num">' + (r ? (+r.dv_m_s).toFixed(3) + (r.error_m_s !== "" ? '<span class="err">off ' + (+r.error_m_s).toFixed(3) + "</span>" : "") : "-") + "</td>"; }).join("") + "</tr>").join("");
+    $("planTable").innerHTML = head + "<tbody>" + body + "</tbody>";
+  }
 
   async function main() {
     try {
@@ -1719,10 +1773,14 @@ window.eval = function (src) { if (src === "this") return window; return window.
     renderStatic();
     renderPanel();
     renderCards();
+    try {
+      const res = await fetch(DATA_DIR + "targeting.csv", { cache: "no-cache" });
+      if (res.ok) S.targeting = parseCSV(await res.text()).filter((r) => S.byId[r.model_id]);
+    } catch (e) { S.targeting = null; }
     const cla = truthEvent("closest_lunar_approach");
     clock.init(cla ? Math.min(S.t1, Math.max(S.t0, cla.t - 3 * 3600)) : S.t0);
     wireTransport();
-    if (window.Plotly) { buildChartDom(); renderCharts(); renderStrip(); }
+    if (window.Plotly) { buildChartDom(); renderCharts(); renderStrip(); renderPlan(); }
     else { $("charts").innerHTML = '<p class="loaderr">Plotly did not load from the CDN, so the charts are unavailable.</p>'; }
     try { view3d = init3D(); } catch (e) { $("fallback").hidden = false; $("fallbackText").textContent = "The 3D view failed to start: " + e.message; console.error(e); }
     refresh(true);

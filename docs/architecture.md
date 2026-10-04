@@ -1773,6 +1773,40 @@ and it is why the next step re-targets the corrections inside each model (Lamber
 shooting). No entry corridor is graded here: no published width is used, so the dashboard shows the
 angle and its difference from NASA without a verdict.
 
+### Planning the corrections: what each model says the burn should have been
+
+`burn_arcs` turns each correction into a targeting problem. Start from NASA's clean state at the minute
+the burn's cluster begins. Coast to the impulse epoch, burn, and arrive at NASA's position at the next
+burn, or at the next data jump over 1 km (`TARGET_JUMP_KM`). In NASA's trajectory that arc is the burn
+plus a coast, so the right answer is NASA's own burn. `target_burn` shoots for it: Newton on the three
+RSW components with a forward-difference Jacobian, then Broyden updates. It starts from **no burn**,
+so it is told nothing of NASA's answer, and converges in one or two iterations. A Lambert first
+guess, as the roadmap had it, turned out unnecessary: from zero, every burn is within a few m/s and the
+problem is nearly linear. `lambert_burn` is the two-body answer from `iod.lambert`, and Earth-only
+shooting reproduces it to 1e-4 m/s: two independent codes, one physics.
+
+| burn (NASA) | arc | Lambert = Earth only | + J2 | Earth + Moon | Earth + Moon + Sun |
+|---|---|---|---|---|---|
+| OTC-3 (3.017 m/s) | 14.5 h, through the flyby | 48.07 (off 49.8) | off 49.8 | 2.750 (off 0.525) | 2.997 (off **0.051**) |
+| RTC-1 (0.505) | 4.5 h | 4.147 (off 4.53) | off 4.53 | 0.640 (off 0.169) | 0.503 (off **0.002**) |
+| RTC-2 (1.626) | 15.9 h | 1.446 (off 0.945) | off 0.945 | 1.769 (off 0.198) | 1.595 (off **0.040**) |
+| RTC-3 (1.296) | 4.5 h, near Earth | 1.275 (off 0.117) | off 0.069 | 1.283 (off 0.021) | 1.293 (off **0.003**) |
+
+The estimates, made before the run as `a t / 2` of each missing acceleration, came out as follows:
+- **The Sun's tide** (Earth + Moon's error): estimated 0.6 / 0.17 / 0.3 / 0.03 m/s, measured 0.52 /
+  0.17 / 0.20 / 0.021.
+- **The Moon** (Lambert's error): estimated ~4 / ~2 / 0.07 m/s on the return, measured 4.5 / 0.94 /
+  0.12. For OTC-3, through the flyby, I estimated "hundreds of m/s". It came out at 50 m/s: the right
+  class (16 times the burn) but 5x high.
+- **The full model** reproduces NASA's burns to 2-51 mm/s, which is 0.2-3 % of each burn, as the per-arc
+  model misses predicted (2.6 km over the flyby arc gives ~0.05 m/s). RTC-2's 40 mm/s is 2.6x the 15 mm/s
+  estimated from the data jumps it crosses.
+- **J2** matters only for RTC-3, the arc that ends near Earth.
+
+In decision units: a planner with only Earth's gravity would have commanded 48 m/s for a 3 m/s
+correction, and a planner without the Sun would be wrong by 10-30 % on every outbound or mid-course
+correction. This is a comparison, not a verification. The divergence is the result.
+
 ---
 
 ## Higher zonals: J3..J6 as a second model, not a wider first one

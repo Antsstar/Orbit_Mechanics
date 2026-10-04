@@ -162,6 +162,18 @@ def main() -> None:
         print(f"  {name:40s} CA alt {ca.value_km - a2.MOON_MEAN_RADIUS_KM:7.1f} km {_utc(ca.t_s)[11:19]}, "
               f"{shift:6.1f} km from the replay at CA; vac perigee {aim.vacuum_perigee_km:7.1f} km, EI {ei}")
 
+    print("\nRe-targeted corrections: |dv| m/s (|dv - NASA's| m/s), each burn from NASA's state before it to NASA's "
+          "position at the arc's end")
+    arcs = {a.key: a for a in R.burn_arcs()}
+    for key, per_model in rep.targeting.items():
+        nasa = np.asarray(per_model[R.TRUTH_ID])
+        lam = R.lambert_burn(arcs[key])
+        cells = [f"Lambert {np.linalg.norm(lam):7.3f} ({np.linalg.norm(lam - nasa):7.3f})"]
+        cells += [f"{mid} {np.linalg.norm(v):7.3f} ({np.linalg.norm(np.subtract(v, nasa)):7.3f})"
+                  for mid, v in per_model.items() if mid != R.TRUTH_ID]
+        hours = (arcs[key].t_end - arcs[key].t_burn) / 3600.0
+        print(f"  {key:28s} NASA {np.linalg.norm(nasa):6.3f}, arc {hours:4.1f} h: " + "; ".join(cells))
+
     notes: List[str] = [
         "Every model starts from NASA's exact position and velocity at 2026-04-03 00:58:51 UTC (01:00 TDB), an hour "
         "after translunar injection, and receives the same impulsive burns NASA flew afterwards, each at its measured "
@@ -193,6 +205,11 @@ def main() -> None:
         "Entry angle: flight-path angle below horizontal at entry interface. NASA's is from the Earth conic through its "
         "last data sample (172 km up), which reaches entry interface at 23:53:30 UTC against the event list's 23:53. "
         "Shown without a verdict: no published entry corridor is used here.",
+        "Planning the corrections: each correction burn re-computed by each model from NASA's own state just before "
+        "it, so that Orion arrives where NASA's trajectory is at the next burn (or the next data jump over 1 km). The "
+        "burn is found by shooting: fly, measure the miss, correct, starting from no burn at all. In NASA's trajectory "
+        "that arc is the burn plus a coast, so the right answer is NASA's own burn. Earth only is the same as the "
+        "classic two-body (Lambert) answer, to 0.0001 m/s.",
         "Closest approach is altitude above the Moon's mean radius (1,737.4 km). Farthest distance is from Earth's "
         "centre for every row, NASA's included (event list, 413,146.2 km); NASA's public 252,756 mi (406,771 km) is from "
         "the surface. Entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid.",

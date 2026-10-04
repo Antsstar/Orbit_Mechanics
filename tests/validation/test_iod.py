@@ -200,6 +200,9 @@ def test_universal_kepler_matches_the_anomaly_solve() -> None:
     t, x = _leo_track(900.0)
     f, g, _ = iod.kepler_universal_fg(x[1, :3], x[1, 3:], 900.0, MU_E)
     np.testing.assert_allclose(f * x[1, :3] + g * x[1, 3:], x[2, :3], rtol=1e-10, atol=1e-7)
+    r, v = iod.kepler_universal(x[1, :3], x[1, 3:], -900.0, MU_E)          # backwards, full state
+    np.testing.assert_allclose(r, x[0, :3], rtol=1e-10, atol=1e-7)
+    np.testing.assert_allclose(v, x[0, 3:], rtol=1e-10, atol=1e-10)
 
 
 # --- NASA's Orion: two-body methods on real data ------------------------------------------------------

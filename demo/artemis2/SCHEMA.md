@@ -161,6 +161,22 @@ The sample uses a 10° elevation mask and a spherical Earth, with lunar blackout
 disc covering Orion as seen from Earth's centre. The engine side should state its own definitions in
 `meta.json` `notes`.
 
+## `targeting.csv` (optional)
+
+Each correction burn, re-computed by each model. The page shows the "Planning the course corrections"
+section only when this file exists.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `burn` | string | The burn's event key (`outbound_correction_burn_3`, `return_correction_burn_1` ...). Shown as OTC-n / RTC-n. |
+| `model_id` | string | From `models.csv`. The truth's row is the burn NASA flew (from its own trajectory). |
+| `dv_m_s` | float | Magnitude of the model's burn, m/s. |
+| `dv_r_m_s`, `dv_s_m_s`, `dv_w_m_s` | float | The burn in the radial / along-track / cross-track (RSW) frame of the pre-burn state. |
+| `error_m_s` | float or empty | `|model burn - NASA's burn|` as a vector difference, m/s. Empty on the truth's row. |
+
+The engine's definition: each burn is targeted from NASA's clean state before it to NASA's position at
+the next burn or data jump over 1 km (`artemis2_replay.burn_arcs`, `target_burn`).
+
 ## Time span and the Earth-orientation tables
 
 The 3D view rotates ICRF into Earth-fixed coordinates with CesiumJS's IAU 2006 tables, of which only

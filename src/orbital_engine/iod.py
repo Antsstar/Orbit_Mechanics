@@ -39,7 +39,8 @@ import numpy as np
 
 from .custom_types import ArrayFloat
 
-__all__ = ["stumpff_c", "stumpff_s", "lambert", "gibbs", "herrick_gibbs", "gauss", "kepler_universal_fg"]
+__all__ = ["stumpff_c", "stumpff_s", "lambert", "gibbs", "herrick_gibbs", "gauss", "kepler_universal_fg",
+           "kepler_universal"]
 
 
 # --------------------------------------------------------------------------------------------------
@@ -92,6 +93,21 @@ def kepler_universal_fg(r0: ArrayFloat, v0: ArrayFloat, dt: float, mu: float, *,
     f = 1.0 - chi * chi / rn * stumpff_c(z)
     g = dt - chi ** 3 * stumpff_s(z) / sq
     return f, g, chi
+
+
+def kepler_universal(r0: ArrayFloat, v0: ArrayFloat, dt: float, mu: float) -> Tuple[ArrayFloat, ArrayFloat]:
+    """`(r, v)` after `dt` on the two-body conic through `(r0, v0)` (Curtis Alg. 3.4: f, g, f-dot, g-dot)."""
+    r0 = np.asarray(r0, dtype=np.float64)
+    v0 = np.asarray(v0, dtype=np.float64)
+    f, g, chi = kepler_universal_fg(r0, v0, dt, mu)
+    r: ArrayFloat = f * r0 + g * v0
+    rn, r0n = float(np.linalg.norm(r)), float(np.linalg.norm(r0))
+    alpha = 2.0 / r0n - float(v0 @ v0) / mu
+    z = alpha * chi * chi
+    f_dot = math.sqrt(mu) / (rn * r0n) * (z * chi * stumpff_s(z) - chi)
+    g_dot = 1.0 - chi * chi / rn * stumpff_c(z)
+    v: ArrayFloat = f_dot * r0 + g_dot * v0
+    return r, v
 
 
 # --------------------------------------------------------------------------------------------------
