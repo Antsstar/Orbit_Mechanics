@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artemis III Rendezvous Planners</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #eceff3;
+  --surface: #ffffff;
+  --surface-2: #f4f6f9;
+  --ink: #0f1a27;
+  --ink-2: #344355;
+  --muted: #5f6f83;
+  --rule: #d5dce5;
+  --rule-strong: #b3bfcc;
+  --accent: #1f5fcf;
+  --accent-soft: #e2ebfb;
+  --good: #0b7a3e;  --good-bg: #e2f3e8;
+  --warn: #8f5a00;  --warn-bg: #fbefd6;
+  --bad: #b8322a;   --bad-bg: #fbe4e1;
+  --hazard: #f2b01e;
+  --hazard-ink: #1b1403;
+  /* planner colours: each >= 3:1 on #ffffff and on #0e1520 */
+  --c-two_body: #d9620b;
+  --c-j2: #2f78d6;
+  --c-geopotential: #12915c;
+  --c-full: #7b8794;
+  --font-display: "Barlow Semi Condensed", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Barlow", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #070b12; --surface: #0e1520; --surface-2: #121b28;
+    --ink: #e6edf5; --ink-2: #b9c5d3; --muted: #8a9aae;
+    --rule: #1f2b3b; --rule-strong: #33445a;
+    --accent: #6ea6ff; --accent-soft: #14243d;
+    --good: #52c885; --good-bg: #0f2a1c;
+    --warn: #f0b43c; --warn-bg: #2d2208;
+    --bad: #ff8274; --bad-bg: #351510;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #070b12; --surface: #0e1520; --surface-2: #121b28;
+  --ink: #e6edf5; --ink-2: #b9c5d3; --muted: #8a9aae;
+  --rule: #1f2b3b; --rule-strong: #33445a;
+  --accent: #6ea6ff; --accent-soft: #14243d;
+  --good: #52c885; --good-bg: #0f2a1c;
+  --warn: #f0b43c; --warn-bg: #2d2208;
+  --bad: #ff8274; --bad-bg: #351510;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 15px/1.5 var(--font-body); -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+p { margin: 0; }
+a { color: var(--accent); }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.hazard { background: repeating-linear-gradient(135deg, var(--hazard) 0 14px, var(--hazard-ink) 14px 28px); padding: 5px 0; }
+.hazard__inner { background: var(--hazard); color: var(--hazard-ink); padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; justify-content: center; text-align: center; }
+.hazard__tag { font: 700 15px/1.2 var(--font-display); letter-spacing: 0.14em; text-transform: uppercase; }
+.hazard__text { font-size: 14px; }
+
+.page { max-width: 1200px; margin: 0 auto; padding: 0 16px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+@media (min-width: 760px) { .page { padding-inline: 28px; } }
+.masthead { display: grid; gap: 14px; padding-top: 22px; }
+.masthead__bar { font: 600 13px/1 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.masthead h1 { font-size: clamp(28px, 5vw, 44px); font-weight: 600; line-height: 1.05; }
+.lede { max-width: 70ch; font-size: 17px; color: var(--ink-2); }
+.lede strong { color: var(--ink); font-weight: 600; }
+
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 16px; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 760px) { .card { padding: 20px; } }
+.card h2 { font-size: 22px; font-weight: 600; }
+.card .sub { font-size: 14px; color: var(--muted); max-width: 80ch; }
+.grid2 { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 900px) { .grid2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.chart { width: 100%; min-height: 320px; }
+.chart--main { min-height: 440px; }
+@media (max-width: 640px) { .chart--main { min-height: 380px; } }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 0; border-top: 3px solid; display: inline-block; }
+.sw--dash { border-top-style: dashed; }
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 14px; }
+th, td { text-align: right; padding: 9px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; white-space: normal; }
+th { font: 600 12px/1.2 var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+td.num { font-size: 13.5px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+td.hl { background: var(--accent-soft); font-weight: 500; }
+.miss--bad { color: var(--bad); font-weight: 500; }
+.miss--ok { color: var(--good); font-weight: 500; }
+.note { font-size: 14px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 var(--radius) var(--radius) 0; color: var(--ink-2); }
+
+ul.facts { margin: 0; padding-left: 20px; display: grid; gap: 6px; color: var(--ink-2); font-size: 14.5px; }
+.badge { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--warn); background: var(--warn-bg); border-radius: var(--radius); font-size: 14px; color: var(--ink-2); }
+.badge b { font: 700 13px/1.2 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; color: var(--warn); }
+.foot { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 14px; }
+#err { color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="hazard"><div class="hazard__inner"><span class="hazard__tag">Prospective scenario</span><span class="hazard__text">Not NASA's plan. A model study of a mission that has not flown.</span></div></div>
+<main class="page">
+  <header class="masthead">
+    <div class="masthead__bar">OrbitalEngine &middot; Artemis III (2027, low Earth orbit)</div>
+    <h1 id="title">Artemis III rendezvous planners</h1>
+    <p class="lede" id="lede">Loading data&hellip;</p>
+    <div class="badge">
+      <b>Prospective scenario</b>
+      <span>Only the orbit (about 430 km, 33&deg; inclination) and the mission sequence are public. Every other number here, from Orion's starting orbit to the ballistic coefficients, is an assumption, listed at the foot of the page. <span id="err"></span></span>
+    </div>
+  </header>
+
+  <section class="card">
+    <h2>The approach, seen from the lander</h2>
+    <p class="sub">Orion's path relative to the lander at the origin, in the lander's frame: along-track to the right (ahead of the lander), radial up. Each planner's burn is flown in the most complete model. The three higher-fidelity paths lie on top of one another at this scale; the zoom below separates them.</p>
+    <div class="legend" id="legend1"></div>
+    <div id="approach" class="chart chart--main" role="img" aria-label="Orion approach path to the lander, along-track versus radial, one line per planner"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Miss distance, log scale</h2>
+      <p class="sub">Distance from the lander at the planned arrival time, when each plan is flown in the truth.</p>
+      <div id="miss" class="chart" role="img" aria-label="Bar chart of miss distance per planner on a logarithmic axis"></div>
+    </section>
+    <section class="card">
+      <h2>Zoom on the arrival</h2>
+      <p class="sub">Distance to the lander over the last 600 s, log axis. Samples are rounded to 1 mm in the data, so the control (miss 0.00005 m) drops off the bottom.</p>
+      <div id="zoom" class="chart" role="img" aria-label="Distance to the lander over the last 600 seconds per planner, logarithmic"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Scorecard</h2>
+    <p class="note" id="note"></p>
+    <div class="scroll"><table id="score"></table></div>
+    <p class="sub">The half-way correction is a single burn at the mid-transfer point (t = transfer / 2) that would put Orion back on the lander. Only the two-body one is flown above, as the dashed line.</p>
+  </section>
+
+  <div class="grid2">
+    <section class="card"><h2>What is public</h2><ul class="facts" id="public"></ul></section>
+    <section class="card"><h2>What is assumed here</h2><ul class="facts" id="assumed"></ul></section>
+  </div>
+
+  <footer class="foot">OrbitalEngine, <span class="num">artemis3.py</span>; truth = Earth point mass + J2 + J3-J6 + 4x4 tesserals + drag. Planner physics is cumulative: each row adds one effect to the row above.</footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<script>
+(function () {
+  "use strict";
+  var COLOR = { two_body: "--c-two_body", j2: "--c-j2", geopotential: "--c-geopotential", full: "--c-full" };
+  var DATA = null;
+
+  var q = new URLSearchParams(location.search).get("theme");
+  if (q === "dark" || q === "light") document.documentElement.setAttribute("data-theme", q);
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+  function fmtLen(m) {
+    if (m < 0.001) return "0 (control)";
+    if (m >= 100) return Math.round(m) + " m";
+    if (m >= 1) return m.toFixed(1) + " m";
+    return m.toFixed(2) + " m";
+  }
+  function fmtSpeed(v) {
+    if (v === 0) return "none";
+    if (v >= 0.1) return v.toFixed(2) + " m/s";
+    return (v * 1000).toFixed(v * 1000 >= 1 ? 1 : 1) + " mm/s";
+  }
+  function parseCsv(txt) {
+    var lines = txt.trim().split(/\r?\n/), head = lines.shift().split(","), rows = [];
+    lines.forEach(function (l) {
+      var f = l.split(","), o = {};
+      head.forEach(function (h, i) { o[h] = (h === "planner" || h === "case") ? f[i] : parseFloat(f[i]); });
+      rows.push(o);
+    });
+    return rows;
+  }
+  function series(rows, planner, kase) {
+    return rows.filter(function (r) { return r.planner === planner && r.case === kase; });
+  }
+  function byId(id) { return DATA.summary.planners.filter(function (p) { return p.id === id; })[0]; }
+
+  function fillText() {
+    var S = DATA.summary, tb = byId("two_body"), j2 = byId("j2"), gp = byId("geopotential");
+    $("title").textContent = S.title;
+    var tots = S.planners.map(function (p) { return p.total_m_s; });
+    var lo = Math.min.apply(null, tots), hi = Math.max.apply(null, tots);
+    $("lede").innerHTML =
+      "Orion has to catch Blue Origin's lander test vehicle in low Earth orbit. A planner that models Earth as a point mass (a Lambert transfer) budgets the propellant almost exactly, about <strong>" +
+      tb.total_m_s.toFixed(1) + " m/s</strong>, yet delivers Orion <strong>" + Math.round(tb.miss_m) +
+      " m</strong> from the lander. Adding Earth's oblateness (J2) cuts the miss to <strong>" + j2.miss_m.toFixed(0) +
+      " m</strong>; adding the finer gravity field cuts it to <strong>" + gp.miss_m.toFixed(1) +
+      " m</strong>. All four planners ask for the same " + ((lo + hi) / 2).toFixed(1) +
+      " m/s over a " + Math.round(S.transfer_s / 60) + "-minute transfer, so the fidelity buys accuracy, not a cheaper plan.";
+    $("note").innerHTML = "All four planners plan about <b>" + lo.toFixed(2) + "&ndash;" + hi.toFixed(2) +
+      " m/s</b> in total: the cost is nearly model-independent, the landing spot is not.";
+    $("public").innerHTML = S.public_facts.map(function (s) { return "<li>" + esc(s) + "</li>"; }).join("");
+    $("assumed").innerHTML = S.assumptions.map(function (s) { return "<li>" + esc(s) + "</li>"; }).join("");
+
+    var h = "<thead><tr><th>Planner physics</th><th>First burn</th><th>Closing burn</th><th>Total &Delta;v</th><th>Miss in the truth</th><th>Half-way fix</th></tr></thead><tbody>";
+    S.planners.forEach(function (p) {
+      var cls = p.miss_m > 100 ? "miss--bad" : "miss--ok";
+      h += "<tr><td><span class='dot' style='background:var(" + COLOR[p.id] + ")'></span>" + esc(p.label) + (p.id === "full" ? " <span style='color:var(--muted)'>(truth, control)</span>" : "") +
+        "</td><td class='num'>" + p.burn1_m_s.toFixed(2) + " m/s</td><td class='num'>" + p.closing_m_s.toFixed(2) +
+        " m/s</td><td class='num hl'>" + p.total_m_s.toFixed(2) + " m/s</td><td class='num " + cls + "'>" + fmtLen(p.miss_m) +
+        "</td><td class='num'>" + fmtSpeed(p.midcourse_m_s) + "</td></tr>";
+    });
+    $("score").innerHTML = h + "</tbody>";
+  }
+
+  function layoutBase() {
+    var ink = css("--ink-2"), rule = css("--rule"), surf = css("--surface");
+    return {
+      paper_bgcolor: surf, plot_bgcolor: surf,
+      font: { family: css("--font-body"), color: ink, size: 13 },
+      margin: { l: 64, r: 16, t: 12, b: 52 },
+      showlegend: false,
+      hoverlabel: { font: { family: css("--font-mono"), size: 12 } },
+      _axis: { gridcolor: rule, zerolinecolor: css("--rule-strong"), linecolor: css("--rule-strong"), tickfont: { family: css("--font-mono"), size: 11 } }
+    };
+  }
+  function axis(base, extra) { var a = Object.assign({}, base._axis, extra); return a; }
+  var CFG = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] };
+
+  function drawApproach() {
+    var rows = DATA.rows, S = DATA.summary, base = layoutBase(), traces = [];
+    ["full", "geopotential", "j2", "two_body"].forEach(function (id) {
+      var d = series(rows, id, "as_planned"), p = byId(id);
+      traces.push({
+        x: d.map(function (r) { return r.s_m / 1000; }), y: d.map(function (r) { return r.r_m / 1000; }),
+        mode: "lines", name: p.label, line: { color: css(COLOR[id]), width: id === "full" ? 6 : id === "geopotential" ? 4 : 2.5 },
+        customdata: d.map(function (r) { return [r.t_s / 60, r.w_m]; }),
+        hovertemplate: "<b>" + esc(p.label) + "</b><br>t = %{customdata[0]:.1f} min<br>along-track %{x:.2f} km<br>radial %{y:.2f} km<extra></extra>"
+      });
+    });
+    var c = series(rows, "two_body", "corrected");
+    traces.push({
+      x: c.map(function (r) { return r.s_m / 1000; }), y: c.map(function (r) { return r.r_m / 1000; }),
+      mode: "lines", name: "Two-body + half-way correction", line: { color: css(COLOR.two_body), width: 2.5, dash: "dash" },
+      customdata: c.map(function (r) { return r.t_s / 60; }),
+      hovertemplate: "<b>Two-body, corrected</b><br>t = %{customdata:.1f} min<br>along-track %{x:.2f} km<br>radial %{y:.2f} km<extra></extra>"
+    });
+    // half-way point on the corrected trace
+    var half = S.transfer_s / 2, mid = c[0];
+    c.forEach(function (r) { if (Math.abs(r.t_s - half) < Math.abs(mid.t_s - half)) mid = r; });
+    traces.push({
+      x: [mid.s_m / 1000], y: [mid.r_m / 1000], mode: "markers+text", name: "Half-way correction burn",
+      marker: { symbol: "diamond", size: 12, color: css("--surface"), line: { color: css(COLOR.two_body), width: 2.5 } },
+      text: ["half-way burn, " + fmtSpeed(byId("two_body").midcourse_m_s)], textposition: "middle left", textfont: { color: css("--ink-2"), size: 12 },
+      hovertemplate: "Half-way correction, t = " + (mid.t_s / 60).toFixed(1) + " min<extra></extra>"
+    });
+    var st = c[0];
+    traces.push({
+      x: [st.s_m / 1000], y: [st.r_m / 1000], mode: "markers+text", name: "Orion start",
+      marker: { symbol: "circle", size: 11, color: css("--ink") },
+      text: ["Orion start"], textposition: "bottom center", textfont: { color: css("--ink-2"), size: 12 },
+      hovertemplate: "Orion start<br>%{x:.1f} km along-track, %{y:.1f} km radial<extra></extra>"
+    });
+    traces.push({
+      x: [0], y: [0], mode: "markers+text", name: "Lander",
+      marker: { symbol: "star", size: 17, color: css("--accent"), line: { color: css("--ink"), width: 1 } },
+      text: ["Lander"], textposition: "top left", textfont: { color: css("--ink"), size: 13 },
+      hovertemplate: "Lander (origin)<extra></extra>"
+    });
+    base.xaxis = axis(base, { title: { text: "Along-track from the lander, S (km), ahead →" }, zeroline: true, range: [-74, 8] });
+    base.yaxis = axis(base, { title: { text: "Radial, R (km), up = away from Earth" }, zeroline: true, range: [-35, 7] });
+    delete base._axis;
+    Plotly.react("approach", traces, base, CFG);
+
+    $("legend1").innerHTML = ["two_body", "j2", "geopotential", "full"].map(function (id) {
+      return "<span><i class='sw' style='border-color:var(" + COLOR[id] + ")'></i>" + esc(byId(id).label) + "</span>";
+    }).join("") + "<span><i class='sw sw--dash' style='border-color:var(" + COLOR.two_body + ")'></i>Two-body + half-way correction</span>";
+  }
+
+  function drawMiss() {
+    var base = layoutBase(), P = DATA.summary.planners;
+    var floor = 1e-4;
+    var tr = [{
+      type: "bar", x: P.map(function (p) { return p.label; }), y: P.map(function (p) { return Math.max(p.miss_m, floor); }),
+      marker: { color: P.map(function (p) { return css(COLOR[p.id]); }) },
+      text: P.map(function (p) { return p.id === "full" ? "0.00005 m" : p.miss_m >= 100 ? Math.round(p.miss_m) + " m" : p.miss_m >= 1 ? p.miss_m.toFixed(1) + " m" : p.miss_m.toFixed(2) + " m"; }),
+      textposition: "outside", cliponaxis: false, textfont: { color: css("--ink"), family: css("--font-mono"), size: 12 },
+      customdata: P.map(function (p) { return p.miss_m; }),
+      hovertemplate: "<b>%{x}</b><br>miss %{customdata:.5g} m<extra></extra>"
+    }];
+    base.margin = { l: 64, r: 16, t: 24, b: 70 };
+    base.xaxis = axis(base, { tickangle: 0, automargin: true, tickfont: { size: 11, family: css("--font-body") } });
+    base.yaxis = axis(base, { type: "log", range: [-4.3, 3.6], title: { text: "Miss (m)" }, dtick: 1 });
+    delete base._axis;
+    Plotly.react("miss", tr, base, CFG);
+  }
+
+  function drawZoom() {
+    var rows = DATA.rows, base = layoutBase(), T = DATA.summary.transfer_s, traces = [];
+    ["two_body", "j2", "geopotential"].forEach(function (id) {
+      var d = series(rows, id, "as_planned").filter(function (r) { return r.t_s >= T - 600 && Math.hypot(r.r_m, r.s_m, r.w_m) > 0; });
+      traces.push({
+        x: d.map(function (r) { return r.t_s - T; }), y: d.map(function (r) { return Math.hypot(r.r_m, r.s_m, r.w_m); }),
+        mode: "lines+markers", name: byId(id).label, line: { color: css(COLOR[id]), width: 2.5 }, marker: { size: 5 },
+        hovertemplate: "<b>" + esc(byId(id).label) + "</b><br>%{x:.0f} s from arrival<br>%{y:.2f} m from lander<extra></extra>"
+      });
+    });
+    base.xaxis = axis(base, { title: { text: "Time relative to planned arrival (s)" }, range: [-600, 0] });
+    base.yaxis = axis(base, { type: "log", title: { text: "Distance to lander (m)" }, autorange: true, dtick: 1 });
+    base.showlegend = true;
+    base.legend = { orientation: "h", y: -0.28, font: { size: 11 } };
+    base.margin = { l: 64, r: 16, t: 12, b: 90 };
+    delete base._axis;
+    Plotly.react("zoom", traces, base, CFG);
+  }
+
+  function drawAll() { if (!DATA) return; drawApproach(); drawMiss(); drawZoom(); }
+
+  Promise.all([
+    fetch("data/summary.json").then(function (r) { if (!r.ok) throw new Error("summary.json " + r.status); return r.json(); }),
+    fetch("data/approach.csv").then(function (r) { if (!r.ok) throw new Error("approach.csv " + r.status); return r.text(); })
+  ]).then(function (res) {
+    DATA = { summary: res[0], rows: parseCsv(res[1]) };
+    fillText();
+    drawAll();
+  }).catch(function (e) {
+    $("lede").textContent = "The data files could not be loaded.";
+    $("err").textContent = String(e.message || e);
+  });
+
+  var mq = window.matchMedia("(prefers-color-scheme: dark)");
+  if (mq.addEventListener) mq.addEventListener("change", drawAll);
+})();
+</script>
+</body>
+</html>
