@@ -1,0 +1,74 @@
+{
+  "title": "Artemis III: Orion's final rendezvous transfer, planned by models of rising fidelity",
+  "prospective": true,
+  "public_facts": [
+    "~2-week crewed flight in low Earth orbit, NET mid-2027 (NASA, February 2026)",
+    "Blue Origin's lander test vehicle launches first; Orion docks ~2 days, then with SpaceX Starship ~1 day",
+    "Orbit ~230 nmi (~430 km), 33 deg inclination (Wikipedia infobox; inclination not traced to a primary source)"
+  ],
+  "assumptions": [
+    "Lander circular at 430 km, 33 deg; Orion coplanar, circular, 400 km",
+    "Two-impulse transfer of 170 deg, 2631 s; lander 0.56 deg ahead at the start",
+    "Ballistic coefficients C_d A/m: Orion 0.0025, lander 0.005 m^2/kg (the lander's is a guess)",
+    "Truth: Earth point mass + J2 + J3-J6 + 4x4 tesserals (EGM96) + drag (28-band layered atmosphere); RK4 at <= 10 s"
+  ],
+  "transfer_s": 2631.255136785496,
+  "planners": [
+    {
+      "id": "two_body",
+      "label": "Two-body (Lambert)",
+      "burn1_m_s": 8.590571409495542,
+      "burn1_rsw_m_s": [
+        1.482177591957199,
+        8.461741353146063,
+        -8.222589276130066e-13
+      ],
+      "total_m_s": 17.17133442253789,
+      "miss_m": 641.5053407643222,
+      "closing_m_s": 8.372349485783408,
+      "midcourse_m_s": 0.45577371354075036
+    },
+    {
+      "id": "j2",
+      "label": "+ J2",
+      "burn1_m_s": 8.652166276881944,
+      "burn1_rsw_m_s": [
+        1.5918481856953086,
+        8.494413218265274,
+        0.4134546092038699
+      ],
+      "total_m_s": 17.227629103294625,
+      "miss_m": 3.0126048560492675,
+      "closing_m_s": 8.577479339537737,
+      "midcourse_m_s": 0.0015255206550885236
+    },
+    {
+      "id": "geopotential",
+      "label": "+ J3-J6 and 4x4 tesserals",
+      "burn1_m_s": 8.651580264108844,
+      "burn1_rsw_m_s": [
+        1.5922404391224878,
+        8.493953669902561,
+        0.40909962587307586
+      ],
+      "total_m_s": 17.226905822969098,
+      "miss_m": 0.41906232191634635,
+      "closing_m_s": 8.5755246714959,
+      "midcourse_m_s": 0.00019536927011806475
+    },
+    {
+      "id": "full",
+      "label": "+ drag",
+      "burn1_m_s": 8.651503679061653,
+      "burn1_rsw_m_s": [
+        1.5924069877087195,
+        8.49384425785896,
+        0.40910343135951244
+      ],
+      "total_m_s": 17.226662694407043,
+      "miss_m": 5.276792684773266e-05,
+      "closing_m_s": 8.57515901534539,
+      "midcourse_m_s": 0.0
+    }
+  ]
+}

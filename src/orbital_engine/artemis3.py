@@ -74,7 +74,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Final, List, Optional, Tuple
+from typing import Callable, Dict, Final, List, Optional, Sequence, Tuple
 
 import numpy as np
 from sqlalchemy import create_engine
@@ -95,7 +95,7 @@ from .zonal import EARTH_ZONALS, ZONAL_MODEL
 __all__ = [
     "TARGET_ALTITUDE_KM", "CHASER_ALTITUDE_KM", "INCLINATION_DEG", "TRANSFER_ANGLE_DEG", "ORION_BALLISTIC",
     "LANDER_BALLISTIC", "DT_S", "Tier", "TIERS", "TRUTH", "transfer_geometry", "build", "fly", "lambert_plan",
-    "PlannedTransfer", "plan_transfer", "TruthOutcome", "fly_in_truth",
+    "PlannedTransfer", "plan_transfer", "TruthOutcome", "fly_in_truth", "relative_track", "run", "export_demo",
 ]
 
 TARGET_ALTITUDE_KM: Final[float] = 430.0
@@ -166,20 +166,36 @@ def build(tier: Tier) -> Tuple[Simulation, int, int]:
     return sim, i, k
 
 
-def fly(tier: Tier, burn_rsw_km_s: ArrayFloat,
-        midcourse_rsw_km_s: Optional[ArrayFloat] = None) -> Tuple[ArrayFloat, ArrayFloat]:
+def fly(tier: Tier, burn_rsw_km_s: ArrayFloat, midcourse_rsw_km_s: Optional[ArrayFloat] = None, *,
+        samples: Optional[List[Tuple[float, ArrayFloat, ArrayFloat]]] = None) -> Tuple[ArrayFloat, ArrayFloat]:
     """`(Orion state, lander state)` `(6,)` each at the end of the transfer, Orion having burned
     `burn_rsw_km_s` (RSW of its own state) at the start and, if given, `midcourse_rsw_km_s` at the
-    transfer's half-way time, under `tier`'s physics."""
+    transfer's half-way time, under `tier`'s physics. `samples`, if given, receives `(t, Orion,
+    lander)` after the first burn and after every step."""
     tof, _ = transfer_geometry()
     sim, i, k = build(tier)
     sim.apply_delta_v([i], np.asarray(burn_rsw_km_s, dtype=np.float64))
     n = 2 * int(math.ceil(tof / (2.0 * DT_S)))          # even, so half-way falls between steps
+    if samples is not None:
+        samples.append((0.0, sim.global_states[i].copy(), sim.global_states[k].copy()))
     for step in range(n):
         if step == n // 2 and midcourse_rsw_km_s is not None:
             sim.apply_delta_v([i], np.asarray(midcourse_rsw_km_s, dtype=np.float64))
         sim.step(tof / n)
+        if samples is not None:
+            samples.append(((step + 1) * tof / n, sim.global_states[i].copy(), sim.global_states[k].copy()))
     return sim.global_states[i].copy(), sim.global_states[k].copy()
+
+
+def relative_track(tier: Tier, burn_rsw_km_s: ArrayFloat,
+                   midcourse_rsw_km_s: Optional[ArrayFloat] = None) -> Tuple[ArrayFloat, ArrayFloat]:
+    """`(t s (n,), Orion relative to the lander (n, 3) m)` in the lander's RSW frame (R radial out, S
+    along-track, W orbit normal): the view from the lander, as rendezvous plots are drawn."""
+    samples: List[Tuple[float, ArrayFloat, ArrayFloat]] = []
+    fly(tier, burn_rsw_km_s, midcourse_rsw_km_s, samples=samples)
+    t = np.array([s[0] for s in samples], dtype=np.float64)
+    rel = np.array([_to_rsw(s[2][:3], s[2][3:], s[1][:3] - s[2][:3]) for s in samples], dtype=np.float64) * 1e3
+    return t, rel
 
 
 def _to_rsw(r: ArrayFloat, v: ArrayFloat, dv: ArrayFloat) -> ArrayFloat:
@@ -285,3 +301,50 @@ def fly_in_truth(plan: PlannedTransfer, *, truth: Tier = TRUTH, tol_km: float = 
 def run() -> List[TruthOutcome]:
     """Every tier's plan, flown in the truth."""
     return [fly_in_truth(plan_transfer(t)) for t in TIERS]
+
+
+def export_demo(outcomes: Sequence[TruthOutcome], out_dir: str, *, every_s: float = 30.0) -> Dict[str, int]:
+    """
+    Write `approach.csv` (`t_s, planner, case, r_m, s_m, w_m`: Orion relative to the lander in its RSW
+    frame, every plan flown in the truth `as_planned`, and the two-body plan `corrected` by its half-way
+    burn) and `summary.json` (assumptions, sources, the per-planner table) to `out_dir`.
+    """
+    import csv
+    import json
+    import os
+
+    os.makedirs(out_dir, exist_ok=True)
+    tof, lead = transfer_geometry()
+    with open(os.path.join(out_dir, "approach.csv"), "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["t_s", "planner", "case", "r_m", "s_m", "w_m"])
+        cases: List[Tuple[str, str, TruthOutcome, Optional[ArrayFloat]]] = [
+            (o.plan.tier.model_id, "as_planned", o, None) for o in outcomes]
+        cases += [(o.plan.tier.model_id, "corrected", o, np.asarray(o.midcourse_rsw_m_s) * 1e-3)
+                  for o in outcomes if o.plan.tier.model_id == TIERS[0].model_id]
+        for mid, case, o, mcc in cases:
+            t, rel = relative_track(TRUTH, np.asarray(o.plan.burn1_rsw_m_s) * 1e-3, mcc)
+            stride = max(1, int(round(every_s / float(t[1] - t[0]))))
+            keep = (np.arange(t.size) % stride == 0) | (np.arange(t.size) == t.size - 1)
+            for tt, (r, s, ww) in zip(t[keep], rel[keep]):
+                w.writerow([f"{tt:.1f}", mid, case, f"{r:.3f}", f"{s:.3f}", f"{ww:.3f}"])
+    summary = {
+        "title": "Artemis III: Orion's final rendezvous transfer, planned by models of rising fidelity",
+        "prospective": True,
+        "public_facts": ["~2-week crewed flight in low Earth orbit, NET mid-2027 (NASA, February 2026)",
+                         "Blue Origin's lander test vehicle launches first; Orion docks ~2 days, then with SpaceX Starship ~1 day",
+                         "Orbit ~230 nmi (~430 km), 33 deg inclination (Wikipedia infobox; inclination not traced to a primary source)"],
+        "assumptions": [f"Lander circular at {TARGET_ALTITUDE_KM:g} km, {INCLINATION_DEG:g} deg; Orion coplanar, circular, "
+                        f"{CHASER_ALTITUDE_KM:g} km",
+                        f"Two-impulse transfer of {TRANSFER_ANGLE_DEG:g} deg, {tof:.0f} s; lander {lead:.2f} deg ahead at the start",
+                        f"Ballistic coefficients C_d A/m: Orion {ORION_BALLISTIC:g}, lander {LANDER_BALLISTIC:g} m^2/kg (the lander's is a guess)",
+                        "Truth: Earth point mass + J2 + J3-J6 + 4x4 tesserals (EGM96) + drag (28-band layered atmosphere); RK4 at <= 10 s"],
+        "transfer_s": tof,
+        "planners": [{"id": o.plan.tier.model_id, "label": o.plan.tier.label,
+                      "burn1_m_s": float(np.linalg.norm(o.plan.burn1_rsw_m_s)), "burn1_rsw_m_s": list(o.plan.burn1_rsw_m_s),
+                      "total_m_s": o.plan.total_m_s, "miss_m": o.miss_km * 1e3, "closing_m_s": o.closing_m_s,
+                      "midcourse_m_s": o.midcourse_m_s} for o in outcomes],
+    }
+    with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(summary, indent=2) + "\n")
+    return {n: os.path.getsize(os.path.join(out_dir, n)) for n in ("approach.csv", "summary.json")}

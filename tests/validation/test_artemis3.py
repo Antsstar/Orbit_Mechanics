@@ -88,3 +88,15 @@ def test_step_halving_leaves_the_miss(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(A, "DT_S", A.DT_S / 2.0)
     fine = A.fly_in_truth(A.plan_transfer(A.TIERS[1])).miss_km
     assert abs(coarse - fine) < 1e-5
+
+
+def test_relative_track_ends_on_the_reported_miss() -> None:
+    """The export path (`relative_track`, lander RSW frame) against `fly_in_truth`: the as-planned track
+    ends at the miss distance, the corrected one on the lander, and t = 0 is the start (R ~ -30 km)."""
+    out = A.fly_in_truth(A.plan_transfer(A.TIERS[0]))
+    burn1 = np.asarray(out.plan.burn1_rsw_m_s) * 1e-3
+    t, rel = A.relative_track(A.TRUTH, burn1)
+    assert t[0] == 0.0 and abs(float(np.linalg.norm(rel[-1])) - out.miss_km * 1e3) < 1e-6
+    assert -31_000.0 < rel[0, 0] < -29_000.0
+    _, fixed = A.relative_track(A.TRUTH, burn1, np.asarray(out.midcourse_rsw_m_s) * 1e-3)
+    assert float(np.linalg.norm(fixed[-1])) < 0.01
