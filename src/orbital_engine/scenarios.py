@@ -41,7 +41,7 @@ __all__ = [
     "tle_satellites", "zonal_twins", "zonal_twin_name",
     "geostationary_satellites", "geostationary_radius_km", "geo_satellite_name",
     "sun_synchronous_satellites", "sun_synchronous_inclination_deg", "sso_satellite_name",
-    "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME",
+    "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME", "artemis3_rendezvous", "LANDER_NAME",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -1241,3 +1241,52 @@ def artemis2(
     sim.global_states[row] = state
     sim.local_states[row] = state - sim.global_states[sim.body_sys_map[row]]
     return sim
+
+
+# --------------------------------------------------------------------------------------------------
+# Artemis III (2027, low Earth orbit): Orion and a lander test vehicle before rendezvous
+# --------------------------------------------------------------------------------------------------
+
+#: The rendezvous target: Blue Origin's lander test vehicle, launched first.
+LANDER_NAME = "Blue Moon"
+
+
+def artemis3_rendezvous(
+    session: Session,
+    *,
+    chaser_radius_km: float,
+    target_radius_km: float,
+    inclination_deg: float,
+    target_lead_deg: float,
+    raan_deg: float = 0.0,
+) -> Simulation:
+    """
+    Earth plus two massless **Keplerian** vessels on circular orbits in one plane: `ORION_NAME` at
+    `chaser_radius_km` and argument of latitude 0, and `LANDER_NAME` at `target_radius_km`,
+    `target_lead_deg` ahead. Orbit radii are passed directly (the caller chooses the reference
+    radius for "altitude"). Physics is the caller's: `artemis3.configure` switches both to Cowell and
+    enables the tier's force models, the same way `sweep.apply_config` does.
+    """
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+    earth = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+        p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0,
+    )
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+    for name, radius, phase in ((ORION_NAME, chaser_radius_km, 0.0), (LANDER_NAME, target_radius_km, target_lead_deg)):
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+            p=float(radius), e=0.0, i=math.radians(inclination_deg), raan=math.radians(raan_deg), arg_pe=0.0,
+            theta=math.radians(float(phase)),
+        ))
+    session.commit()
+    return Simulation(body_names=["Earth", ORION_NAME, LANDER_NAME], system_names=["Earth System"],
+                      session=session, max_capacity=8)
