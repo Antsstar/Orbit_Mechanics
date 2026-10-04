@@ -4,3 +4,4 @@ earth,Earth only,"Earth as a point mass and nothing else. Blind to the Moon, so 
 earth_j2,Earth + bulge,Adds Earth's equatorial bulge (J2). It matters near Earth and hardly at all out by the Moon.,#eb6834,#d95926,0
 earth_moon,Earth + Moon,"Adds the Moon's gravity, with the Moon where JPL's ephemeris puts it. The first tier that can fly the flyby.",#1baf7a,#199e70,0
 earth_moon_sun,Earth + Moon + Sun,"Adds the Sun's pull, which differs slightly between Earth and Orion. The engine's best model here.",#eda100,#c98500,0
+no_corrections,No corrections,"The best model again, but flown without NASA's four course-correction burns. How far off Orion would have been if nobody had corrected its course.",#7b4fd6,#9b7bea,0

@@ -14,8 +14,10 @@ t_s,model_id,event,kind,value,unit,note
 361685.000,nasa,outbound_correction_burn_3,burn,3.00,m/s,"Outbound trajectory correction burn 3 (OTC-3): NASA reported 3 m/s; the data show 3.018 m/s delivered, impulsive equivalent at 2026-04-06T03:03:04 UTC (listed start 2026-04-06T03:03:17 UTC)"
 371012.000,nasa,enters_lunar_sphere_of_influence,milestone,,,"Enters the Moon's sphere of influence, 62,800 km from its centre (event list)"
 413858.814,nasa,navigation_data_jump,milestone,12.2,km,"Artefact in NASA's data, not a spacecraft event: the trajectory jumps (closure 12 km) between 04-06T17:34 and 04-06T17:39 TDB where file Orion_OEM_20260408_0223.V0.1 takes over. Every model's error steps here"
+433374.114,no_corrections,closest_lunar_approach,apsis,6511.9,km,"Predicted closest approach: 8,249.3 km from the Moon's centre; the value is the altitude above the 1,737.4 km mean radius"
 433498.664,earth_moon_sun,closest_lunar_approach,apsis,6557.1,km,"Predicted closest approach: 8,294.5 km from the Moon's centre; the value is the altitude above the 1,737.4 km mean radius"
 433548.000,nasa,closest_lunar_approach,apsis,6545.0,km,"Reported by NASA: 4,067 mi (6,545 km) above the lunar surface; time 23:01 UTC from NASA's event list (8,282 km from the Moon's centre). NASA's own trajectory gives 6,544.5 km above the 1,737.4 km mean radius"
+433600.414,no_corrections,max_earth_distance,apsis,413118.8,km,Predicted farthest distance from Earth's centre (within the flown span)
 433750.214,earth_moon_sun,max_earth_distance,apsis,413157.3,km,Predicted farthest distance from Earth's centre (within the flown span)
 433788.000,nasa,max_earth_distance,apsis,413146.2,km,"Reported in NASA's event list: 413,146.2 km from Earth's CENTRE at 23:05 UTC, the reference every model here uses. NASA's public record, 252,756 mi = 406,771 km, is measured from Earth's SURFACE"
 434244.264,earth_moon,closest_lunar_approach,apsis,6764.6,km,"Predicted closest approach: 8,502.0 km from the Moon's centre; the value is the altitude above the 1,737.4 km mean radius"
@@ -31,9 +33,13 @@ t_s,model_id,event,kind,value,unit,note
 706668.000,nasa,return_correction_burn_2,burn,1.62,m/s,"Return trajectory correction burn 2 (RTC-2): NASA reported 1.62 m/s; the data show 1.614 m/s delivered, impulsive equivalent at 2026-04-10T02:53:33 UTC (listed start 2026-04-10T02:53:00 UTC)"
 764268.000,nasa,return_correction_burn_3,burn,1.28,m/s,"Return trajectory correction burn 3 (RTC-3): NASA reported 1.28 m/s; the data show 1.320 m/s delivered, impulsive equivalent at 2026-04-10T18:53:38 UTC (listed start 2026-04-10T18:53:00 UTC)"
 781068.000,nasa,crew_service_module_separation,milestone,,,The crew module separates from the European-built service module (event list)
+781196.889,no_corrections,entry_interface,milestone,121.9,km,"Predicted entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid"
+781196.889,no_corrections,entry_angle,milestone,-14.30,deg,Predicted flight-path angle at entry interface (below horizontal)
 781248.000,nasa,crew_module_raise_burn,burn,3.00,m/s,"Crew module raise burn: NASA reported 3 m/s; the data show 2.785 m/s delivered, impulsive equivalent at 2026-04-10T23:37:17 UTC (listed start 2026-04-10T23:36:00 UTC)"
 782268.000,nasa,entry_interface,milestone,121.9,km,"NASA's event list: entry interface (122 km) at 23:53 UTC. NASA's trajectory data end at 23:52:51 UTC, 172 km up"
+782298.557,nasa,entry_angle,milestone,-5.95,deg,"Flight-path angle at entry interface (below horizontal), from the Earth conic through NASA's last sample, 172 km up; that conic reaches 121.92 km at 23:53:30 UTC (event list: 23:53)"
 782374.728,earth_moon_sun,entry_interface,milestone,121.9,km,"Predicted entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid"
+782374.728,earth_moon_sun,entry_angle,milestone,-8.71,deg,Predicted flight-path angle at entry interface (below horizontal)
 783108.000,nasa,splashdown,milestone,,,Splashdown in the Pacific off Baja California (event list)
 1186497.564,earth_j2,return_perigee,apsis,379.1,km,"Closest return to Earth, which misses the atmosphere (altitude above the 6,378.137 km equatorial radius) - found by flying on past the end of the data"
 1187389.964,earth,return_perigee,apsis,382.0,km,"Closest return to Earth, which misses the atmosphere (altitude above the 6,378.137 km equatorial radius) - found by flying on past the end of the data"

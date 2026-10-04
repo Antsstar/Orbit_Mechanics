@@ -833,7 +833,7 @@ window.eval = function (src) { if (src === "this") return window; return window.
   const EVENT_LABELS = {
     launch: "Launch", apogee_raise_burn: "Apogee raise burn", translunar_injection: "Trans-lunar injection",
     model_seed: "Models start", closest_lunar_approach: "Closest to the Moon", max_earth_distance: "Farthest from Earth",
-    entry_interface: "Entry interface", return_perigee: "Closest return to Earth", splashdown: "Splashdown",
+    entry_interface: "Entry interface", entry_angle: "Entry angle", return_perigee: "Closest return to Earth", splashdown: "Splashdown",
   };
   function eventLabel(key) {
     if (EVENT_LABELS[key]) return EVENT_LABELS[key];
@@ -1015,7 +1015,7 @@ window.eval = function (src) { if (src === "this") return window; return window.
     // chapters + scrubber ticks from the truth's events
     const nasaEv = S.events.filter((e) => e.model === S.truth.id);
     // Chips are for spacecraft events; data artefacts stay on the scrubber only.
-    const chapters = nasaEv.filter((e) => !/correction|^unlisted_|separation|^model_seed$|^navigation_data_jump$/.test(e.key));
+    const chapters = nasaEv.filter((e) => !/correction|^unlisted_|separation|^model_seed$|^navigation_data_jump$|^entry_angle$/.test(e.key));
     $("chapters").innerHTML = chapters.map((e, i) => '<button type="button" class="chip" data-seek="' + Math.max(S.t0, e.t) + '" data-i="' + i + '">' + esc(eventLabel(e.key)) + "</button>").join("");
     const span = S.t1 - S.t0;
     $("ticks").innerHTML = nasaEv.filter((e) => e.t >= S.t0 && e.t <= S.t1).map((e) =>
@@ -1074,6 +1074,12 @@ window.eval = function (src) { if (src === "this") return window; return window.
         facts.push(["Back at Earth", fmtShort(S.epochMs + ei.t * 1000), "entry interface", d]);
       } else if (rp) facts.push(["Back at Earth", "Misses", "closest return " + nf0.format(rp.value) + " km up", chip("bad", "no entry")]);
       else if (tEi) facts.push(["Back at Earth", "Not home", "no return before the data ends", chip("bad", "no entry")]);
+      const ang = modelEvent(m.id, "entry_angle"), tAng = truthEvent("entry_angle");
+      if (ang) {
+        // No sourced corridor width to grade against, so the difference is shown without a verdict.
+        const d = m.isTruth ? refChip("reference") : tAng ? refChip(signed(ang.value - tAng.value, "") + "°") : "";
+        facts.push(["Entry angle", ang.value.toFixed(2) + "°", "below horizontal at entry interface", d]);
+      }
       const bl = S.windows.filter((w) => w.model === m.id && w.kind === "lunar_blackout");
       if (bl.length || tBlack.length) {
         const dur = bl.reduce((s, w) => s + (w.b - w.a), 0), tdur = tBlack.reduce((s, w) => s + (w.b - w.a), 0);
