@@ -187,7 +187,8 @@ trajectory, since those are drawn in the same rotated frame as the camera.
 
 ## Size budget
 
-`index.html` is 84 KB. Bundled files: 1.2 MB of textures in `assets/` (Earth, Moon, star map) and
-0.43 MB in `cesium/Assets/`. CesiumJS 1.145.0 and Plotly 2.35.2 load from `cdn.jsdelivr.net` and do
+`index.html` is 96 KB. Bundled files: 3.9 MB of textures in `assets/` (Earth day 1.2 MB, Earth night
+0.5 MB, Moon 1.5 MB, star map 0.9 MB) and 0.43 MB in `cesium/Assets/`; the whole folder is 8.7 MB with
+the current data. CesiumJS 1.145.0 and Plotly 2.35.2 load from `cdn.jsdelivr.net` and do
 not count. Keep `data/` under 8 MB so the published artifact stays well inside its 16 MB limit; the
 sample is 2.66 MB.

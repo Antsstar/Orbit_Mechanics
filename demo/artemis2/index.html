@@ -626,7 +626,7 @@ button, select, input { font: inherit; color: inherit; }
           </div>
         </div>
         <div class="stamp" id="stamp3d" hidden>Synthetic</div>
-        <div class="credits"><span>Earth: Natural Earth II</span><span>Stars: Tycho-2</span><span id="credits"></span></div>
+        <div class="credits"><span>Earth: NASA Blue Marble, Black Marble 2016</span><span>Moon: NASA LRO / SVS</span><span>Stars: Tycho-2</span><span id="credits"></span></div>
         <div class="tooltip" id="tip" hidden></div>
         <div class="fallback" id="fallback" hidden><p id="fallbackText"></p></div>
       </div>
@@ -713,7 +713,7 @@ button, select, input { font: inherit; color: inherit; }
     <h2 id="provHead">Data and provenance</h2>
     <dl class="prov" id="prov"></dl>
     <ul id="provNotes"></ul>
-    <p class="note">3D view: CesiumJS with Natural Earth II imagery and the Tycho-2 star map, both shipped in the CesiumJS package. Charts: Plotly. The data contract is <span class="num">demo/artemis2/SCHEMA.md</span>.</p>
+    <p class="note">3D view: CesiumJS with NASA imagery (Blue Marble Next Generation and Black Marble 2016 for Earth, the LRO colour map from NASA's CGI Moon Kit for the Moon, all public domain) lit by the Sun's computed direction, and the Tycho-2 star map shipped in the CesiumJS package. Charts: Plotly. The data contract is <span class="num">demo/artemis2/SCHEMA.md</span>.</p>
   </footer>
 </div>
 
@@ -1507,8 +1507,10 @@ window.eval = function (src) { if (src === "this") return window; return window.
         chunks.push({ s, e, t0: tr.t[s], t1: tr.t[e], pl, lit: false });
       }
       const live = tracks.add({ positions: [toCart(tr, 0), toCart(tr, 0)], width, material: C.Material.fromType("Color", { color: bright.clone() }), show: false });
+      // soft pulsing halo behind the truth marker (animated in preUpdate)
+      const halo = m.isTruth ? points.add({ position: toCart(tr, 0), pixelSize: 26, color: col.withAlpha(0.2), outlineColor: col.withAlpha(0.35), outlineWidth: 3, disableDepthTestDistance: 0 }) : null;
       const pt = points.add({ position: toCart(tr, 0), pixelSize: m.isTruth ? 11 : 8, color: col, outlineColor: C.Color.BLACK, outlineWidth: 2, id: { kind: "marker", model: m.id }, disableDepthTestDistance: 0 });
-      models3d[m.id] = { m, tr, chunks, live, pt, dim, bright, cur: -2, visible: true };
+      models3d[m.id] = { m, tr, chunks, live, pt, halo, dim, bright, cur: -2, visible: true };
     }
     // Orion label rides on the truth marker
     const orionLabel = labels.add({ text: "Orion", font: "600 13px 'Barlow Semi Condensed', sans-serif", fillColor: C.Color.WHITE, showBackground: true, backgroundColor: new C.Color(0, 0, 0, 0.55), pixelOffset: new C.Cartesian2(10, -12), horizontalOrigin: C.HorizontalOrigin.LEFT, disableDepthTestDistance: Number.POSITIVE_INFINITY });
@@ -1517,9 +1519,30 @@ window.eval = function (src) { if (src === "this") return window; return window.
 
     // Earth: textured WGS84 ellipsoid in the Earth-fixed frame, so it turns under the inertial camera
     const eR = C.Ellipsoid.WGS84.radii;
+    // Both bodies are lit by one uniform, the Sun's direction in the Earth-fixed world frame (updated
+    // each frame in preUpdate). The shaders compute the whole colour as emission, so Cesium's own light is off.
+    const sunDir = new C.Cartesian3(1, 0, 0), sunI = new C.Cartesian3();
+    const earthMaterial = new C.Material({ translucent: false, fabric: { type: "EarthDayNight",
+      uniforms: { dayImage: "assets/earth.jpg", nightImage: "assets/earth_night.jpg", sunDirection: sunDir },
+      source: `czm_material czm_getMaterial(czm_materialInput mi) {
+        czm_material m = czm_getDefaultMaterial(mi);
+        vec3 n = normalize(mi.normalEC);
+        vec3 s = normalize(czm_viewRotation * sunDirection);
+        float d = dot(n, s);
+        vec3 day = texture(dayImage, mi.st).rgb, night = texture(nightImage, mi.st).rgb;
+        float lit = smoothstep(-0.10, 0.22, d);
+        vec3 c = day * lit * (0.5 + 0.6 * clamp(d, 0.0, 1.0));
+        c += night * 1.7 * (1.0 - smoothstep(-0.16, 0.06, d)) + day * 0.025 * (1.0 - lit);
+        c += vec3(1.0, 0.45, 0.2) * 0.22 * exp(-pow(d / 0.07, 2.0)) * length(day);
+        float rim = pow(1.0 - clamp(dot(n, normalize(mi.positionToEyeEC)), 0.0, 1.0), 3.0);
+        c += vec3(0.28, 0.52, 1.0) * rim * smoothstep(-0.25, 0.35, d) * 0.9;
+        m.diffuse = vec3(0.0); m.specular = 0.0; m.emission = c; m.alpha = 1.0;
+        return m;
+      }` } });
+    const sunMats = [earthMaterial];
     scene.primitives.add(new C.Primitive({
       geometryInstances: new C.GeometryInstance({ geometry: new C.EllipsoidGeometry({ radii: eR, vertexFormat: C.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat, stackPartitions: 96, slicePartitions: 96 }) }),
-      appearance: new C.MaterialAppearance({ material: C.Material.fromType("Image", { image: "assets/earth.jpg" }), faceForward: true, closed: true }),
+      appearance: new C.MaterialAppearance({ material: earthMaterial, flat: true, faceForward: true, closed: true }),
       asynchronous: false,
     }));
 
@@ -1531,7 +1554,16 @@ window.eval = function (src) { if (src === "this") return window; return window.
       tracks.add({ positions: mp, width: 1, material: C.Material.fromType("Color", { color: new C.Color(0.75, 0.8, 0.88, 0.22) }) });
       moonPrim = scene.primitives.add(new C.Primitive({
         geometryInstances: new C.GeometryInstance({ geometry: new C.EllipsoidGeometry({ radii: new C.Cartesian3(R_MOON_KM * 1000, R_MOON_KM * 1000, R_MOON_KM * 1000), vertexFormat: C.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat, stackPartitions: 48, slicePartitions: 48 }) }),
-        appearance: new C.MaterialAppearance({ material: C.Material.fromType("Image", { image: "assets/moon.jpg" }), faceForward: true, closed: true }),
+        appearance: new C.MaterialAppearance({ flat: true, faceForward: true, closed: true, material: sunMats[sunMats.push(new C.Material({ translucent: false, fabric: { type: "MoonPhase",
+          uniforms: { image: "assets/moon.jpg", sunDirection: sunDir },
+          source: `czm_material czm_getMaterial(czm_materialInput mi) {
+            czm_material m = czm_getDefaultMaterial(mi);
+            float d = dot(normalize(mi.normalEC), normalize(czm_viewRotation * sunDirection));
+            float lit = pow(smoothstep(-0.04, 0.5, d), 0.7);
+            m.diffuse = vec3(0.0); m.specular = 0.0; m.alpha = 1.0;
+            m.emission = texture(image, mi.st).rgb * (0.035 + 1.1 * lit);   // small floor: earthshine
+            return m;
+          }` } })) - 1] }),
         asynchronous: false,
       }));
     }
@@ -1571,18 +1603,36 @@ window.eval = function (src) { if (src === "this") return window; return window.
     function viewDir(k) { return C.Cartesian3.normalize(C.Cartesian3.add(normal, C.Cartesian3.multiplyByScalar(tilt, k, new C.Cartesian3()), new C.Cartesian3()), new C.Cartesian3()); }
     const center = new C.Cartesian3(), centerFixed = new C.Cartesian3(), tmp = {};
     function centerFor(t) {
-      if (camMode === "orion" && interpOrion(truthTr, Math.min(Math.max(t, truthTr.t[0]), truthTr.t[truthTr.t.length - 1]), tmp)) return C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
-      if (camMode === "moon" && S.moon && interpOrion(S.moon, Math.min(Math.max(t, S.moon.t[0]), S.moon.t[S.moon.t.length - 1]), tmp)) return C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
-      if (camMode === "mission") return C.Cartesian3.clone(midMission, center);
-      if (camMode === "earth") return C.Cartesian3.clone(C.Cartesian3.ZERO, center);
-      return C.Cartesian3.clone(C.Cartesian3.ZERO, center);
+      if (camMode === "orion" && interpOrion(truthTr, Math.min(Math.max(t, truthTr.t[0]), truthTr.t[truthTr.t.length - 1]), tmp)) C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
+      else if (camMode === "moon" && S.moon && interpOrion(S.moon, Math.min(Math.max(t, S.moon.t[0]), S.moon.t[S.moon.t.length - 1]), tmp)) C.Cartesian3.fromElements(tmp.x, tmp.y, tmp.z, center);
+      else if (camMode === "mission") C.Cartesian3.clone(midMission, center);
+      else C.Cartesian3.clone(C.Cartesian3.ZERO, center);
+      if (trans) C.Cartesian3.lerp(trans.c0, center, trans.k, center);   // glide from the old focus to the new one
+      return center;
     }
     function transformFor(time) {
       const m3 = frameMatrix(time);
       C.Matrix3.multiplyByVector(m3, centerFor(clock.t), centerFixed);
       return C.Matrix4.fromRotationTranslation(m3, centerFixed, new C.Matrix4());
     }
-    function setCam(mode) {
+    // Camera preset change: ease the focus point and the offset (log range, blended direction) over ~1 s.
+    let trans = null;
+    const smooth = (x) => x * x * (3 - 2 * x);
+    function stepTrans() {
+      if (!trans) return null;
+      const x = Math.min(1, (performance.now() - trans.t0) / 1000);
+      trans.k = smooth(x);
+      const dir = C.Cartesian3.normalize(C.Cartesian3.lerp(trans.d0, trans.d1, trans.k, new C.Cartesian3()), new C.Cartesian3());
+      const rng = Math.exp(Math.log(trans.r0) + (Math.log(trans.r1) - Math.log(trans.r0)) * trans.k);
+      const off = isFinite(dir.x) ? C.Cartesian3.multiplyByScalar(dir, rng, dir) : C.Cartesian3.multiplyByScalar(trans.d1, trans.r1, dir);
+      if (x >= 1) { trans = null; }
+      return off;
+    }
+    function setCam(mode, animate) {
+      const oldOff = C.Cartesian3.clone(camera.position);
+      const animated = animate !== false && C.Cartesian3.magnitude(oldOff) > 1e3;
+      const c0 = C.Cartesian3.clone(center);
+      trans = null;
       camMode = mode;
       ["Mission", "Orion", "Moon", "Earth"].forEach((n) => $("cam" + n).setAttribute("aria-pressed", String(mode === n.toLowerCase())));
       const el = $("globe"), aspect = Math.max(0.3, el.clientWidth / Math.max(1, el.clientHeight));
@@ -1592,7 +1642,11 @@ window.eval = function (src) { if (src === "this") return window; return window.
       const range = span / (2 * Math.tan(halfNarrow));
       ssc.minimumZoomDistance = mode === "mission" ? 2e7 : mode === "earth" ? 9e6 : 4e6;
       const off = C.Cartesian3.multiplyByScalar(viewDir(mode === "mission" ? 0.45 : 0.9), range, new C.Cartesian3());
-      camera.lookAtTransform(transformFor(clock.cz.currentTime), off);
+      if (animated) {
+        trans = { t0: performance.now(), k: 0, c0, r0: C.Cartesian3.magnitude(oldOff), r1: range,
+          d0: C.Cartesian3.normalize(oldOff, new C.Cartesian3()), d1: C.Cartesian3.normalize(off, new C.Cartesian3()) };
+        camera.lookAtTransform(transformFor(clock.cz.currentTime), oldOff);
+      } else camera.lookAtTransform(transformFor(clock.cz.currentTime), off);
     }
     $("camMission").addEventListener("click", () => setCam("mission"));
     $("camOrion").addEventListener("click", () => setCam("orion"));
@@ -1608,11 +1662,21 @@ window.eval = function (src) { if (src === "this") return window; return window.
       C.Matrix4.clone(M4, tracks.modelMatrix);
       C.Matrix4.clone(M4, points.modelMatrix);
       C.Matrix4.clone(M4, labels.modelMatrix);
+      // Sun direction: Earth-inertial (J2000) into the Earth-fixed world frame, with the same matrix as the tracks
+      C.Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame(time, sunI);
+      C.Matrix3.multiplyByVector(m3, sunI, sunDir);
+      C.Cartesian3.normalize(sunDir, sunDir);
+      for (const mat of sunMats) mat.uniforms.sunDirection = sunDir;
       for (const id in models3d) {
         const md = models3d[id];
         const p = interpOrion(md.tr, t, pos);
         md.pt.show = md.visible && !!p;
         if (p) md.pt.position = new C.Cartesian3(p.x, p.y, p.z);
+        if (md.halo) {
+          md.halo.show = md.pt.show;
+          md.halo.position = md.pt.position;
+          md.halo.pixelSize = 24 + 5 * Math.sin(performance.now() / 450);
+        }
         if (md.m.isTruth) { orionLabel.show = !!p && md.visible; if (p) orionLabel.position = md.pt.position; }
         // track colouring: flown chunks bright, future chunks dim, current chunk drawn live
         let cur = -1;
@@ -1650,7 +1714,7 @@ window.eval = function (src) { if (src === "this") return window; return window.
     });
     scene.postUpdate.addEventListener((_scene, time) => {
       if (scene.mode !== C.SceneMode.SCENE3D) return;
-      const offset = C.Cartesian3.clone(camera.position);
+      const offset = stepTrans() || C.Cartesian3.clone(camera.position);
       camera.lookAtTransform(transformFor(time), offset);
     });
 
@@ -1682,8 +1746,9 @@ window.eval = function (src) { if (src === "this") return window; return window.
     handler.setInputAction((mv) => showTip(mv.endPosition), C.ScreenSpaceEventType.MOUSE_MOVE);
     handler.setInputAction((ev) => showTip(ev.position), C.ScreenSpaceEventType.LEFT_CLICK);
 
-    setCam("mission");
+    setCam("mission", false);
     return {
+      setCam,
       setVisible(mid, on) {
         const md = models3d[mid];
         if (!md) return;
@@ -1778,11 +1843,14 @@ window.eval = function (src) { if (src === "this") return window; return window.
       if (res.ok) S.targeting = parseCSV(await res.text()).filter((r) => S.byId[r.model_id]);
     } catch (e) { S.targeting = null; }
     const cla = truthEvent("closest_lunar_approach");
-    clock.init(cla ? Math.min(S.t1, Math.max(S.t0, cla.t - 3 * 3600)) : S.t0);
+    // Optional deep link: ?t=<seconds from the data epoch>&cam=mission|orion|moon|earth (also used for screenshots)
+    const q = new URLSearchParams(location.search), qt = parseFloat(q.get("t"));
+    clock.init(isFinite(qt) ? Math.min(S.t1, Math.max(S.t0, qt)) : cla ? Math.min(S.t1, Math.max(S.t0, cla.t - 3 * 3600)) : S.t0);
     wireTransport();
     if (window.Plotly) { buildChartDom(); renderCharts(); renderStrip(); renderPlan(); }
     else { $("charts").innerHTML = '<p class="loaderr">Plotly did not load from the CDN, so the charts are unavailable.</p>'; }
     try { view3d = init3D(); } catch (e) { $("fallback").hidden = false; $("fallbackText").textContent = "The 3D view failed to start: " + e.message; console.error(e); }
+    if (view3d && ["mission", "orion", "moon", "earth"].includes(q.get("cam"))) view3d.setCam(q.get("cam"), false);
     refresh(true);
     requestAnimationFrame(loop);
     themeMQ.addEventListener("change", onThemeChange);

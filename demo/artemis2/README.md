@@ -54,7 +54,7 @@ To get the synthetic fixture back instead (NumPy only, about a minute):
 | `SCHEMA.md` | **The data contract.** The engine side writes exactly this |
 | `data/` | `meta.json`, `models.csv`, `trajectory.csv`, `metrics.csv`, `events.csv`, `windows.csv` |
 | `make_sample_data.py` | Writes the synthetic layout fixture into `data/` (overwrites the real data) |
-| `assets/` | Earth (Natural Earth II, stitched to one 2048x1024 image), Moon and Tycho-2 star-map textures, all from the CesiumJS package |
+| `assets/` | `earth.jpg`, `earth_night.jpg`, `moon.jpg` (NASA imagery, 4096x2048, credits below) and the Tycho-2 star map (`skybox/`, from the CesiumJS package) |
 | `cesium/Assets/` | CesiumJS's IAU 2006 Earth-orientation tables for 2026, and `approximateTerrainHeights.json` |
 
 ## How the engine side plugs in
@@ -87,6 +87,33 @@ the previous frame. This is the pattern of Cesium's ICRF Sandcastle example. The
 therefore share a frame and stay still, and Earth is the only thing that turns. A camera tied to the
 rotating Earth would smear the translunar track into a spiral. The frame label on the view says
 which rotation is in use.
+
+**Lighting.** Each frame, `Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame` gives
+the Sun's direction in the inertial frame, and the same ICRF-to-fixed rotation as above turns it into
+the Earth-fixed world frame, which is the frame of the Earth ellipsoid and (through its model matrix)
+of the Moon. Both bodies use a custom `Cesium.Material` with a GLSL source that does its own
+lighting as emission: Earth blends the day map and the night-lights map across a soft terminator,
+with a thin twilight tint and a bluish limb; the Moon shows its phase from the same direction, with a
+small floor so the dark side is faintly visible. At the closest approach (6 Apr 2026 23:00 UTC) the
+Moon is 126 deg from the Sun, a waning gibbous about 79 % lit, four days after the 2 April full Moon.
+Orion's marker has a pulsing halo. Switching camera presets eases the focus point and the camera
+offset (log range, blended direction) over one second.
+
+**Deep link.** `index.html?t=<seconds from the data epoch>&cam=mission|orion|moon|earth` starts the
+replay at that time and camera, without a transition. For example `?cam=moon&t=433548` is the closest
+approach seen from the Moon preset. Useful for screenshots, since headless browsers cannot click.
+
+**Image credits** (all NASA, public domain; resized to 4096x2048 JPEG, quality 85):
+
+- Earth day: Blue Marble Next Generation with topography and bathymetry, December 2004, Visible Earth
+  <https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73909/world.topo.bathy.200412.3x5400x2700.jpg>
+- Earth night: Black Marble 2016 (Suomi NPP), Earth Observatory, 3 km colour map
+  <https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144898/BlackMarble_2016_3km.jpg>
+- Moon: LRO colour map (`lroc_color_poles_4k.tif`), NASA SVS "CGI Moon Kit" (svs.gsfc.nasa.gov/4720)
+  <https://svs.gsfc.nasa.gov/vis/a000000/a004700/a004720/lroc_color_poles_4k.tif>, converted to JPEG with PIL
+
+All three are equirectangular and centred on 0 deg longitude, the convention of Cesium's ellipsoid
+texture mapping.
 
 **Clock sync.** There is one clock, a `Cesium.Clock` (clamped to the data span, system-clock
 multiplier). The CesiumWidget ticks it inside its render loop. A separate `requestAnimationFrame` loop
@@ -122,7 +149,7 @@ workers and `connect-src 'self'`:
 - `CESIUM_BASE_URL` is local (`cesium/`). Cesium then uses the worker code inlined in `Cesium.js`
   instead of cross-origin module workers, and fetches the frame tables same-origin. There is no tiled
   globe, because it needs workers to mesh tiles. Earth is a textured ellipsoid drawn like the Moon,
-  with sunlight shading and without the atmosphere glow.
+  with sunlight shading (see Lighting) and no atmosphere glow beyond the limb tint in its shader.
 
 Under that CSP the console still shows five `WebAssembly.instantiate` rejections. They come from
 decoders inside Cesium (for example meshopt) that this page never uses, and they are harmless.
