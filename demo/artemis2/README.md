@@ -9,11 +9,11 @@ OrbitalEngine model tiers side by side, each scored against NASA's navigation da
 - **Mission clock**: play, pause, speed and a timeline scrubber with event ticks, jump-to buttons,
   and a live table giving each model's distance from NASA, Earth and the Moon.
 - **Scorecard**: each model's closest lunar approach, farthest distance, return to Earth, lunar
-  blackout and final error, with the difference from NASA as a status chip.
+  blackout, total solar eclipse by the Moon and final error, with the difference from NASA as a status chip.
 - **Charts** (Plotly): one per metric, one line per model, a cursor tied to the clock, click to seek,
   drag to zoom (all charts zoom together), and the off-scale rule described below.
-- **Contact strip**: Deep Space Network windows per station and loss of signal behind the Moon, one
-  bar per model.
+- **Contact strip**: Deep Space Network windows per station, loss of signal behind the Moon, and solar
+  eclipses (the Moon or Earth hiding the Sun from Orion, total and partial), one bar per model.
 
 **The data in `data/` is real**: NASA's navigation trajectory from JPL Horizons, and four OrbitalEngine
 model tiers flown from it (`orbital_engine.artemis2_replay`, written by `scripts/build_artemis2_demo.py`).

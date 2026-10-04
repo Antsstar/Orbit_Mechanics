@@ -28,6 +28,10 @@ nasa,dsn_contact,Canberra,563891.1,610837.4
 nasa,dsn_contact,Canberra,650782.9,698682.0
 nasa,dsn_contact,Canberra,739255.4,781631.8
 nasa,lunar_blackout,,432391.7,434783.5
+nasa,solar_eclipse_partial,Earth,92097.0,96200.8
+nasa,solar_eclipse,Earth,92134.3,96111.1
+nasa,solar_eclipse_partial,Moon,439052.8,442549.4
+nasa,solar_eclipse,Moon,439155.2,442421.1
 earth,dsn_contact,Goldstone,115315.6,142409.8
 earth,dsn_contact,Goldstone,205450.4,230624.7
 earth,dsn_contact,Goldstone,292874.7,317685.2
@@ -55,6 +59,8 @@ earth,dsn_contact,Canberra,564972.6,611464.5
 earth,dsn_contact,Canberra,651575.9,698125.6
 earth,dsn_contact,Canberra,738197.6,784792.1
 earth,lunar_blackout,,451497.5,455095.5
+earth,solar_eclipse_partial,Earth,95018.8,96200.8
+earth,solar_eclipse,Earth,95018.8,96111.1
 earth_j2,dsn_contact,Goldstone,115315.7,142410.1
 earth_j2,dsn_contact,Goldstone,205450.7,230625.3
 earth_j2,dsn_contact,Goldstone,292875.2,317686.1
@@ -82,6 +88,8 @@ earth_j2,dsn_contact,Canberra,564974.5,611466.1
 earth_j2,dsn_contact,Canberra,651578.3,698127.7
 earth_j2,dsn_contact,Canberra,738200.7,784794.9
 earth_j2,lunar_blackout,,451542.5,455127.2
+earth_j2,solar_eclipse_partial,Earth,95018.8,96200.8
+earth_j2,solar_eclipse,Earth,95018.8,96111.1
 earth_moon,dsn_contact,Goldstone,115315.4,142409.3
 earth_moon,dsn_contact,Goldstone,205438.8,230612.8
 earth_moon,dsn_contact,Goldstone,292821.7,317632.8
@@ -108,6 +116,10 @@ earth_moon,dsn_contact,Canberra,563936.0,610851.9
 earth_moon,dsn_contact,Canberra,650851.8,698663.6
 earth_moon,dsn_contact,Canberra,739282.7,782558.8
 earth_moon,lunar_blackout,,433114.5,435541.9
+earth_moon,solar_eclipse_partial,Earth,95018.8,96200.8
+earth_moon,solar_eclipse,Earth,95018.8,96111.1
+earth_moon,solar_eclipse_partial,Moon,440098.0,443635.3
+earth_moon,solar_eclipse,Moon,440206.6,443500.1
 earth_moon_sun,dsn_contact,Goldstone,115315.2,142409.0
 earth_moon_sun,dsn_contact,Goldstone,205435.3,230610.0
 earth_moon_sun,dsn_contact,Goldstone,292810.9,317624.7
@@ -134,3 +146,7 @@ earth_moon_sun,dsn_contact,Canberra,563885.1,610829.2
 earth_moon_sun,dsn_contact,Canberra,650769.9,698660.0
 earth_moon_sun,dsn_contact,Canberra,739214.1,781773.0
 earth_moon_sun,lunar_blackout,,432360.3,434751.4
+earth_moon_sun,solar_eclipse_partial,Earth,95018.8,96200.8
+earth_moon_sun,solar_eclipse,Earth,95018.8,96111.1
+earth_moon_sun,solar_eclipse_partial,Moon,439036.5,442536.4
+earth_moon_sun,solar_eclipse,Moon,439139.3,442407.7

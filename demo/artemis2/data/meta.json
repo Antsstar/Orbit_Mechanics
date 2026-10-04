@@ -7,8 +7,8 @@
   "frame": "Earth-centred ICRF (J2000 axes), km",
   "source": "JPL Horizons API 1.2, retrieved 2026-09-27T07:04:29Z: Orion -1024 {source: Artemis_II_merged}, object data revised Apr 20, 2026; Moon 301 and Sun 10 {source: DE441}. Models: OrbitalEngine artemis2_replay (Cowell, RK4 at 60 s, sub-stepped to 0.01 rad of turning)",
   "truth_source": "NASA/JSC Orion navigation (14 concatenated OEM/OD files) via JPL Horizons",
-  "generated_utc": "2026-09-27T21:41:16Z",
-  "engine_commit": "f4dbc68",
+  "generated_utc": "2026-10-04T02:36:52Z",
+  "engine_commit": "4543058",
   "engine_version": "1.5.0",
   "notes": [
     "Every model starts from NASA's exact position and velocity at 2026-04-03 00:58:51 UTC (01:00 TDB), an hour after translunar injection, and receives the same impulsive burns NASA flew afterwards, each at its measured epoch and in its measured local orbital (RSW) frame. The burns were detected in NASA's trajectory itself.",
@@ -17,6 +17,7 @@
     "arc_error_km: each model restarted from NASA's state after every burn and every data jump, and flown to the next - the model's own error over each coast, free of the data's jumps.",
     "Deep Space Network contact: elevation above 10 deg at Goldstone DSS-14, Madrid DSS-63 and Canberra DSS-43 (WGS-84 coordinates from DSN document 810-005, module 301) and the Moon not in the way. 10 deg is the DSN 70-m transmit limit (10.2-10.4 deg); with the ~6 deg mechanical limit most of the daily gaps close. Earth rotation from JPL Horizons' own Earth orientation (true pole, fitted rotation).",
     "Lunar blackout: the Moon blocks the line from Orion to Earth's centre (geometry, no signal margins). NASA reported loss of signal from 22:44 to 23:24 UTC, about 40 minutes (NASA Artemis II blog, flight day 6).",
+    "Solar eclipse: the Moon (mean radius) or Earth (equatorial radius, no atmosphere) covers all of the Sun's disc seen from Orion ('total'), or part of it ('partial', which includes the total phase); DE441 Sun and Moon. Earth's eclipse on 3 April began before the models start, so their bars begin at the seed.",
     "Closest approach is altitude above the Moon's mean radius (1,737.4 km). Farthest distance is from Earth's centre for every row, NASA's included (event list, 413,146.2 km); NASA's public 252,756 mi (406,771 km) is from the surface. Entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid.",
     "Models with the Moon and Sun are flown until JPL's tables end (00:00 TDB 11 April); the Earth-only models to 6 h past the data, and further, unshown, to find where they come back to Earth.",
     "Times are UTC; the trajectories are on TDB, 69.186 s ahead. Earth's J2 is taken about the ICRF z axis, 0.147 deg from the true pole (<= 0.7 km on the first day, metres after)."

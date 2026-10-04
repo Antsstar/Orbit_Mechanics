@@ -559,7 +559,7 @@ button, select, input { font: inherit; color: inherit; }
 
 /* visibility */
 .strip { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 12px; }
-.strip .plot { height: 300px; }
+.strip .plot { height: 420px; }
 
 /* footer */
 .foot {
@@ -685,8 +685,8 @@ button, select, input { font: inherit; color: inherit; }
 
   <section aria-labelledby="visHead">
     <div class="section-head">
-      <h2 id="visHead">Who can hear Orion</h2>
-      <p>Contact windows with the three Deep Space Network complexes, and the stretch where the Moon blocks the line of sight to Earth. One bar per model; a model that places Orion wrongly predicts the wrong windows.</p>
+      <h2 id="visHead">Who can hear Orion, and when it is dark</h2>
+      <p>Contact windows with the three Deep Space Network complexes, the stretch where the Moon blocks the line of sight to Earth, and the eclipses: the Moon or Earth hiding the Sun from Orion (solid: the whole Sun; faint: part of it). One bar per model; a model that places Orion wrongly predicts the wrong windows.</p>
     </div>
     <div class="strip">
       <div class="plot-wrap"><div class="plot" id="stripPlot"></div><div class="cursor" id="stripCursor"></div></div>
@@ -1052,6 +1052,7 @@ window.eval = function (src) { if (src === "this") return window; return window.
     const tCla = truthEvent("closest_lunar_approach"), tMed = truthEvent("max_earth_distance");
     const tEi = truthEvent("entry_interface");
     const tBlack = S.windows.filter((w) => w.model === T && w.kind === "lunar_blackout");
+    const tEcl = S.windows.filter((w) => w.model === T && w.kind === "solar_eclipse" && w.station === "Moon");
     const err = S.metrics.position_error_km;
     const html = S.models.map((m) => {
       const facts = [];
@@ -1081,6 +1082,15 @@ window.eval = function (src) { if (src === "this") return window; return window.
         else if (!bl.length) d = chip("bad", "none predicted");
         else if (tBlack.length) d = chip(worst(sevT(bl[0].a - tBlack[0].a), sevT(dur - tdur)), "starts " + signedDur(bl[0].a - tBlack[0].a) + ", lasts " + signedDur(dur - tdur));
         facts.push(["Behind the Moon", bl.length ? fmtDur(dur) : "No blackout", bl.length ? "from " + fmtShort(S.epochMs + bl[0].a * 1000) : "", d]);
+      }
+      const ec = S.windows.filter((w) => w.model === m.id && w.kind === "solar_eclipse" && w.station === "Moon");
+      if (ec.length || tEcl.length) {
+        const dur = ec.reduce((s, w) => s + (w.b - w.a), 0), tdur = tEcl.reduce((s, w) => s + (w.b - w.a), 0);
+        let d = "";
+        if (m.isTruth) d = refChip("reference");
+        else if (!ec.length) d = chip("bad", "none predicted");
+        else if (tEcl.length) d = chip(worst(sevT(ec[0].a - tEcl[0].a), sevT(dur - tdur)), "starts " + signedDur(ec[0].a - tEcl[0].a) + ", lasts " + signedDur(dur - tdur));
+        facts.push(["Sun hidden by the Moon", ec.length ? fmtDur(dur) : "No eclipse", ec.length ? "total, from " + fmtShort(S.epochMs + ec[0].a * 1000) : "", d]);
       }
       if (!m.isTruth && err && err.series[m.id]) {
         const s = err.series[m.id], v = s.v[s.v.length - 1];
@@ -1335,25 +1345,37 @@ window.eval = function (src) { if (src === "this") return window; return window.
   // ---------------------------------------------------------------- visibility strip
   function renderStrip() {
     const dark = isDark(), c = axisColours();
-    const stations = [];
-    S.windows.forEach((w) => { if (w.kind !== "lunar_blackout" && w.station && !stations.includes(w.station)) stations.push(w.station); });
     const BLACK = "Behind the Moon";
-    const cats = stations.concat(S.windows.some((w) => w.kind === "lunar_blackout") ? [BLACK] : []);
+    const isEcl = (w) => w.kind === "solar_eclipse" || w.kind === "solar_eclipse_partial";
+    const rowOf = (w) => (w.kind === "lunar_blackout" ? BLACK : isEcl(w) ? "Sun hidden (" + w.station + ")" : w.station);
+    const stations = [], eclRows = [];
+    S.windows.forEach((w) => {
+      const r = rowOf(w);
+      if (!r) return;
+      if (isEcl(w)) { if (!eclRows.includes(r)) eclRows.push(r); }
+      else if (w.kind !== "lunar_blackout" && !stations.includes(r)) stations.push(r);
+    });
+    eclRows.sort((a, b) => (a.includes("Moon") ? -1 : 0) - (b.includes("Moon") ? -1 : 0));
+    const cats = stations.concat(S.windows.some((w) => w.kind === "lunar_blackout") ? [BLACK] : [], eclRows);
     const traces = [];
     for (const m of S.models) {
       if (!S.visible[m.id]) continue;
-      const ws = S.windows.filter((w) => w.model === m.id);
-      if (!ws.length) continue;
-      traces.push({
-        type: "bar", orientation: "h", name: m.label,
-        y: ws.map((w) => (w.kind === "lunar_blackout" ? BLACK : w.station)),
-        base: ws.map((w) => dateStr(w.a)), x: ws.map((w) => (w.b - w.a) * 1000),
-        customdata: ws.map((w) => [fmtShort(S.epochMs + w.a * 1000), fmtShort(S.epochMs + w.b * 1000), fmtDur(w.b - w.a)]),
-        marker: { color: colourOf(m, dark), line: { width: 0 } },
-        hovertemplate: "<b>" + esc(m.label) + "</b><br>%{customdata[0]} to %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
-      });
+      const all = S.windows.filter((w) => w.model === m.id);
+      // Partial eclipses sit faint under the total ones, in the same slot (shared offsetgroup).
+      for (const [ws, partial] of [[all.filter((w) => w.kind === "solar_eclipse_partial"), true], [all.filter((w) => w.kind !== "solar_eclipse_partial"), false]]) {
+        if (!ws.length) continue;
+        traces.push({
+          type: "bar", orientation: "h", name: m.label, offsetgroup: m.id,
+          y: ws.map(rowOf),
+          base: ws.map((w) => dateStr(w.a)), x: ws.map((w) => (w.b - w.a) * 1000),
+          customdata: ws.map((w) => [fmtShort(S.epochMs + w.a * 1000), fmtShort(S.epochMs + w.b * 1000), fmtDur(w.b - w.a),
+            w.kind === "solar_eclipse" ? "Total eclipse<br>" : w.kind === "solar_eclipse_partial" ? "Partial eclipse (includes the total)<br>" : ""]),
+          marker: { color: colourOf(m, dark), opacity: partial ? 0.35 : 1, line: { width: 0 } },
+          hovertemplate: "<b>" + esc(m.label) + "</b><br>%{customdata[3]}%{customdata[0]} to %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
+        });
+      }
     }
-    const layout = baseLayout(c, 300);
+    const layout = baseLayout(c, 420);
     layout.barmode = "group"; layout.bargap = 0.28; layout.bargroupgap = 0.12;
     layout.hovermode = "closest";
     layout.yaxis = { type: "category", categoryorder: "array", categoryarray: cats, autorange: "reversed", gridcolor: "rgba(0,0,0,0)", tickfont: { family: "'Barlow Semi Condensed', sans-serif", size: 13, color: c.ink2 }, automargin: true, fixedrange: true };
