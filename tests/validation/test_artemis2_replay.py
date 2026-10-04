@@ -24,6 +24,13 @@ Expected magnitudes, each derived before measuring (the module docstring has the
 - **Lunar blackout** (NASA's trajectory): NASA reported LOS 22:44 to AOS 23:24 UTC, "about 40 minutes";
   the geometric occultation of Earth's centre must last 40 +- 1 min and sit within 3 min of it (the
   station on Earth's disc and NASA's minute rounding).
+- **Solar eclipse** (NASA's trajectory): at mid-eclipse Orion is 11,650 km from the Moon, whose disc
+  (8.57 deg radius) is 32 times the Sun's (0.266 deg) in radius, so it covers the Sun for
+  `2 (beta - alpha) / w`, `w` Orion's angular rate about the shadow axis: 54.4 min from 2026-04-07
+  00:34:27 UTC, computed on 2026-10-04 by an independent scratch script (same DE441 tables, plain
+  `arccos`); hold it to 0.2 min and 5 s. The penumbral phase adds `4 alpha / w`, ~4 min. Inside the
+  windows `srp.shadow_factor` (separate code for the same disc geometry) must read exactly 0 (total)
+  and below 1 (partial), and outside them 1 and above 0.
 """
 from __future__ import annotations
 
@@ -170,6 +177,42 @@ def test_lunar_blackout_matches_nasas_loss_of_signal() -> None:
     assert abs((w.end_s - w.start_s) / 60.0 - 40.0) < 1.0
     los = a2.tdb_seconds(hb.utc_to_tdb("2026-04-06T22:44:00"))
     assert abs(w.start_s - los) < 180.0
+
+
+def test_solar_eclipse_by_the_moon_on_nasas_trajectory() -> None:
+    wins = [w for w in R.solar_eclipses(R.truth_flight()) if w.station == "Moon"]
+    (tot,) = [w for w in wins if w.kind == "solar_eclipse"]
+    (par,) = [w for w in wins if w.kind == "solar_eclipse_partial"]
+    assert abs((tot.end_s - tot.start_s) / 60.0 - 54.43) < 0.2
+    assert abs(tot.start_s - a2.tdb_seconds(hb.utc_to_tdb("2026-04-07T00:34:27"))) < 5.0
+    assert par.start_s < tot.start_s and tot.end_s < par.end_s
+    assert 3.0 < (par.end_s - par.start_s) / 60.0 - 54.43 < 5.0
+
+
+def test_solar_eclipse_edges_agree_with_srp_shadow_factor() -> None:
+    from orbital_engine.srp import SUN_RADIUS, shadow_factor
+
+    truth = R.truth_flight()
+    wins = R.solar_eclipses(truth)
+    tab = truth.table()
+    sun, moon = a2.load("sun"), a2.load("moon")
+    for w in wins:
+        for t, inside in ((w.start_s + 2.0, True), (w.end_s - 2.0, True), (w.start_s - 2.0, False),
+                          (w.end_s + 2.0, False)):
+            if not truth.t_s[0] < t < truth.t_s[-1]:
+                continue
+            tt = np.array([t])
+            r = tab.position(tt)
+            occ = a2.hermite_position(moon, tt) - r if w.station == "Moon" else -r
+            rad = a2.MOON_MEAN_RADIUS_KM if w.station == "Moon" else R.WGS84_A_KM
+            nu = float(shadow_factor(a2.hermite_position(sun, tt) - r, occ, np.array([SUN_RADIUS]),
+                                     np.array([rad]), np.array([True]))[0])
+            if w.kind == "solar_eclipse":
+                assert (nu == 0.0) == inside
+            else:
+                assert (nu < 1.0) == inside
+    assert {(w.station, w.kind) for w in wins} == {(o, k) for o in ("Earth", "Moon")
+                                                    for k in ("solar_eclipse", "solar_eclipse_partial")}
 
 
 def test_dsn_covers_orion_outside_the_blackout() -> None:

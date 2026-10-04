@@ -85,6 +85,10 @@ def main() -> None:
     for w in black_t:
         print(f"  lunar blackout {_utc(w.start_s)} - {_utc(w.end_s)} UTC, {(w.end_s - w.start_s) / 60:.1f} min "
               "(NASA: LOS 22:44, AOS 23:24 UTC, 'about 40 minutes')")
+    for w in rep.truth_windows:
+        if w.kind.startswith("solar_eclipse"):
+            print(f"  {w.kind.replace('_', ' ')} by the {w.station}: {_utc(w.start_s)} - {_utc(w.end_s)} UTC, "
+                  f"{(w.end_s - w.start_s) / 60:.1f} min")
     gaps = R.contact_gaps(rep.truth_windows, float(truth.t_s[0]), float(truth.t_s[-1]))
     print(f"  DSN gaps at {R.DSN_MASK_DEG:.0f} deg (no station in contact): "
           + ", ".join(f"{_utc(a)[5:16]} {(b - a) / 60:.0f} min" for a, b in gaps))
@@ -93,7 +97,9 @@ def main() -> None:
           f"<= {rep.rotation.station_error_km * 1e3:.0f} m")
 
     hdr = ("tier", "final err km", "err@CA km", "CA alt km (d NASA)", "CA time (d NASA)", "max dist km (d)",
-           "entry / return", "DSN G/M/C", "blackout min")
+           "entry / return", "DSN G/M/C", "blackout min",
+           "Moon eclipse (d NASA)")
+    ecl_t = next(w for w in rep.truth_windows if w.kind == "solar_eclipse" and w.station == "Moon")
     print("\n" + " | ".join(hdr))
     for r in rep.tiers:
         ts, err = R.position_error(r.flight, truth)
@@ -106,11 +112,14 @@ def main() -> None:
             back = "no entry before the tables end"
         dsn = "/".join(str(sum(1 for w in r.windows if w.station == s.name)) for s in R.DSN_STATIONS)
         bl = [w for w in r.windows if w.kind == "lunar_blackout"]
+        ecl = [w for w in r.windows if w.kind == "solar_eclipse" and w.station == "Moon"]
         print(" | ".join([
             r.tier.model_id, f"{err[-1]:,.2f}", f"{_err_at(r.flight, truth, rep.truth_closest.t_s):,.2f}",
             f"{alt:,.1f} ({alt - 6545.0:+,.1f})", f"{_utc(r.closest.t_s)[11:19]} ({(r.closest.t_s - t_ca_nasa) / 60:+.1f} min)",
             f"{r.farthest.value_km:,.0f} ({r.farthest.value_km - 413146.2:+,.0f})", back, dsn,
-            ", ".join(f"{(w.end_s - w.start_s) / 60:.1f} from {_utc(w.start_s)[5:16]}" for w in bl) or "none"]))
+            ", ".join(f"{(w.end_s - w.start_s) / 60:.1f} from {_utc(w.start_s)[5:16]}" for w in bl) or "none",
+            ", ".join(f"{(w.end_s - w.start_s) / 60:.1f} min from {_utc(w.start_s)[11:19]} "
+                      f"({w.start_s - ecl_t.start_s:+.0f} s)" for w in ecl) or "none"]))
         print("   estimate:", ESTIMATES[r.tier.model_id])
         arc_end = []
         for a in r.arcs:
@@ -146,6 +155,9 @@ def main() -> None:
         "from JPL Horizons' own Earth orientation (true pole, fitted rotation).",
         "Lunar blackout: the Moon blocks the line from Orion to Earth's centre (geometry, no signal margins). NASA "
         "reported loss of signal from 22:44 to 23:24 UTC, about 40 minutes (NASA Artemis II blog, flight day 6).",
+        "Solar eclipse: the Moon (mean radius) or Earth (equatorial radius, no atmosphere) covers all of the Sun's "
+        "disc seen from Orion ('total'), or part of it ('partial', which includes the total phase); DE441 Sun and Moon. "
+        "Earth's eclipse on 3 April began before the models start, so their bars begin at the seed.",
         "Closest approach is altitude above the Moon's mean radius (1,737.4 km). Farthest distance is from Earth's "
         "centre for every row, NASA's included (event list, 413,146.2 km); NASA's public 252,756 mi (406,771 km) is from "
         "the surface. Entry interface: 121.92 km (400,000 ft) above the WGS-84 ellipsoid.",

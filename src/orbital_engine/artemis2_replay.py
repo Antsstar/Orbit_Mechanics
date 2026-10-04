@@ -72,6 +72,11 @@ Definitions
 - **Lunar blackout**: the Moon's sphere (1,737.4 km) blocks the segment from Orion to Earth's centre.
   NASA reported loss of signal 6:44 p.m. to 7:24 p.m. EDT, "about 40 minutes"
   (https://www.nasa.gov/blogs/missions/2026/04/06/artemis-ii-flight-day-6-lunar-flyby-updates).
+- **Solar eclipse** (`solar_eclipses`): the Moon (mean radius) or Earth (equatorial radius, airless)
+  covers part (`solar_eclipse_partial`) or all (`solar_eclipse`) of the Sun's apparent disc (radius
+  695,700 km) seen from Orion; DE441 Sun and Moon. NASA's trajectory gives a total eclipse by the Moon
+  of 54.4 min from 2026-04-07 00:34:27 UTC, ~1.5 h after closest approach, and one by Earth on 3 April
+  from 00:10 UTC that the models, seeded at 00:58:51, join already in progress.
 
 Pre-run estimates (written before the first full run; `tests/validation/test_artemis2_replay.py` and
 the report hold the measurements against them)
@@ -136,6 +141,7 @@ from .database import Base
 from .ephemeris import EPHEMERIS_MODEL, EphemerisTable, ephemeris_coefficients
 from .geometry import access_windows, elevation_azimuth, segment_clearance
 from .simulator import Simulation
+from .srp import SUN_RADIUS
 
 __all__ = [
     "SEED_TDB", "EI_ALTITUDE_KM", "WGS84_A_KM", "WGS84_F", "DSN_MASK_DEG", "MAX_TURN_PER_STEP", "GRID_S",
@@ -143,7 +149,7 @@ __all__ = [
     "EarthRotation", "Window", "TierResult", "Replay",
     "new_session", "moon_table", "sun_table", "replay_burns", "build_simulation", "fly", "truth_flight",
     "altitude_km", "closest_lunar_approach", "max_earth_distance", "entry_interface", "return_perigee",
-    "earth_rotation", "dsn_windows", "lunar_blackouts", "arc_spans", "fly_arcs", "run_replay",
+    "earth_rotation", "dsn_windows", "lunar_blackouts", "solar_eclipses", "arc_spans", "fly_arcs", "run_replay",
 ]
 
 SEED_TDB: Final[str] = a2.DEFAULT_REPLAY_EPOCH_TDB
@@ -602,7 +608,8 @@ def earth_rotation() -> EarthRotation:
 
 @dataclass(frozen=True)
 class Window:
-    """A visibility interval on the tables' clock. `station` is "" for a lunar blackout."""
+    """A visibility interval on the tables' clock. `station` is "" for a lunar blackout and the occulting
+    body for a solar eclipse."""
     kind: str
     station: str
     start_s: float
@@ -650,6 +657,57 @@ def lunar_blackouts(flight: Flight, *, dense_s: float = 1.0) -> List[Window]:
             sub = _edges(tt, cc)
             edges.append(sub[0][0] if x == a and sub else sub[-1][1] if sub else x)
         out.append(Window("lunar_blackout", "", edges[0], edges[1]))
+    return out
+
+
+def _eclipse_margins(t: ArrayFloat, r_orion: ArrayFloat, occulter: str) -> Tuple[ArrayFloat, ArrayFloat]:
+    """
+    Angular margins (rad) of `occulter`'s disc over the Sun's, seen from Orion: `alpha + beta - sep`
+    (positive while any of the Sun is covered) and `beta - alpha - sep` (positive while all of it is),
+    `alpha`, `beta` the apparent radii of Sun and occulter and `sep` their centres' separation -
+    Montenbruck & Gill Sec. 3.4.2, the geometry `srp.shadow_factor` integrates. Margins, not the lit
+    fraction, so the edges interpolate linearly. Earth is a sphere of the WGS-84 equatorial radius.
+    """
+    to_sun = a2.hermite_position(a2.load("sun"), t) - r_orion
+    if occulter == "Moon":
+        to_occ = a2.hermite_position(a2.load("moon"), t) - r_orion
+        radius = a2.MOON_MEAN_RADIUS_KM
+    else:
+        to_occ = -r_orion
+        radius = WGS84_A_KM
+    ds = np.linalg.norm(to_sun, axis=1)
+    do = np.linalg.norm(to_occ, axis=1)
+    sep = np.arctan2(np.linalg.norm(np.cross(to_sun, to_occ), axis=1), np.einsum("ij,ij->i", to_sun, to_occ))
+    alpha = np.arcsin(SUN_RADIUS / ds)
+    beta = np.arcsin(np.minimum(radius / do, 1.0))
+    partial: ArrayFloat = alpha + beta - sep
+    total: ArrayFloat = beta - alpha - sep
+    return partial, total
+
+
+def solar_eclipses(flight: Flight, *, dense_s: float = 1.0) -> List[Window]:
+    """
+    Intervals when the Moon or Earth hides the Sun from Orion: `solar_eclipse_partial` (any of the
+    Sun's disc covered, so it contains the total phase) and `solar_eclipse` (all of it), `station` the
+    occulter. Edges from a `dense_s` Hermite grid around each sampled crossing, as `lunar_blackouts`.
+    No atmosphere: Earth's refraction and its ~50 km of absorbing air are left out.
+    """
+    idx = np.flatnonzero(_in_moon_span(flight))
+    t = flight.t_s[idx]
+    tab = flight.table()
+    out: List[Window] = []
+    for occ in ("Earth", "Moon"):
+        for j, kind in ((0, "solar_eclipse_partial"), (1, "solar_eclipse")):
+            f = _eclipse_margins(t, flight.state[idx, :3], occ)[j]
+            for a, b in _edges(t, f):
+                edges = []
+                for x in (a, b):
+                    tt = np.arange(x - GRID_S, x + GRID_S, dense_s, dtype=np.float64)
+                    tt = tt[(tt >= t[0]) & (tt <= t[-1])]
+                    sub = _edges(tt, _eclipse_margins(tt, tab.position(tt), occ)[j])
+                    edges.append(sub[0][0] if x == a and sub else sub[-1][1] if sub else x)
+                out.append(Window(kind, occ, edges[0], edges[1]))
+    out.sort(key=lambda w: w.start_s)
     return out
 
 
@@ -815,11 +873,11 @@ def run_replay(tiers: Sequence[Tier] = TIERS, *, reconstruct_family_switch: bool
             entry = entry_interface(extended)
             if entry is None:
                 perigee = return_perigee(extended, max_earth_distance(extended).t_s)
-        wins = dsn_windows(flight, rot) + lunar_blackouts(flight)
+        wins = dsn_windows(flight, rot) + lunar_blackouts(flight) + solar_eclipses(flight)
         results.append(TierResult(tier, flight, fly_arcs(tier, spans) if arcs else [], closest, farthest,
                                   entry, perigee, wins, extended))
     return Replay(truth, results, burns, rot, t_ca_truth, max_earth_distance(truth),
-                  dsn_windows(truth, rot) + lunar_blackouts(truth))
+                  dsn_windows(truth, rot) + lunar_blackouts(truth) + solar_eclipses(truth))
 
 
 # --------------------------------------------------------------------------------------------------

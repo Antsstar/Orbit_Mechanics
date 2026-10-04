@@ -153,8 +153,8 @@ Events outside a model's trajectory span are listed but not drawn on the track.
 | Column | Type | Meaning |
 |---|---|---|
 | `model_id` | string | Whose prediction. |
-| `kind` | `dsn_contact` or `lunar_blackout` | Contact window with a ground station, or loss of signal behind the Moon. |
-| `station` | string | Station name for `dsn_contact` (`Goldstone`, `Madrid`, `Canberra`, any others become new rows). Empty for `lunar_blackout`. |
+| `kind` | `dsn_contact`, `lunar_blackout`, `solar_eclipse` or `solar_eclipse_partial` | Contact window with a ground station; loss of signal behind the Moon; the Sun wholly hidden from Orion; the Sun partly hidden (this interval contains the total one). |
+| `station` | string | Station name for `dsn_contact` (`Goldstone`, `Madrid`, `Canberra`, any others become new rows). Empty for `lunar_blackout`. The occulting body (`Moon`, `Earth`) for the two eclipse kinds. |
 | `start_s`, `end_s` | float | Window edges, seconds from epoch. |
 
 The sample uses a 10° elevation mask and a spherical Earth, with lunar blackout taken as the Moon's
