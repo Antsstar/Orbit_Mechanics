@@ -26,11 +26,12 @@ common way to spend money without improving the result.
 | Model | ID | Input / Output per MTok | Cache read | Default effort |
 |---|---|---|---|---|
 | Fable 5.1 | `claude-fable-5-1` | $10 / $50 | **$0.25** (2.5% of input) | `high` |
-| Opus 5 | `claude-opus-5` | $5 / $25 | $0.50 (10%) | `high` |
-| Sonnet 5 | `claude-sonnet-5` | $2 / $10 | $0.20 (10%) | `high` |
+| Opus 5.5 | `claude-opus-5-5` | $4 / $20 | $0.20 (5%) | **`medium`** |
+| Sonnet 5.5 | `claude-sonnet-5-5` | $2 / $10 | $0.20 (10%) | `high` (recalibrated; `medium` suggested for agentic coding) |
 | Haiku 4.5 | `claude-haiku-4-5` | $1 / $5 | $0.10 (10%) | *no effort setting* |
 
-All three current large models accept `low`, `medium`, `high`, `xhigh`, `max`. Effort scales are
+Table as of the bundled API reference dated 2026-09-25. Opus 5 ($5 / $25) and Sonnet 5 are still
+served but superseded. All three current large models accept `low`, `medium`, `high`, `xhigh`, `max`. Effort scales are
 calibrated per model, so "use xhigh" means nothing without naming the model.
 
 ### What the cache-read price means for this project
@@ -117,11 +118,20 @@ From *Prompting Claude Opus 5*:
 
 | Agent | Model | Effort | Why |
 |---|---|---|---|
-| `force-model-architect` | Fable 5.1 | high | The architectural core of the force-model phase. Long-horizon, novel, load-bearing for everything after it — Fable's documented strength. |
-| `numerics-debug` | Fable 5.1 | high | Ambiguous root-cause investigation, and "plausible but wrong" is this project's defining failure mode. |
-| `physics-kernel` | Opus 5 | high | Bounded and well-specified, from a citation. `xhigh` only for a genuinely demanding model. |
-| `kernel-twin` | Opus 5 | high | Fixed four-part job held honest by an equivalence test. |
-| `validation-harness` | Sonnet 5 | high | Established patterns landing against a harness that catches errors mechanically. |
+Pins as of 2026-10-04, chosen under usage-limit pressure:
+
+| Agent | Model | Effort | Why |
+|---|---|---|---|
+| `force-model-architect` | Opus 5.5 | high | Rare, structural, load-bearing. |
+| `numerics-debug` | Opus 5.5 | high | Ambiguous root-cause investigation, and "plausible but wrong" is this project's defining failure mode. |
+| `physics-kernel` | Opus 5.5 | medium | The hard part, deriving the expected error magnitude, is reasoning no test catches; Opus 5.5's own default effort is medium. |
+| `kernel-twin` | Sonnet 5.5 | medium | Translation of an existing reference, held honest by an equivalence test. |
+| `validation-harness` | Sonnet 5.5 | medium | Established patterns landing against a harness that catches errors mechanically. |
+| *(dashboard / visual work, no agent file)* | Sonnet 5.5 | medium | No physics; a screenshot verifies it. |
+
+**The rule: Sonnet where a test or a screenshot proves the result; Opus where the hard part is
+reasoning nothing mechanical checks.** The orchestrating session runs Opus 5.5 at medium, raised to
+high only for physics review.
 
 **Spend Fable on task shape, not difficulty.** A bounded kernel with a citation and a validation case is
 well specified, and Opus handles it for half the price. Reserve Fable for long-horizon design and for
