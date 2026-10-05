@@ -542,13 +542,15 @@ class Simulation:
     def set_cowell_integrator(self, name: str) -> None:
         """
         Select the integrator every Cowell body is advanced with: `"rk4"` (the default, and the only one
-        with a fused compiled twin), `"leapfrog"` or `"yoshida4"` (symplectic; see `integrators.py`).
+        with a fused compiled twin), `"leapfrog"` or `"yoshida4"` (symplectic), or `"encke"` (the
+        deviation from the osculating conic, re-anchored every step; every Cowell body then needs
+        `point_mass_gravity`). See `integrators.py`.
         Rebuilds the Cowell plan, so a non-RK4 choice moves the Cowell set onto the NumPy path - which
         is what a timing comparison between integrators then measures, until those have twins too.
         """
         if name not in INTEGRATOR_NAMES:
             raise ValueError(f"unknown integrator {name!r}; have {INTEGRATOR_NAMES}")
-        self._cowell_integrator = make_integrator(name, self.max_capacity)
+        self._cowell_integrator = make_integrator(name, self.max_capacity, self.mu_array)
         self._cowell_integrator_name = name
         self._refresh_cowell_plan()
 
@@ -1177,6 +1179,12 @@ class Simulation:
                     self._refresh_cowell_plan()
                     done = self._cowell_fused_ok and self._cowell_compiled_step(dt) < 0
             if not done:
+                if self._cowell_integrator_name == "encke":
+                    pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
+                    if bool(np.any((self.force_model_mask[self._cowell_idx] & pm_bit) == np.uint64(0))):
+                        raise ValueError(
+                            "the Encke integrator needs point_mass_gravity on every Cowell body: it "
+                            "subtracts the central term from the total acceleration to get the perturbation.")
                 parent_state_at_start = self.global_states[self._cowell_primaries].copy()
                 cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
                 cowell_propagator.propagate(

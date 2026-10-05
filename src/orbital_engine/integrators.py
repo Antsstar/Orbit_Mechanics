@@ -78,7 +78,7 @@ Press, Teukolsky, Vetterling & Flannery, *Numerical Recipes*, 3rd ed., section 1
 """
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Optional, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -86,8 +86,8 @@ from numpy.typing import NDArray
 from .custom_types import ScalarSeconds
 from .forces import AccelerationProvider
 
-__all__ = ["Integrator", "RK4Integrator", "LeapfrogIntegrator", "Yoshida4Integrator", "INTEGRATOR_NAMES",
-           "make_integrator"]
+__all__ = ["Integrator", "RK4Integrator", "LeapfrogIntegrator", "Yoshida4Integrator", "EnckeIntegrator",
+           "INTEGRATOR_NAMES", "make_integrator", "kepler_advance", "battin_f"]
 
 
 class Integrator(Protocol):
@@ -302,15 +302,153 @@ class Yoshida4Integrator(_KickDriftKick):
 
 #: Cowell integrators by name - what a configuration names (`Simulation.set_cowell_integrator`,
 #: `sweep.ModelConfig.integrator`). Only `"rk4"` has a fused compiled twin.
-INTEGRATOR_NAMES = ("rk4", "leapfrog", "yoshida4")
+INTEGRATOR_NAMES = ("rk4", "leapfrog", "yoshida4", "encke")
 
 
-def make_integrator(name: str, max_capacity: int) -> Integrator:
-    """A fresh integrator of the named kind, scratch sized to `max_capacity`."""
+def make_integrator(name: str, max_capacity: int,
+                    mu_array: Optional[NDArray[np.float64]] = None) -> Integrator:
+    """A fresh integrator of the named kind, scratch sized to `max_capacity`. `"encke"` needs the
+    arena's `mu_array` (read live) for its reference conics."""
     if name == "rk4":
         return RK4Integrator(max_capacity)
     if name == "leapfrog":
         return LeapfrogIntegrator(max_capacity)
     if name == "yoshida4":
         return Yoshida4Integrator(max_capacity)
+    if name == "encke":
+        if mu_array is None:
+            raise ValueError("the Encke integrator needs the arena's mu_array")
+        return EnckeIntegrator(max_capacity, mu_array)
     raise ValueError(f"unknown integrator {name!r}; have {INTEGRATOR_NAMES}")
+
+
+# --------------------------------------------------------------------------------------------------
+# Encke: integrate only the deviation from the osculating conic, re-anchored every step
+# --------------------------------------------------------------------------------------------------
+
+def _stumpff(z: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Vectorised Stumpff `C(z)`, `S(z)` (series near 0, so no cancellation)."""
+    c = np.empty_like(z)
+    s = np.empty_like(z)
+    small = np.abs(z) < 1e-3
+    pos = (z > 0.0) & ~small
+    neg = (z < 0.0) & ~small
+    zs = z[small]
+    c[small] = 0.5 - zs / 24.0 + zs * zs / 720.0 - zs ** 3 / 40320.0
+    s[small] = 1.0 / 6.0 - zs / 120.0 + zs * zs / 5040.0 - zs ** 3 / 362880.0
+    sp = np.sqrt(z[pos])
+    c[pos] = (1.0 - np.cos(sp)) / z[pos]
+    s[pos] = (sp - np.sin(sp)) / sp ** 3
+    sn = np.sqrt(-z[neg])
+    c[neg] = (np.cosh(sn) - 1.0) / (-z[neg])
+    s[neg] = (np.sinh(sn) - sn) / sn ** 3
+    return c, s
+
+
+def kepler_advance(r0: NDArray[np.float64], v0: NDArray[np.float64], dt: float,
+                   mu: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """
+    `(r, v)` `(k, 3)` after `dt` on each body's two-body conic through `(r0, v0)` about `mu` `(k,)`:
+    the universal-variable Kepler equation (Curtis Alg. 3.3, f and g with their derivatives), solved
+    by Newton for every body at once to 1e-14 in the universal anomaly. Any conic type.
+    """
+    rn = np.sqrt(np.einsum("ij,ij->i", r0, r0))
+    vr = np.einsum("ij,ij->i", r0, v0) / rn
+    alpha = 2.0 / rn - np.einsum("ij,ij->i", v0, v0) / mu
+    sq = np.sqrt(mu)
+    chi = np.where(alpha != 0.0, sq * np.abs(alpha) * dt, sq * dt / rn)
+    for _ in range(60):
+        z = alpha * chi * chi
+        c, s = _stumpff(z)
+        f_val = rn * vr / sq * chi * chi * c + (1.0 - alpha * rn) * chi ** 3 * s + rn * chi - sq * dt
+        f_der = rn * vr / sq * chi * (1.0 - z * s) + (1.0 - alpha * rn) * chi * chi * c + rn
+        step = f_val / f_der
+        chi = chi - step
+        if bool(np.all(np.abs(step) <= 1e-14 * np.maximum(1.0, np.abs(chi)))):
+            break
+    else:
+        raise RuntimeError("kepler_advance: universal Kepler equation did not converge in 60 iterations")
+    z = alpha * chi * chi
+    c, s = _stumpff(z)
+    f = 1.0 - chi * chi / rn * c
+    g = dt - chi ** 3 * s / sq
+    r = f[:, None] * r0 + g[:, None] * v0
+    rr = np.sqrt(np.einsum("ij,ij->i", r, r))
+    f_dot = sq / (rr * rn) * (z * chi * s - chi)
+    g_dot = 1.0 - chi * chi / rr * c
+    v = f_dot[:, None] * r0 + g_dot[:, None] * v0
+    return r, v
+
+
+def battin_f(q: NDArray[np.float64]) -> NDArray[np.float64]:
+    """`(1 + q)^(3/2) - 1` without cancellation: `q (3 + 3q + q^2) / (1 + (1 + q)^(3/2))`."""
+    out: NDArray[np.float64] = q * (3.0 + 3.0 * q + q * q) / (1.0 + (1.0 + q) ** 1.5)
+    return out
+
+
+class EnckeIntegrator:
+    """
+    Encke's method with the reference re-anchored every step: the reference is the osculating two-body
+    conic through each body's state at the start of the step, advanced exactly (`kepler_advance`), and
+    only the deviation `dr = r - r_ref` is integrated, by classical RK4, under
+
+        d2(dr)/dt2 = -(mu / rho^3) (f(q) r + dr) + a_p,     rho = |r_ref|,
+        q = dr . (dr - 2 r) / r^2,    f(q) = (1 + q)^(3/2) - 1 (`battin_f`),
+
+    derived from `-mu r / r^3 + mu r_ref / rho^3` with `rho^2 / r^2 = 1 + q` (Battin, *An Introduction
+    to the Mathematics and Methods of Astrodynamics*, Sec. 9.3, cited from memory; the derivation is in
+    `docs/architecture.md` and the identity is tested against the direct difference). `a_p` is the
+    provider's total acceleration minus the central term `-mu r / r^3`, so **every body it advances must
+    carry `point_mass_gravity`** (`Simulation` refuses to step otherwise), with `mu` the summed
+    `mu_array[body] + mu_array[parent]` that model uses.
+
+    **Why re-anchor every step.** Nothing persists between steps, so a step the engine splits at a
+    manoeuvre or an event, or rewinds during an event's root find, needs no reference bookkeeping; and
+    for pure two-body motion the deviation is identically zero, so the method is exact at any step.
+    Under a perturbation RK4's truncation acts only on the deviation, driven by `a_p` (~1e-3 of the
+    central term for J2 in LEO) rather than on the whole orbit.
+
+    Two `kepler_advance` solves per step (to `h/2` and `h`) and four provider evaluations, like RK4.
+    NumPy only: no compiled twin, so `Simulation` keeps the Cowell set on the NumPy path.
+    """
+
+    def __init__(self, max_capacity: int, mu_array: NDArray[np.float64]) -> None:
+        self._mu_array = mu_array            # the arena's own array, read live (summed with the parent's)
+
+    def _deviation_rate(self, provider: AccelerationProvider, tau: float, state: NDArray[np.float64],
+                        indices: NDArray[np.int64], primaries: NDArray[np.int32], mu: NDArray[np.float64],
+                        r_ref: NDArray[np.float64], v_ref: NDArray[np.float64],
+                        dy: NDArray[np.float64]) -> NDArray[np.float64]:
+        dr, dv = dy[:, :3], dy[:, 3:]
+        r = r_ref + dr
+        state[indices, :3] = state[primaries, :3] + r
+        state[indices, 3:] = state[primaries, 3:] + v_ref + dv
+        a_tot = provider(tau, state)[indices]
+        r2 = np.einsum("ij,ij->i", r, r)
+        rn = np.sqrt(r2)
+        a_p = a_tot + (mu / (r2 * rn))[:, None] * r
+        rho = np.sqrt(np.einsum("ij,ij->i", r_ref, r_ref))
+        q = np.einsum("ij,ij->i", dr, dr - 2.0 * r) / r2
+        dd = -(mu / rho ** 3)[:, None] * (battin_f(q)[:, None] * r + dr) + a_p
+        out: NDArray[np.float64] = np.concatenate([dv, dd], axis=1)
+        return out
+
+    def step(self, provider: AccelerationProvider, t: ScalarSeconds, state: NDArray[np.float64],
+             dt: ScalarSeconds, indices: NDArray[np.int64], primaries: NDArray[np.int32]) -> None:
+        if indices.size == 0:
+            return
+        h = float(dt)
+        t0 = float(t)
+        mu = self._mu_array[indices] + self._mu_array[primaries]
+        r0 = state[indices, :3] - state[primaries, :3]
+        v0 = state[indices, 3:] - state[primaries, 3:]
+        r_mid, v_mid = kepler_advance(r0, v0, 0.5 * h, mu)
+        r_end, v_end = kepler_advance(r0, v0, h, mu)
+        zero = np.zeros((indices.size, 6), dtype=np.float64)
+        k1 = self._deviation_rate(provider, t0, state, indices, primaries, mu, r0, v0, zero)
+        k2 = self._deviation_rate(provider, t0 + 0.5 * h, state, indices, primaries, mu, r_mid, v_mid, 0.5 * h * k1)
+        k3 = self._deviation_rate(provider, t0 + 0.5 * h, state, indices, primaries, mu, r_mid, v_mid, 0.5 * h * k2)
+        k4 = self._deviation_rate(provider, t0 + h, state, indices, primaries, mu, r_end, v_end, h * k3)
+        dy = (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        state[indices, :3] = state[primaries, :3] + r_end + dy[:, :3]
+        state[indices, 3:] = state[primaries, 3:] + v_end + dy[:, 3:]

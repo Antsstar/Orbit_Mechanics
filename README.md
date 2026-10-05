@@ -849,8 +849,10 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - a prospective Artemis III (2027, low Earth orbit) rendezvous scenario (`artemis3.py`)
      - SGP4 on the frontier plot (panel B)
      - symplectic integrators (leapfrog, Yoshida 4th order) as a sweepable integrator choice
+     - Encke's method (deviation from the osculating conic): ~1,000x RK4's accuracy at the same step
+       under J2 in LEO, exact for two-body motion
    - **Planned:**
-     - Encke
+     - compiled twins for the new integrators (symplectic, Encke), so the frontier can time them fairly
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay

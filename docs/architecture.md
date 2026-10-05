@@ -2111,6 +2111,43 @@ after the plan is built (the kernel's "read live" contract); that would save ~0.
 
 ---
 
+## Encke: integrate the deviation, not the orbit
+
+`integrators.EnckeIntegrator`, selected like any Cowell integrator (`set_cowell_integrator("encke")`,
+`ModelConfig.integrator="encke"`). Each step takes the osculating two-body conic through the body's
+start-of-step state as the reference, advances it exactly (`integrators.kepler_advance`, universal
+variables, vectorised), and integrates only the deviation `dr = r - r_ref` with classical RK4.
+
+**The deviation equation, derived.** With `r = r_ref + dr`, `rho = |r_ref|`:
+
+    d2(dr)/dt2 = -mu r / r^3 + mu r_ref / rho^3 + a_p
+               = (mu / rho^3) [r_ref - (rho / r)^3 r] + a_p
+               = (mu / rho^3) [(1 - (rho / r)^3) r - dr] + a_p.
+
+`rho^2 = |r - dr|^2 = r^2 - 2 r.dr + dr^2`, so `rho^2 / r^2 = 1 + q` with `q = dr.(dr - 2r) / r^2`, and
+`(rho / r)^3 - 1 = (1 + q)^(3/2) - 1 = f(q)`. Writing `a = (1 + q)^(1/2)`, `(a^3 - 1)(a^3 + 1) =
+a^6 - 1 = (a^2 - 1)(a^4 + a^2 + 1)` gives the cancellation-free form
+`f(q) = q (3 + 3q + q^2) / (1 + (1 + q)^(3/2))`, and so
+
+    d2(dr)/dt2 = -(mu / rho^3) (f(q) r + dr) + a_p.
+
+This is Battin's form (his Sec. 9.3, cited from memory). `a_p` is the provider's total acceleration minus
+the central `-mu r / r^3`, which is why every Encke body must carry `point_mass_gravity`.
+
+**Why re-anchor every step.** A persistent reference would be state that the engine's step splitting
+(manoeuvres, events) and the event root find's rewind must keep consistent. A per-step reference
+carries nothing between steps, and for pure two-body motion the deviation is identically zero: one
+orbit in eight steps lands on the conic to 4.7e-11 km, where RK4 at the same step is 11,185 km off.
+
+**What it buys.** RK4's truncation now acts only on the perturbation-driven deviation. For J2 in LEO
+that is ~1e-3 of the central acceleration, and the error falls by that factor: 1.9e-3 km at a 160 s step
+against RK4's 2.1 km (550 km, 6 satellites, 6,400 s), 545x at 10 s and 3,750x at 640 s, still fourth
+order. The 1 km step limit (`grid.stability_limit`) moves from 80-160 s to 640-1,280 s. **The cost is not
+yet comparable**: Encke runs on the NumPy path (two vectorised Kepler solves and four provider calls a
+step) while RK4 has the fused compiled kernel, so a frontier position for Encke waits on its own twin.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.

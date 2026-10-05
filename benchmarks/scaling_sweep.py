@@ -60,14 +60,19 @@ def main() -> int:
         print("numba is required: the body-count axis compares the compiled and NumPy implementations")
         return 1
     dt_rows = grid.run_grid("dt_s", DTS, lambda v: build_n(6.0),
-                            lambda v: [ModelConfig("cowell+j2", PropagatorType.COWELL, v, force_models=FM)],
+                            lambda v: [ModelConfig("cowell+j2", PropagatorType.COWELL, v, force_models=FM),
+                                       ModelConfig("encke", PropagatorType.COWELL, v, force_models=FM,
+                                                   integrator="encke")],
                             6400.0, oblateness=OBL, timing_batches=1, timing_warmup=0)
     print("Step size: Cowell + J2, 550 km, 6,400 s")
     for r in dt_rows:
-        print(f"  dt {r.value:6.0f} s   median error {r.result.error.median_km:11.4e} km")
+        print(f"  dt {r.value:6.0f} s  {r.config_name:10s} median error {r.result.error.median_km:11.4e} km")
     limits = {thr: grid.stability_limit(dt_rows, "cowell+j2", thr) for thr in THRESHOLDS_KM}
     for thr, (ok, bad) in limits.items():
-        print(f"  under {thr:g} km up to dt = {ok} s; fails from {bad} s")
+        print(f"  RK4 under {thr:g} km up to dt = {ok} s; fails from {bad} s")
+    encke_limits = {thr: grid.stability_limit(dt_rows, "encke", thr) for thr in THRESHOLDS_KM}
+    for thr, (ok, bad) in encke_limits.items():
+        print(f"  Encke under {thr:g} km up to dt = {ok} s; fails from {bad} s")
 
     def configs(v: float) -> List[ModelConfig]:
         return [ModelConfig("Cowell + J2, compiled", PropagatorType.COWELL, 60.0, force_models=FM, compiled=True),
@@ -104,10 +109,13 @@ def main() -> int:
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5))
     x, y = grid.series(dt_rows, "cowell+j2", "median_km")
     ax1.loglog(x, y, "o-", color="#1f77b4", label="Cowell + J2 (RK4)")
+    xe, ye = grid.series(dt_rows, "encke", "median_km")
+    ax1.loglog(xe, ye, "s-", color="#8c564b", label="Encke (deviation from the conic, RK4)")
+    ax1.legend(fontsize=8, loc="lower right")
     for thr in THRESHOLDS_KM:
         ax1.axhline(thr, color="0.6", lw=0.8, ls="--")
         ok, bad = limits[thr]
-        ax1.text(x[0], thr * 1.3, f"{thr:g} km: dt <= {ok:g} s" if ok else f"{thr:g} km", fontsize=8, color="0.3")
+        ax1.text(x[0], thr * 1.3, f"{thr:g} km: RK4 dt <= {ok:g} s" if ok else f"{thr:g} km", fontsize=8, color="0.3")
     ax1.set_xlabel("step size (s)")
     ax1.set_ylabel("median position error vs J2 truth (km)")
     ax1.set_title("When does a model stop working? (550 km, 6,400 s)")
