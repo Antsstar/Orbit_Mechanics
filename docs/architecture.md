@@ -1576,6 +1576,13 @@ quadratic in time, 4.0x from 12 h to 24 h. -1.18 km is J3/J4 and SGP4's theory, 
 derived. At the ISS's 410 km altitude, the 60 s Cowell tier's *truncation* error (2.22 km) is larger
 than SGP4's *model* difference, so at that step the integrator, not the force model, sets the error.
 
+**On the frontier figure.** `docs/figures/frontier.png` carries this table as its right-hand panel (B),
+produced by `benchmarks/frontier_plot.py` with the same truth, tiers and `run_sweep(external=)` path;
+the constellation panel (A) cannot host SGP4 because it has no TLEs. SGP4 is timed as one evaluation at
+the horizon, like the analytic tiers. The figure annotates SGP4's point as a model difference
+(J3/J4, drag and WGS-72 constants absent from the truth), not an accuracy error. Errors reproduce the
+table above; wall times vary with the machine.
+
 **Limitations.** No TEME -> GCRF rotation, no UT1/polar motion, and no ingest from files or the
 network (TLEs are strings). All satellites share one scenario epoch, and a TLE whose epoch is far
 from it is evaluated at a large `tsince`, which is legitimate but degrades SGP4. SGP4's mean-element

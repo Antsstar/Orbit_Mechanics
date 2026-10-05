@@ -87,6 +87,13 @@ integration, at roughly 500–2,000× the cost: 0.27 km for 13 ms, 0.0004 km for
 from an otherwise idle machine and agreed within 5% across two runs, except Cowell's coarsest point
 (15%); errors do not vary.
 
+The right-hand panel (B) puts SGP4 on the same axes. The constellation has no TLEs, so panel B uses the
+ISS from `sgp4_bridge.ISS_TLE` (`scenarios.tle_satellites`, one satellite, 24 hours, the same DOP853 + J2
+truth): SGP4 lands at 0.98 km in about 27 µs, between the mean-seeded secular-J2 tier (2.95 km) and
+Cowell + J2 at a 60 s step (2.22 km, ~10 ms). That 0.98 km is a *model difference*, not an accuracy
+error: SGP4 carries J3/J4, drag and WGS-72 constants that the J2 truth lacks (see
+`docs/architecture.md`).
+
 Two caveats:
 
 - **The analytic tiers reach the horizon in one step; Cowell has to step.** Kepler and secular J2 are
@@ -824,12 +831,13 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - inter-satellite link visibility, its contact dataset and sweep metric
      - tabulated ephemeris perturbers advanced per integrator stage
      - JPL Horizons ingest and the Artemis II replay
+     - per-model course-correction Δv for the Artemis II replay (`target_burn`), and initial orbit
+       determination (`iod.py`: Lambert, Gibbs, Herrick-Gibbs, Gauss)
+     - a prospective Artemis III (2027, low Earth orbit) rendezvous scenario (`artemis3.py`)
+     - SGP4 on the frontier plot (panel B)
    - **Planned:**
-     - per-model course-correction Δv for the Artemis II replay
-     - an Artemis III (2027, low Earth orbit docking test) scenario
      - Encke
      - symplectic integrators
-     - SGP4 on the frontier plot
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay

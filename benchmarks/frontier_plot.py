@@ -6,8 +6,20 @@ Run with:
 
     <env>/python.exe benchmarks/frontier_plot.py
 
-Writes `docs/figures/frontier.png`. This script is the only place in the project that imports
-matplotlib - `sweep.py` itself has no plotting dependency (see its module docstring).
+Writes `docs/figures/frontier.png`, two panels side by side. This script is the only place in the
+project that imports matplotlib - `sweep.py` itself has no plotting dependency (see its module
+docstring). Needs the `sgp4` extra for panel B.
+
+**Panel B: SGP4.** `scenarios.tle_satellites` with `sgp4_bridge.ISS_TLE` (the only TLE the bridge
+ships, so one satellite and the "median" is that satellite's error), one-day horizon, the same
+DOP853 + J2 truth, the same tiers (Cowell swept over panel A's steps plus 60, 30 and 15 s so the
+panel reproduces the one-day table in `docs/architecture.md`), plus `sgp4_bridge.sgp4_tier` scored
+as an `ExternalTier` through `run_sweep(external=)`. SGP4 is closed-form in time, so like the
+analytic tiers it is timed as one evaluation at the horizon (`dt = HORIZON_S`). **SGP4's distance
+from the truth is a model difference, not an accuracy error**: the truth is J2-only and SGP4 adds
+J3/J4, drag and WGS-72 constants (+1.20 km mu, +0.95 km drag, -1.18 km J3/J4 and theory of its
+0.966 km along-track gap; the figure says so). The constellation cannot host SGP4 - it has no
+TLEs, and fitting one to engine states is forbidden.
 
 **Scenario.** `scenarios.earth_constellation` at 550 km / 53 deg, one plane, 12 satellites evenly
 phased around it (`theta` spread 0-330 deg in 30 deg steps) - enough points to see the phase
@@ -53,17 +65,17 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Sequence
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
+from matplotlib.axes import Axes
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from orbital_engine import geopotential, scenarios
+from orbital_engine import geopotential, scenarios, sgp4_bridge
 from orbital_engine.custom_types import PropagatorType
 from orbital_engine.database import Base
 from orbital_engine.kernels import NUMBA_AVAILABLE
@@ -79,6 +91,10 @@ HORIZON_S = 86400.0  # 1 day
 
 KEPLER_DT_S = HORIZON_S  # analytic tiers are closed-form: one step reaches the horizon
 COWELL_DTS_S = [160.0, 80.0, 40.0, 20.0, 10.0]
+# Panel B sweeps the same steps plus 60, 30 and 15 s, the steps `docs/architecture.md`'s one-day ISS
+# table quotes, so the panel can be checked against that table digit for digit.
+ISS_COWELL_DTS_S = sorted(set(COWELL_DTS_S) | {60.0, 30.0, 15.0}, reverse=True)
+SGP4_NAME = "SGP4"
 
 # Reduced from `run_sweep`'s defaults (5 batches, 2 warmup calls) to keep this script's total runtime
 # reasonable at the smallest Cowell step size (~8640 steps/config): still minimum-of-batches timing,
@@ -88,7 +104,8 @@ TIMING_WARMUP = 1
 
 CAVEAT_COMPILED = (
     "All tiers run compiled (numba): Kepler and secular J2 through their kernels, Cowell through the\n"
-    "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2 [+ zonal]). Wall time is the model, not the\n"
+    "fused kernels.cowell_rk4_step (RK4 + point_mass_gravity + j2; it also fuses drag, zonal, tesseral). Wall time\n"
+    "is the model, not the "
     "implementation: the per-step re-base of Cowell and secular-J2 rows is compiled too (bit-identical twin).\n"
     "Kepler and secular J2 are closed-form, so they reach the 24 h horizon in a single step; Cowell must step."
 )
@@ -96,6 +113,12 @@ CAVEAT_INTERPRETED = (
     "numba is NOT installed: Kepler and secular J2 ran as interpreted Python and Cowell as vectorised\n"
     "NumPy, so wall time here measures implementation as much as model. Install [perf] for a fair\n"
     "timing comparison."
+)
+CAVEAT_SGP4 = (
+    "Panel B: SGP4's distance from the truth is a model difference, not an accuracy error. The truth is\n"
+    "J2-only; SGP4 carries J3/J4, drag (B*) and WGS-72 constants. Of its 0.966 km along-track gap:\n"
+    "+1.20 km WGS-72 mu vs MU_EARTH, +0.95 km drag, -1.18 km J3/J4 and SGP4's theory (docs/architecture.md).\n"
+    "SGP4 is closed-form in time, timed like the analytic tiers: one evaluation at the 24 h horizon."
 )
 CAVEAT = CAVEAT_COMPILED if NUMBA_AVAILABLE else CAVEAT_INTERPRETED
 
@@ -115,7 +138,7 @@ def build_scenario() -> Simulation:
     )
 
 
-def build_configs() -> List[ModelConfig]:
+def build_configs(cowell_dts_s: Sequence[float]) -> List[ModelConfig]:
     j2_coeffs = {"j2": geopotential.EARTH_J2, "r_eq": geopotential.EARTH_R_EQ}
 
     configs: List[ModelConfig] = [
@@ -129,7 +152,7 @@ def build_configs() -> List[ModelConfig]:
             dt=KEPLER_DT_S, mean_seed=True, propagator_coefficients=j2_coeffs,
         ),
     ]
-    for dt in COWELL_DTS_S:
+    for dt in cowell_dts_s:
         configs.append(ModelConfig(
             name=f"cowell + point_mass_gravity + j2 (dt={dt:.0f}s)",
             propagator=PropagatorType.COWELL, dt=dt,
@@ -141,12 +164,16 @@ def build_configs() -> List[ModelConfig]:
     return configs
 
 
-def plot(results: List[SweepResult]) -> None:
+def build_iss_scenario() -> Simulation:
+    return scenarios.tle_satellites(fresh_session(), [sgp4_bridge.ISS_TLE])
+
+
+def draw_panel(ax: Axes, results: List[SweepResult], title: str) -> None:
+    """Draw one frontier panel. Colours and markers are fixed per tier, so the panels agree."""
     kepler = [r for r in results if r.config_name == "kepler"]
     secular = [r for r in results if r.config_name.startswith("secular-j2")]
     cowell = [r for r in results if r.config_name.startswith("cowell")]
-
-    fig, ax = plt.subplots(figsize=(8.5, 6.0))
+    sgp4 = [r for r in results if r.config_name == SGP4_NAME]
 
     for r in kepler:
         ax.scatter(r.wall_time_us, r.error.median_km, marker="s", s=70, color="tab:red", zorder=3,
@@ -165,35 +192,45 @@ def plot(results: List[SweepResult]) -> None:
         ys = [r.error.median_km for r in cowell_sorted]
         ax.plot(xs, ys, marker="o", color="tab:blue", zorder=2, label="Cowell + point_mass_gravity + j2")
 
+    for r in sgp4:
+        ax.scatter(r.wall_time_us, r.error.median_km, marker="D", s=80, color="tab:purple", zorder=4,
+                   label="SGP4 (external tier)")
+        ax.annotate(
+            "SGP4: J3/J4, drag, WGS-72 mu\nthat the J2 truth lacks -\nmodel difference, not error",
+            xy=(r.wall_time_us, r.error.median_km), xytext=(0.27, 0.40), textcoords="axes fraction",
+            fontsize=7.5, color="tab:purple", ha="left", va="top",
+            arrowprops={"arrowstyle": "->", "color": "tab:purple", "lw": 0.8},
+        )
+
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("wall time per propagation (us, log scale, min-of-batches)")
     ax.set_ylabel("median position error vs J2 truth at horizon (km, log scale)")
-    ax.set_title(
-        f"Model-fidelity frontier: earth_constellation, {ALTITUDE_KM:.0f} km / {INCLINATION_DEG:.0f} "
-        f"deg, {N_SATS} sats, {HORIZON_S/3600:.0f} h horizon"
-    )
+    ax.set_title(title, fontsize=10)
     ax.grid(True, which="both", ls=":", alpha=0.5)
-    ax.legend(loc="best", fontsize=9)
-    fig.text(0.01, 0.01, CAVEAT, fontsize=7.5, va="bottom", ha="left", family="monospace")
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    ax.legend(loc="best", fontsize=8)
+
+
+def plot(results: List[SweepResult], iss_results: List[SweepResult]) -> None:
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(15.0, 6.2))
+
+    draw_panel(
+        ax_a, results,
+        f"A: earth_constellation, {ALTITUDE_KM:.0f} km / {INCLINATION_DEG:.0f} deg, {N_SATS} sats, "
+        f"{HORIZON_S/3600:.0f} h (median)",
+    )
+    draw_panel(ax_b, iss_results, f"B: ISS from its TLE (tle_satellites), 1 sat, {HORIZON_S/3600:.0f} h")
+    fig.suptitle("Model-fidelity frontier", fontsize=12)
+    fig.text(0.01, 0.01, CAVEAT + "\n" + CAVEAT_SGP4, fontsize=7.5, va="bottom", ha="left",
+             family="monospace")
+    fig.tight_layout(rect=(0, 0.14, 1, 0.97))
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT_PATH, dpi=150)
     print(f"wrote {OUTPUT_PATH}")
 
 
-def main() -> int:
-    print(f"numba available: {NUMBA_AVAILABLE}")
-    print(CAVEAT)
-
-    configs = build_configs()
-    results = run_sweep(
-        build_scenario, configs, HORIZON_S,
-        oblateness={"Earth": (geopotential.EARTH_J2, geopotential.EARTH_R_EQ)},
-        timing_batches=TIMING_BATCHES, timing_warmup=TIMING_WARMUP,
-    )
-
+def print_table(results: List[SweepResult]) -> None:
     print(f"\n{'config':<40}{'n_bodies':>9}{'median_km':>12}{'rms_km':>10}{'max_km':>10}{'us':>12}")
     for r in results:
         print(
@@ -201,7 +238,30 @@ def main() -> int:
             f"{r.error.max_km:>10.4f}{r.wall_time_us:>12.1f}"
         )
 
-    plot(results)
+
+def main() -> int:
+    print(f"numba available: {NUMBA_AVAILABLE}")
+    print(CAVEAT)
+    oblateness = {"Earth": (geopotential.EARTH_J2, geopotential.EARTH_R_EQ)}
+
+    print("\nPanel A: earth_constellation")
+    results = run_sweep(
+        build_scenario, build_configs(COWELL_DTS_S), HORIZON_S, oblateness=oblateness,
+        timing_batches=TIMING_BATCHES, timing_warmup=TIMING_WARMUP,
+    )
+    print_table(results)
+
+    print("\nPanel B: ISS, tle_satellites")
+    tier = sgp4_bridge.sgp4_tier(
+        [sgp4_bridge.ISS_TLE], sgp4_bridge.tle_epoch(sgp4_bridge.ISS_TLE), dt=HORIZON_S, name=SGP4_NAME,
+    )
+    iss_results = run_sweep(
+        build_iss_scenario, build_configs(ISS_COWELL_DTS_S), HORIZON_S, oblateness=oblateness,
+        external=[tier], timing_batches=TIMING_BATCHES, timing_warmup=TIMING_WARMUP,
+    )
+    print_table(iss_results)
+
+    plot(results, iss_results)
     return 0
 
 
