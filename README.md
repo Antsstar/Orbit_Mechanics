@@ -128,7 +128,9 @@ none. `benchmarks/figures.py` imports matplotlib and draws these:
 step and under 100 km up to 320 s; between 640 and 1,280 s the error reaches the size of the orbit
 (`grid.stability_limit`). **Body count:** the same physics compiled and in NumPy (`ModelConfig.compiled`)
 never cross from 6 to 384 satellites (`grid.crossover`): NumPy's fixed cost is ~100x and even its
-per-satellite cost ~30x the compiled kernel's.
+per-satellite cost ~30x the compiled kernel's. **Horizon:** at the same step and the same four force
+evaluations, RK4 is 17x more accurate than Yoshida's symplectic method after one orbit, but RK4's energy
+drifts, so its error grows as t^2 against Yoshida's t: Yoshida overtakes it at 34 orbits.
 
 ### Ground tracks
 
@@ -846,9 +848,9 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        determination (`iod.py`: Lambert, Gibbs, Herrick-Gibbs, Gauss)
      - a prospective Artemis III (2027, low Earth orbit) rendezvous scenario (`artemis3.py`)
      - SGP4 on the frontier plot (panel B)
+     - symplectic integrators (leapfrog, Yoshida 4th order) as a sweepable integrator choice
    - **Planned:**
      - Encke
-     - symplectic integrators
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay

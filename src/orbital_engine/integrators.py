@@ -1,5 +1,7 @@
 """
-Fixed-step Runge-Kutta integration for Cowell propagation.
+Fixed-step integration for Cowell propagation: classical RK4 (the default, and the only one with a
+fused compiled twin) and two symplectic methods, leapfrog and Yoshida's fourth-order composition (see
+`_KickDriftKick`), selected by name (`make_integrator`, `Simulation.set_cowell_integrator`).
 
 **What this is for.** The engine's only propagator until now is the analytic hierarchical Keplerian
 one (`propagators.py` / `kernels.py`): closed-form advance of classical elements, with no accumulated
@@ -84,7 +86,8 @@ from numpy.typing import NDArray
 from .custom_types import ScalarSeconds
 from .forces import AccelerationProvider
 
-__all__ = ["Integrator", "RK4Integrator"]
+__all__ = ["Integrator", "RK4Integrator", "LeapfrogIntegrator", "Yoshida4Integrator", "INTEGRATOR_NAMES",
+           "make_integrator"]
 
 
 class Integrator(Protocol):
@@ -211,3 +214,103 @@ class RK4Integrator:
         v_rel_new = v0 + (dt / 6.0) * (a1[indices] + 2.0 * a2[indices] + 2.0 * a3[indices] + a4[indices])
         state[indices, :3] = state[primaries, :3] + r_rel_new
         state[indices, 3:] = state[primaries, 3:] + v_rel_new
+
+
+# --------------------------------------------------------------------------------------------------
+# Symplectic integrators: Stormer-Verlet (leapfrog) and Yoshida's fourth-order composition
+# --------------------------------------------------------------------------------------------------
+
+class _KickDriftKick:
+    """
+    Shared machinery of the symplectic methods: the Stormer-Verlet substep in kick-drift-kick form
+    (Hairer, Lubich & Wanner, *Geometric Numerical Integration*, 2nd ed., Ch. I.3; section cited from memory, equation numbers not checked), on the
+    same parent-relative state as `RK4Integrator` and through the same `provider` contract.
+
+        v_half = v + (h/2) a(t, r)
+        r'     = r + h v_half
+        v'     = v_half + (h/2) a(t + h, r')
+
+    **Symplectic only for forces that do not depend on velocity** (`point_mass_gravity`, `j2`,
+    `zonal`, `tesseral` - the last is time-dependent, which the method handles in extended phase
+    space). `drag` depends on velocity: the provider is then evaluated at `v_half`, the method stays
+    second-order consistent, but the long-horizon guarantees do not apply - and drag is dissipative,
+    so there is nothing for them to preserve anyway. The acceleration at the end of one substep is the
+    start of the next (the "first same as last" saving), so `n` substeps cost `n + 1` evaluations.
+    """
+
+    def __init__(self, max_capacity: int) -> None:
+        self._r = np.zeros((max_capacity, 3), dtype=np.float64)
+        self._v = np.zeros((max_capacity, 3), dtype=np.float64)
+        self._a = np.zeros((max_capacity, 3), dtype=np.float64)
+
+    def _compose(
+        self,
+        provider: AccelerationProvider,
+        t: ScalarSeconds,
+        state: NDArray[np.float64],
+        dt: ScalarSeconds,
+        indices: NDArray[np.int64],
+        primaries: NDArray[np.int32],
+        weights: tuple[float, ...],
+    ) -> None:
+        if indices.size == 0:
+            return
+        dt = float(dt)
+        r, v, a = self._r, self._v, self._a
+        r[indices] = state[indices, :3] - state[primaries, :3]
+        v[indices] = state[indices, 3:] - state[primaries, 3:]
+        a[indices] = provider(t, state)[indices]          # state[indices] is still the original row
+        tau = float(t)
+        for w in weights:
+            h = w * dt
+            v_half = v[indices] + (0.5 * h) * a[indices]
+            r[indices] = r[indices] + h * v_half
+            tau += h
+            state[indices, :3] = state[primaries, :3] + r[indices]
+            state[indices, 3:] = state[primaries, 3:] + v_half
+            a[indices] = provider(tau, state)[indices]
+            v[indices] = v_half + (0.5 * h) * a[indices]
+        state[indices, :3] = state[primaries, :3] + r[indices]
+        state[indices, 3:] = state[primaries, 3:] + v[indices]
+
+
+class LeapfrogIntegrator(_KickDriftKick):
+    """Stormer-Verlet / leapfrog: second order, symplectic, time-reversible. Two force evaluations per
+    step (half of RK4's four). See `_KickDriftKick` for the method and its scope."""
+
+    def step(self, provider: AccelerationProvider, t: ScalarSeconds, state: NDArray[np.float64],
+             dt: ScalarSeconds, indices: NDArray[np.int64], primaries: NDArray[np.int32]) -> None:
+        self._compose(provider, t, state, dt, indices, primaries, (1.0,))
+
+
+#: Yoshida's triple-jump weights, `w1 = 1 / (2 - 2^(1/3))`, `w0 = -2^(1/3) / (2 - 2^(1/3))`:
+#: Yoshida, Phys. Lett. A 150 (1990) 262; Hairer, Lubich & Wanner Ch. II.4 (cited from memory; the
+#: weights are checked by the order test, which fails unless they make the composition fourth order).
+#: The middle step runs backwards (`w0 < 0`); `2 w1 + w0 = 1`.
+_YOSHIDA_W1 = 1.0 / (2.0 - 2.0 ** (1.0 / 3.0))
+_YOSHIDA_W0 = -(2.0 ** (1.0 / 3.0)) / (2.0 - 2.0 ** (1.0 / 3.0))
+
+
+class Yoshida4Integrator(_KickDriftKick):
+    """Yoshida's fourth-order symplectic composition of three leapfrog substeps (`w1, w0, w1`). Four
+    force evaluations per step, the same as RK4. See `_KickDriftKick` for its scope."""
+
+    def step(self, provider: AccelerationProvider, t: ScalarSeconds, state: NDArray[np.float64],
+             dt: ScalarSeconds, indices: NDArray[np.int64], primaries: NDArray[np.int32]) -> None:
+        self._compose(provider, t, state, dt, indices, primaries, (_YOSHIDA_W1, _YOSHIDA_W0, _YOSHIDA_W1))
+
+
+#: Cowell integrators by name - what a configuration names (`Simulation.set_cowell_integrator`,
+#: `sweep.ModelConfig.integrator`). Only `"rk4"` has a fused compiled twin.
+INTEGRATOR_NAMES = ("rk4", "leapfrog", "yoshida4")
+
+
+def make_integrator(name: str, max_capacity: int) -> Integrator:
+    """A fresh integrator of the named kind, scratch sized to `max_capacity`."""
+    if name == "rk4":
+        return RK4Integrator(max_capacity)
+    if name == "leapfrog":
+        return LeapfrogIntegrator(max_capacity)
+    if name == "yoshida4":
+        return Yoshida4Integrator(max_capacity)
+    raise ValueError(f"unknown integrator {name!r}; have {INTEGRATOR_NAMES}")

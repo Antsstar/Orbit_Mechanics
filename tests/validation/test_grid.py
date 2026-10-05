@@ -96,3 +96,13 @@ def test_compiled_without_numba_is_refused(build: Callable[[], Simulation], monk
     monkeypatch.setattr(sweep, "NUMBA_AVAILABLE", False)
     with pytest.raises(ValueError, match="needs numba"):
         sweep.apply_config(build(), ModelConfig("c", PropagatorType.COWELL, 60.0, force_models=FM, compiled=True))
+
+
+def test_horizon_can_be_a_function_of_the_axis_value(build: Callable[[], Simulation]) -> None:
+    """A horizon axis: each value gets its own horizon, and the error is the one at that horizon - a
+    Keplerian config against the J2 truth drifts further the longer it runs."""
+    rows = grid.run_grid("orbits", [1.0, 2.0], lambda v: build,
+                         lambda v: [ModelConfig("kepler", PropagatorType.KEPLERIAN, 60.0)],
+                         lambda v: v * 5760.0, oblateness=OBL, timing_batches=1, timing_warmup=0)
+    _, err = grid.series(rows, "kepler", "median_km")
+    assert err[1] > 1.5 * err[0]

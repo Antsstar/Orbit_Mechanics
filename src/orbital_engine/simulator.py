@@ -20,7 +20,7 @@ from .kernels import (
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
 from .registry import get_force_model, get_propagators
-from .integrators import Integrator, RK4Integrator
+from .integrators import INTEGRATOR_NAMES, Integrator, RK4Integrator, make_integrator
 from . import frames as fr
 from . import forces
 from . import gravity  # noqa: F401 - import registers "point_mass_gravity" as a force model (gravity.py)
@@ -135,6 +135,9 @@ class Simulation:
         # max_capacity) is allocated exactly once - see integrators.py's module docstring for why an
         # integrator must be a stateful object rather than a bare function.
         self._cowell_integrator: Integrator = RK4Integrator(max_capacity)
+        # Its name, which is what `set_cowell_integrator` and a sweep config select by. Only "rk4" has
+        # the fused compiled twin; any other keeps the Cowell set on the NumPy path (`_refresh_cowell_plan`).
+        self._cowell_integrator_name: str = "rk4"
 
         # Secular-J2 propagator scratch (see propagators.SecularJ2Propagator). `_secular_j2_idx` is
         # the cached active-slot list, same convention as `_cowell_idx` above. `_secular_j2_rates`
@@ -502,7 +505,8 @@ class Simulation:
         fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit | tesseral_bit
         foreign = (self.force_model_mask[idx] & ~fused_bits) != np.uint64(0)
         parent_is_cowell = np.isin(self._cowell_primaries, idx)
-        self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
+        self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any()
+                                     and self._cowell_integrator_name == "rk4")
 
         j2_params = self.force_model_params.get(geopotential.J2_MODEL)
         self._cowell_j2_params = self._no_j2_params if j2_params is None else j2_params
@@ -534,6 +538,24 @@ class Simulation:
             self._cowell_fused_ok = False
         else:
             self._cowell_drag_table_of[msis_rows] = table_of
+
+    def set_cowell_integrator(self, name: str) -> None:
+        """
+        Select the integrator every Cowell body is advanced with: `"rk4"` (the default, and the only one
+        with a fused compiled twin), `"leapfrog"` or `"yoshida4"` (symplectic; see `integrators.py`).
+        Rebuilds the Cowell plan, so a non-RK4 choice moves the Cowell set onto the NumPy path - which
+        is what a timing comparison between integrators then measures, until those have twins too.
+        """
+        if name not in INTEGRATOR_NAMES:
+            raise ValueError(f"unknown integrator {name!r}; have {INTEGRATOR_NAMES}")
+        self._cowell_integrator = make_integrator(name, self.max_capacity)
+        self._cowell_integrator_name = name
+        self._refresh_cowell_plan()
+
+    @property
+    def cowell_integrator(self) -> str:
+        """The name of the integrator Cowell bodies are advanced with."""
+        return self._cowell_integrator_name
 
     def enable_force_model(
         self,

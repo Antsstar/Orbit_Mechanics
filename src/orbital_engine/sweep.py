@@ -137,6 +137,10 @@ class ModelConfig(object):
     implementation part of the configuration, so a sweep can time the same physics both ways
     (`grid.crossover` along body count). `True` without numba is refused: the kernels would run as
     interpreted Python, which is neither implementation.
+
+    `integrator` names the Cowell integrator (`integrators.INTEGRATOR_NAMES`: "rk4", "leapfrog",
+    "yoshida4"); `None` keeps the default RK4. Only meaningful for `PropagatorType.COWELL`, and refused
+    on any other propagator rather than silently ignored.
     """
     name: str
     propagator: PropagatorType
@@ -147,6 +151,7 @@ class ModelConfig(object):
     bodies: Optional[Sequence[str]] = None
     station_keeping: Optional[StationKeepingSpec] = None
     compiled: Optional[bool] = None
+    integrator: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +248,12 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
                 f"config '{config.name}': compiled=True needs numba; without it the kernels run as "
                 f"interpreted Python, which is neither the compiled nor the reference implementation.")
         sim.use_compiled_kernel = bool(config.compiled)
+    if config.integrator is not None:
+        if config.propagator != PropagatorType.COWELL:
+            raise ValueError(
+                f"config '{config.name}': integrator={config.integrator!r} only applies to "
+                f"PropagatorType.COWELL, got {config.propagator.name}.")
+        sim.set_cowell_integrator(config.integrator)
     if idx.size == 0:
         return idx
 

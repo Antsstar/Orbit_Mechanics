@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -74,18 +74,20 @@ def run_grid(
     values: Sequence[float],
     build_for: Callable[[float], Callable[[], Simulation]],
     configs_for: Callable[[float], Sequence[ModelConfig]],
-    horizon_s: float,
+    horizon_s: Union[float, Callable[[float], float]],
     **sweep_kwargs: Any,
 ) -> List[GridRow]:
     """
-    `run_sweep(build_for(v), configs_for(v), horizon_s, **sweep_kwargs)` at every `v` in `values`,
-    flattened into rows in (value, config) order. `axis` only labels the rows. Configs must keep their
-    names across values (see the module docstring); a name missing at some value is simply absent from
-    that value's rows.
+    `run_sweep(build_for(v), configs_for(v), horizon, **sweep_kwargs)` at every `v` in `values`,
+    flattened into rows in (value, config) order. `horizon_s` is one horizon for every value, or a
+    function of the value - which is what a horizon axis needs (`lambda orbits: orbits * period`).
+    `axis` only labels the rows. Configs must keep their names across values (see the module
+    docstring); a name missing at some value is simply absent from that value's rows.
     """
     rows: List[GridRow] = []
     for v in values:
-        for r in run_sweep(build_for(float(v)), configs_for(float(v)), horizon_s, **sweep_kwargs):
+        horizon = float(horizon_s(float(v))) if callable(horizon_s) else float(horizon_s)
+        for r in run_sweep(build_for(float(v)), configs_for(float(v)), horizon, **sweep_kwargs):
             rows.append(GridRow(axis, float(v), r.config_name, r))
     return rows
 
