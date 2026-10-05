@@ -384,7 +384,7 @@ alone, and the two rows differ by season.
 `sun_earth_moon` over 60 days, drawn in the barycentric frame. Neither the Earth nor the Moon is the
 other's Keplerian parent: both are measured about the Earth-Moon barycentre, which is the body
 carrying the heliocentric ellipse. The Earth also *heads* that system, so its own element row is
-deliberately zeroed — its motion is not an orbit but a 4697 km reflex kick, entirely inside its own
+deliberately zeroed — its motion is not an orbit but a reflex kick (a = 4,673 km, e = 0.055), entirely inside its own
 surface. The measured radius ratio equals μ_Moon/μ_Earth to **8 × 10⁻¹⁵**, which is the barycentric
 model's defining invariant drawn rather than asserted.
 

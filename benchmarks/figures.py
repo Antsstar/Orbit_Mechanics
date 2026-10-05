@@ -130,7 +130,7 @@ presets are from memory, unverified.
 hierarchy visible: relative to the Earth-Moon barycentre. Neither body's `parent_indices` parent is
 the other - both are measured about the barycentre, which is itself the body carrying the
 heliocentric ellipse. The Earth also *heads* that system, so its own COE row is deliberately zeroed
-(`_rehydrate_coes`): its motion is not an orbit but the reflex kick, r = 4697 km, entirely inside its
+(`_rehydrate_coes`): its motion is not an orbit but the reflex kick (a = 4,673 km, e = 0.055), entirely inside its
 own 6371 km surface, which is why the right panel is an 81x zoom. The measured radius ratio is the
 mass ratio to machine precision - 0.01230463 against mu_Moon/mu_Earth = 0.01230463, a relative
 difference of 8e-15 - which is the barycentric model's defining invariant, drawn rather than
@@ -558,6 +558,17 @@ def figure_hierarchy() -> None:
     moon_r = np.linalg.norm(moon_xy, axis=1)
     reflex_r = np.linalg.norm(earth_xy, axis=1)
     ratio = float(np.mean(reflex_r / moon_r))
+
+    def ellipse(xy: np.ndarray, r: np.ndarray) -> tuple[float, float, np.ndarray]:
+        # Semi-major axis and eccentricity from the sampled apsides, and the ellipse's centre: the
+        # midpoint of periapsis and apoapsis. The barycentre is a *focus*, a * e from that centre.
+        a = 0.5 * float(r.min() + r.max())
+        e = float((r.max() - r.min()) / (r.max() + r.min()))
+        centre = 0.5 * (xy[int(np.argmin(r))] + xy[int(np.argmax(r))])
+        return a, e, centre
+
+    moon_a, moon_e, moon_c = ellipse(moon_xy, moon_r)
+    earth_a, earth_e, earth_c = ellipse(earth_xy, reflex_r)
     mass_ratio = scenarios.MU_MOON / scenarios.MU_EARTH
     print(f"  Moon barycentric range {moon_r.min():.0f} .. {moon_r.max():.0f} km")
     print(f"  Earth reflex radius {reflex_r.min():.1f} .. {reflex_r.max():.1f} km "
@@ -565,6 +576,9 @@ def figure_hierarchy() -> None:
     print(f"  radius ratio {ratio:.6f} against the mass ratio mu_Moon/mu_Earth = {mass_ratio:.6f} "
           f"(rel. diff {abs(ratio - mass_ratio) / mass_ratio:.2e})")
     print(f"  Earth COE eccentricity row = {sim.coe_states[earth, 1]:.1f} (zeroed: it is a system head)")
+    print(f"  Moon a {moon_a:.0f} km e {moon_e:.4f}, centre {np.linalg.norm(moon_c[:2]):.0f} km from the barycentre "
+          f"(a e = {moon_a * moon_e:.0f}); Earth a {earth_a:.1f} km e {earth_e:.4f}, centre "
+          f"{np.linalg.norm(earth_c[:2]):.1f} km (a e = {earth_a * earth_e:.1f}), on the opposite side")
 
     fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(12.5, 5.8))
 
@@ -593,12 +607,14 @@ def figure_hierarchy() -> None:
     ax_r.add_patch(plt.Circle((0.0, 0.0), scenarios.EARTH_RADIUS, fill=False, ls="--", lw=1.1,
                               color="0.4"))
     ax_r.scatter([0.0], [0.0], s=55, marker="x", color="tab:orange", zorder=4,
-                 label="Earth-Moon barycentre")
+                 label="Earth-Moon barycentre (a focus of the ellipse)")
+    ax_r.scatter([earth_c[0]], [earth_c[1]], s=30, marker="+", color="tab:green", zorder=4,
+                 label=f"centre of the ellipse, a e = {earth_a * earth_e:.0f} km away")
     ax_r.set_aspect("equal")
     ax_r.set_xlabel("x (km, relative to the barycentre)")
     ax_r.set_ylabel("y (km)")
     ax_r.set_title(
-        f"Zoom, x{moon_r.mean() / reflex_r.mean():.0f}: the reflex kick, r = {reflex_r.mean():.0f} km\n"
+        f"Zoom, x{moon_r.mean() / reflex_r.mean():.0f}: the reflex kick, a = {earth_a:,.0f} km, e = {earth_e:.3f}\n"
         f"(dashed circle: the Earth's own {scenarios.EARTH_RADIUS:.0f} km surface)"
     )
     ax_r.grid(True, ls=":", alpha=0.5)
@@ -610,12 +626,15 @@ def figure_hierarchy() -> None:
         f"Neither body's Keplerian parent (parent_indices) is the other: both are measured about the "
         f"barycentre, which is itself the body carrying the heliocentric ellipse.\n"
         f"The Earth also *heads* that system, so its own COE row is deliberately zeroed - its motion is "
-        f"not an orbit but the reflex kick on the right, r = {reflex_r.mean():.0f} km,\n"
+        f"not an orbit but the reflex kick on the right (a = {earth_a:,.0f} km, e = {earth_e:.3f}),\n"
         f"entirely inside its own surface. The radius ratio is the mass ratio: "
-        f"{ratio:.6f} against mu_Moon/mu_Earth = {mass_ratio:.6f}.",
+        f"{ratio:.6f} against mu_Moon/mu_Earth = {mass_ratio:.6f}. Neither path is centred on the barycentre: "
+        f"it sits at a focus of each ellipse,\n"
+        f"a e from the centre ({moon_a * moon_e:,.0f} km for the Moon, {earth_a * earth_e:.0f} km for the Earth, "
+        f"on opposite sides), because the Moon's orbit has e = {moon_e:.4f}.",
         fontsize=8, va="bottom",
     )
-    fig.tight_layout(rect=(0, 0.075, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.115, 1, 0.96))
     _save(fig, "hierarchy.png")
 
 
