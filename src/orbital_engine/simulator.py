@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from typing import List, Optional, Any, Dict, Sequence, Union, cast
+from typing import List, Optional, Any, Dict, Sequence, Tuple, Union, cast
 from .custom_types import ScalarSeconds, PropagatorType, ForceModelMask, COEIndex
 from numpy.typing import NDArray
 
@@ -198,6 +198,14 @@ class Simulation:
         self._events: List[events.Event] = []
         self._event_directions: NDArray[np.float64] = np.empty(0, dtype=np.float64)
         self._event_tolerances: NDArray[np.float64] = np.empty(0, dtype=np.float64)
+        # Per event row (the concatenated `_event_values` order): which event owns it, whether it is
+        # still detected (`max_fires` not yet reached) and how many times it has fired. Fire state
+        # lives here, not on the frozen `Event`, so one event can be reused across simulations.
+        self._event_owner: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._event_live: NDArray[np.bool_] = np.empty(0, dtype=np.bool_)
+        self._event_fire_counts: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._event_fires: List[Tuple[str, Tuple[int, ...], float]] = []
+        self._event_needs_fire: bool = False
         self.max_event_splits: int = events.MAX_SPLITS_PER_STEP
         self._event_splits: int = 0
         self._event_evaluations: int = 0
@@ -1341,6 +1349,10 @@ class Simulation:
                 f"event {event.name!r}: direction={event.direction!r} must be -1 (positive to "
                 f"negative), +1 (negative to positive) or 0 (both)."
             )
+        if event.max_fires is not None and event.max_fires < 1:
+            raise ValueError(
+                f"event {event.name!r}: max_fires={event.max_fires!r} must be a positive count, or None "
+                f"for unlimited.")
         if not event.tol_s > 0.0:
             raise ValueError(
                 f"event {event.name!r}: tol_s={event.tol_s!r} must be positive; it is the bracket "
@@ -1362,6 +1374,12 @@ class Simulation:
             [np.full(e.bodies.size, float(e.direction), dtype=np.float64) for e in self._events])
         self._event_tolerances = np.concatenate(
             [np.full(e.bodies.size, float(e.tol_s), dtype=np.float64) for e in self._events])
+        self._event_owner = np.concatenate(
+            [np.full(e.bodies.size, k, dtype=np.int64) for k, e in enumerate(self._events)])
+        self._event_needs_fire = any(e.action is not None or e.max_fires is not None for e in self._events)
+        self._event_live = np.concatenate([self._event_live, np.ones(event.bodies.size, dtype=np.bool_)])
+        self._event_fire_counts = np.concatenate(
+            [self._event_fire_counts, np.zeros(event.bodies.size, dtype=np.int64)])
         return event
 
     @property
@@ -1374,6 +1392,11 @@ class Simulation:
         self._events.clear()
         self._event_directions = np.empty(0, dtype=np.float64)
         self._event_tolerances = np.empty(0, dtype=np.float64)
+        self._event_owner = np.empty(0, dtype=np.int64)
+        self._event_live = np.empty(0, dtype=np.bool_)
+        self._event_fire_counts = np.empty(0, dtype=np.int64)
+        self._event_fires.clear()
+        self._event_needs_fire = False
         self._event_epochs.clear()
 
     @property
@@ -1505,6 +1528,7 @@ class Simulation:
             g0 = self._event_values()
             self._advance(remaining)
             crossed = events.crossing_indices(g0, self._event_values(), self._event_directions)
+            crossed = crossed[self._event_live[crossed]]       # bodies past `max_fires` are no longer detected
             if crossed.size == 0:
                 return                      # the speculative advance is the real one: bit-identical
 
@@ -1606,6 +1630,40 @@ class Simulation:
             self._event_splits += 1
             splits += 1
             remaining -= advanced
+            if self._event_needs_fire:
+                self._fire_events(g0)
+
+    def _fire_events(self, g0: NDArray[np.float64]) -> None:
+        """
+        Count, retire and act on every event body that has crossed since `g0` was read (the start of
+        the sub-interval). Called with the arena strictly past the located crossing and the latches
+        released, so an action's `apply_delta_v` or `enable_force_model` sees the post-crossing
+        state, and the next scan starts from whatever the action left. Only bodies that have actually
+        crossed fire: another body due later in the same interval is left for the re-scan.
+        """
+        fired = events.crossing_indices(g0, self._event_values(), self._event_directions)
+        fired = fired[self._event_live[fired]]
+        if fired.size == 0:
+            return
+        t = float(self.t)
+        for k in np.unique(self._event_owner[fired]).tolist():
+            e = self._events[int(k)]
+            rows = fired[self._event_owner[fired] == k]
+            self._event_fire_counts[rows] += 1
+            if e.max_fires is not None:
+                self._event_live[rows] = self._event_fire_counts[rows] < e.max_fires
+            first = int(np.flatnonzero(self._event_owner == k)[0])
+            bodies = e.bodies[rows - first]
+            self._event_fires.append((e.name, tuple(int(b) for b in bodies), t))
+            if e.action is not None:
+                e.action(self, bodies, t)
+
+    @property
+    def event_fires(self) -> tuple[Tuple[str, Tuple[int, ...], float], ...]:
+        """Every firing of an event that has an `action` or a `max_fires`: `(event name, slots, t)`,
+        in order. Plain split-only events (the shadow terminator) are not recorded here; their
+        crossings are in `event_epochs`. Emptied by `clear_events`."""
+        return tuple(self._event_fires)
 
     def apply_delta_v(
         self,

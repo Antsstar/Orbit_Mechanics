@@ -43,8 +43,25 @@ step with no crossing bit-identical to a step with no events registered at all.
   splitting the step and actually recovering the order. See "Splitting is not enough" below.
 
 Ready-made events: `shadow_event(sim)`, the cylindrical umbra boundary of every `"srp"` body that has
-one. A future altitude-threshold, apoapsis or elevation-mask event is the same three lines - a pure
-array function of the state, and a slot list.
+one; `apsis_event(bodies)` and `node_event(bodies)`, the zeros of parent-relative `r . v` and `z`. A
+future altitude-threshold or elevation-mask event is the same three lines - a pure array function of
+the state, and a slot list.
+
+Actions: something happening at the crossing
+--------------------------------------------
+An event can also **do** something there (`Event.action`): `(sim, fired, t)`, run once the arena
+stands strictly past the crossing with latches released, for the bodies that crossed. It may mutate
+the arena through the public API - `burn(dv_rsw)` applies an impulse, `enable_model(name, ...)` turns a
+force model on - which is what turns "split at apoapsis" into "circularise at apoapsis" and "burn at
+the ascending node". `Event.max_fires` retires a body after that many crossings (per simulation, so an
+`Event` stays reusable data). Every firing is recorded in `Simulation.event_fires`.
+
+The action is late by at most `(1 + nudges) tol_s`. It finds the crossing on the *integrated*
+trajectory, which is a feature: in `tests/validation/test_event_actions.py` a Cowell vessel at a 60 s
+step reaches its transfer apoapsis 0.027 s before the analytic time, and an apoapsis-event
+circularisation leaves `e` = 6.2e-8 where the analytically scheduled burn leaves 1.4e-6. An event with
+no action and no `max_fires` is exactly the split it always was; a do-nothing action is bit-identical
+to none, because the firing path only reads the arena.
 
 Per body, or per arena?
 -----------------------
@@ -229,8 +246,9 @@ if TYPE_CHECKING:
     from .simulator import Simulation
 
 __all__ = [
-    "Event", "EventFunction", "LatchFunction", "DEFAULT_EVENT_TOL_S", "MAX_SPLITS_PER_STEP",
+    "Event", "EventFunction", "LatchFunction", "EventAction", "DEFAULT_EVENT_TOL_S", "MAX_SPLITS_PER_STEP",
     "MAX_CROSSING_NUDGES", "crossing_indices", "locate_crossing", "reduce_to_scalar", "shadow_event",
+    "apsis_event", "node_event", "burn", "enable_model",
 ]
 
 
@@ -243,6 +261,12 @@ EventFunction: TypeAlias = Callable[["Simulation", NDArray[np.int64]], ArrayFloa
 #: Only a *discontinuous* model needs one; see `Event.latch` and `srp.latch_shadow_branch`.
 LatchFunction: TypeAlias = Callable[
     ["Simulation", NDArray[np.int64], Optional[ArrayFloat]], None]
+
+#: An event action: `(sim, fired, t) -> None`, run once the arena has been stepped strictly past a
+#: located crossing. `fired` holds the slots of this event's bodies that crossed there, `t` is the
+#: absolute time the arena stands at. Unlike an event function it **may** mutate the arena, through
+#: the public API only (`apply_delta_v`, `enable_force_model`, ...). It must not add or clear events.
+EventAction: TypeAlias = Callable[["Simulation", NDArray[np.int64], float], None]
 
 
 #: Time tolerance a crossing is located to, seconds. Derived in the module docstring: it puts the
@@ -306,6 +330,19 @@ class Event:
         duration of a sub-interval known to contain no crossing, which makes that sub-interval's
         right-hand side genuinely smooth. An event that marks something *continuous* (apoapsis, an
         altitude threshold, an elevation mask) needs none and leaves this `None`.
+    action : EventAction or None
+        What happens at the crossing, beyond splitting the step: `(sim, fired, t)`, run after the
+        arena has been stepped strictly past the crossing (with latches released), for the bodies of
+        this event that crossed there. It is late by at most `(1 + nudges) * tol_s`, the same budget
+        the split itself carries, so an impulsive burn placed by an event is mistimed by no more than
+        that. `None` (the default) leaves the event a pure split, bit for bit as before actions
+        existed. Build one with `burn` or `enable_model` rather than a bare lambda, so a configuration
+        names what it does.
+    max_fires : int or None
+        Per body: after this many crossings the body is no longer detected for this event, so it
+        neither fires nor splits a step again ("burn at the *next* apoapsis" is `max_fires=1`). Counts
+        live on the `Simulation` the event is added to, never on the event, so one `Event` can be
+        reused across a sweep's simulations. `None`: unlimited.
     """
 
     name: str
@@ -315,6 +352,8 @@ class Event:
     tol_s: float = DEFAULT_EVENT_TOL_S
     latch: Optional[LatchFunction] = None
     label: str = field(default="", compare=False)
+    action: Optional[EventAction] = None
+    max_fires: Optional[int] = None
 
 
 def crossing_indices(
@@ -483,3 +522,71 @@ def shadow_event(
         name=f"{SRP_MODEL}.umbra", function=shadow_clearance, bodies=slots, direction=0,
         tol_s=tol_s, latch=latch_shadow_branch,
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# Orbit-geometry events and actions: where something should happen, and what
+# --------------------------------------------------------------------------------------------------
+
+def _relative_to_parent(sim: "Simulation", bodies: NDArray[np.int64]) -> ArrayFloat:
+    """`(k, 6)` state of each body relative to its Keplerian parent (`parent_indices`)."""
+    rel: ArrayFloat = sim.global_states[bodies] - sim.global_states[sim.parent_indices[bodies]]
+    return rel
+
+
+def _radial_velocity(sim: "Simulation", bodies: NDArray[np.int64]) -> ArrayFloat:
+    rel = _relative_to_parent(sim, bodies)
+    out: ArrayFloat = np.einsum("ij,ij->i", rel[:, :3], rel[:, 3:])
+    return out
+
+
+def _height_above_equator(sim: "Simulation", bodies: NDArray[np.int64]) -> ArrayFloat:
+    out: ArrayFloat = _relative_to_parent(sim, bodies)[:, 2].copy()
+    return out
+
+
+def apsis_event(
+    bodies: NDArray[np.int64], *, apoapsis: bool = True, action: Optional[EventAction] = None,
+    max_fires: Optional[int] = None, tol_s: float = DEFAULT_EVENT_TOL_S,
+) -> Event:
+    """
+    Apoapsis (or, with `apoapsis=False`, periapsis) of each body about its Keplerian parent: the
+    zero of `r . v` relative to the parent, falling through zero at apoapsis (`direction=-1`) and
+    rising at periapsis (`+1`). Continuous, so no latch. On a circular orbit `r . v` sits at ~0 and
+    its sign is round-off: such an event may fire spuriously or never, so do not put one there.
+    """
+    return Event(name="apoapsis" if apoapsis else "periapsis", function=_radial_velocity,
+                 bodies=np.asarray(bodies, dtype=np.int64), direction=-1 if apoapsis else 1, tol_s=tol_s,
+                 action=action, max_fires=max_fires)
+
+
+def node_event(
+    bodies: NDArray[np.int64], *, ascending: bool = True, action: Optional[EventAction] = None,
+    max_fires: Optional[int] = None, tol_s: float = DEFAULT_EVENT_TOL_S,
+) -> Event:
+    """
+    Ascending (or descending) node of each body about its Keplerian parent, in the arena frame: the
+    zero of the parent-relative `z`, rising at the ascending node. For an Earth-centred arena that is
+    the equator crossing, the classic place for a plane-change burn.
+    """
+    return Event(name="ascending node" if ascending else "descending node", function=_height_above_equator,
+                 bodies=np.asarray(bodies, dtype=np.int64), direction=1 if ascending else -1, tol_s=tol_s,
+                 action=action, max_fires=max_fires)
+
+
+def burn(dv_rsw_km_s: ArrayFloat) -> EventAction:
+    """An action applying the impulsive `dv_rsw_km_s` (RSW, km/s) to the bodies that fired."""
+    dv = np.asarray(dv_rsw_km_s, dtype=np.float64).copy()
+
+    def act(sim: "Simulation", fired: NDArray[np.int64], t: float) -> None:
+        sim.apply_delta_v(fired, dv)
+    return act
+
+
+def enable_model(name: str, **coefficients: float) -> EventAction:
+    """An action enabling force model `name` with `coefficients` on the bodies that fired (e.g. turn
+    drag on once a body descends through an altitude). Goes through `enable_force_model`, so the
+    dispatch plan is rebuilt before the rest of the step is integrated."""
+    def act(sim: "Simulation", fired: NDArray[np.int64], t: float) -> None:
+        sim.enable_force_model(name, fired, **coefficients)
+    return act
