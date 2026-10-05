@@ -307,3 +307,59 @@ def test_refuses_a_dt_the_controller_cannot_observe(build: Callable[[], Simulati
     out: List[SweepResult] = run_sweep(build, [ok], 3600.0, timing_batches=1, timing_warmup=0,
                                        station_keeping=SPEC, delta_v_baseline="ok secular")
     assert out[0].delta_v is not None and out[0].delta_v.bodies[0].n_raises == 0
+
+
+# --- per-configuration policies (`ModelConfig.station_keeping`) ---------------------------------------
+#
+# Expected, stated before measuring:
+# - a config's own spec equal to the sweep's gives the same budget, bit for bit;
+# - one physics under two bands, [291, 293.5] and [291, 292.5]: the drag make-up per day is set by the
+#   physics, not the policy, so the steady rates agree to ~5 % (the narrow band's mean altitude is
+#   0.5 km lower, ~1 % denser at H ~ 40 km; the per-cycle overheads differ); the narrow band makes at
+#   least as many raises;
+# - the margin: the controller fires when the mean reaches `lower_km`, and the second impulse lands
+#   half a transfer (~2,700 s) later, so at the study's decay (~7e-5 km/s) the mean sags ~0.2 km below
+#   the edge: lowest mean altitude in (lower - 0.5, lower].
+# Measured, and the margin prediction was wrong twice over. First, the controller's own mean is `nan`
+# from each raise until its window refills, so its minimum was the firing threshold itself (291.00001):
+# the metric now is a running one-period mean of the osculating altitude, computed after the run.
+# Second, that true mean bottoms out at 291.15 km, *above* the edge, for both bands: the controller's
+# lag-corrected estimate projects half a period ahead and fires early, so the sag never reaches the
+# edge. Osculating minimum 286.3 km (J2's short-period swing). Rates: narrow band +0.88 % (it sits 0.5 km lower, in denser air); raises 3 vs 2.
+
+NARROW = StationKeepingSpec(LOWER_KM, LOWER_KM + 1.5)
+
+
+def test_a_configs_own_policy_equal_to_the_sweeps_is_bit_identical(build: Callable[[], Simulation]) -> None:
+    from dataclasses import replace
+    shared = run_sweep(build, [LAYERED], HORIZON_S, timing_batches=1, timing_warmup=0,
+                       station_keeping=SPEC, delta_v_baseline="layered")
+    own = run_sweep(build, [replace(LAYERED, station_keeping=SPEC)], HORIZON_S, timing_batches=1,
+                    timing_warmup=0, delta_v_baseline="layered")
+    assert shared[0].delta_v == own[0].delta_v
+
+
+def test_one_physics_under_two_policies(build: Callable[[], Simulation]) -> None:
+    from dataclasses import replace
+    base = replace(LAYERED, name="band 2.5 km")
+    narrow = replace(LAYERED, name="band 1.5 km", station_keeping=NARROW)
+    res = {r.config_name: r for r in run_sweep(
+        build, [base, narrow], HORIZON_S, timing_batches=1, timing_warmup=0, station_keeping=SPEC,
+        delta_v_baseline="band 2.5 km")}
+    b, n = res["band 2.5 km"].delta_v, res["band 1.5 km"].delta_v
+    assert b is not None and n is not None
+    assert abs(n.rate_error_rel) < 0.05
+    assert n.median_raises > b.median_raises          # 1.5 km cycles ~1.7x as often: 3 vs 2
+    for m in (b, n):
+        assert LOWER_KM < m.median_lowest_mean_altitude_km < LOWER_KM + 0.5
+        assert all(body.lowest_altitude_km < body.lowest_mean_altitude_km for body in m.bodies)
+
+
+def test_policy_plumbing(build: Callable[[], Simulation]) -> None:
+    from dataclasses import replace
+    kept = replace(LAYERED, name="kept", station_keeping=SPEC)
+    free = replace(NO_DRAG, name="unkept")
+    res = run_sweep(build, [kept, free], 3600.0, timing_batches=1, timing_warmup=0, delta_v_baseline="kept")
+    assert res[0].delta_v is not None and res[1].delta_v is None
+    with pytest.raises(ValueError, match="no station-keeping policy"):
+        run_sweep(build, [kept, free], 3600.0, timing_batches=1, timing_warmup=0, delta_v_baseline="unkept")

@@ -156,12 +156,12 @@ module's row there before changing that module or writing a test against it.
 | `ephemeris.py` | `"ephemeris_third_body"`: tabulated perturbers (Hermite) at every RK4 stage time — fourth order. Tables are centred on the parent; out-of-range queries raise. Not fused |
 | `thrust.py` | `"thrust"`, Cowell-only, RSW direction (norm throttles). **Mass is state**: re-seed `mass_kg` to re-run. Not fused |
 | `manoeuvres.py` | Impulsive Δv in RSW under every propagator; `schedule_delta_v` splits the step at the epoch. Keplerian/secular-J2 re-derive elements (and rates). Not a registry entry |
-| `events.py` | Event-driven step splitting (Illinois false position over trial propagations) with `Event.latch`. Blind to an even number of crossings in one step |
+| `events.py` | Event-driven step splitting (Illinois false position over trial propagations) with `Event.latch`, plus `Event.action` / `max_fires` (`apsis_event`, `node_event`, `burn`, `enable_model`). Blind to an even number of crossings in one step. An action must not add or clear events |
 | `integrators.py` | `RK4Integrator`: copies each stage's accelerations (the provider returns a shared buffer). Not allocation-free |
 | `propagators.py` | `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`, coefficients mandatory); `mean_seed=True` corrects `p` only |
 | `geometry.py` | Elevation / azimuth / range rate (**positive = opening**), access windows, `line_of_sight`, `segment_clearance`. Spherical, radians, azimuth from north. **`theta0` is referenced to `epoch_s`** (default absolute sim time), unlike `viz.ground_track` |
 | `access.py` / `isl.py` | Error in contact windows (ground / inter-satellite) and the exported contact datasets. **`sample_dt_s` must be an integer multiple of every config's `dt`.** `h_graze_km` is required. ISL dataset edges are biased at 60 s; sample at 15 s for export |
-| `sweep.py` | `run_sweep`: configurations as data against one truth; `access=`, `isl=`, `station_keeping=` + `delta_v_baseline=`, `zonal=`, `tesseral=`, `external=` (e.g. SGP4 tiers) |
+| `sweep.py` | `run_sweep`: configurations as data against one truth; `access=`, `isl=`, `station_keeping=` + `delta_v_baseline=` (or per config: `ModelConfig.station_keeping`), `zonal=`, `tesseral=`, `external=` (e.g. SGP4 tiers) |
 | `stationkeeping.py` | Dead-band altitude controller keyed on mean altitude; `observe()` after every step. The Δv sweep metric needs a named baseline config |
 | `viz.py` | Plot data, no matplotlib. **`sample_states` advances the simulation.** Body-fixed rotation takes `-theta` |
 | `sgp4_bridge.py` | SGP4 wrapped, never reimplemented; TEME taken as inertial. A TLE's mean elements **never** reach `coe_to_rv`. SGP4 is an `ExternalTier`, not a `PropagatorType` |

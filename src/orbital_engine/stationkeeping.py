@@ -445,12 +445,22 @@ class BodyDeltaV:
     """
     One station-kept body's budget over a sweep horizon: total Delta-v (m/s, every raise including
     the first), number of raises, and the steady rate (m/s per day, `steady_rate`'s definition).
+
+    And the other side of the trade, the **margin** the policy kept: `lowest_mean_altitude_km`, the
+    lowest one-period running mean of the osculating altitude over the run (computed afterwards, so
+    it sees the sag during a raise, which the controller's own mean is blind to; `nan` if the run is
+    shorter than one period), and `lowest_altitude_km`, the lowest osculating altitude (closest
+    approach to the atmosphere, J2's short-period oscillation included). The controller's
+    lag-corrected estimate fires slightly *early*, so the running mean can stay above `lower_km`:
+    measured 291.15 km over a [291, 293.5] band (`tests/validation/test_sweep_delta_v.py`).
     """
 
     body: str
     total_dv_m_s: float
     n_raises: int
     steady_rate_m_s_per_day: float
+    lowest_mean_altitude_km: float = float("nan")
+    lowest_altitude_km: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -476,6 +486,7 @@ class DeltaVMetrics:
     median_steady_rate_m_s_per_day: float
     rate_error_rel: float
     total_error_rel: float
+    median_lowest_mean_altitude_km: float = float("nan")
 
 
 def _relative(value: float, base: float) -> float:
@@ -500,6 +511,7 @@ def delta_v_metrics(
         baseline=baseline, bodies=tuple(bodies), median_total_dv_m_s=total, median_raises=raises,
         median_steady_rate_m_s_per_day=rate, rate_error_rel=_relative(rate, base_rate),
         total_error_rel=_relative(total, base_total),
+        median_lowest_mean_altitude_km=float(np.median([b.lowest_mean_altitude_km for b in bodies])),
     )
 
 

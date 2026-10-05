@@ -73,7 +73,7 @@ does that.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Callable, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -126,6 +126,10 @@ class ModelConfig(object):
     propagator, the same strictness `set_propagator` itself enforces. `mean_seed` is likewise only
     meaningful for `SECULAR_J2` - `apply_config` raises before ever calling into `Simulation` if either
     is set inconsistently, rather than letting `set_propagator`'s own error surface out of context.
+
+    `station_keeping` is this configuration's own controller policy, overriding `run_sweep`'s
+    `station_keeping`. It is what lets one sweep fly the same physics under several policies
+    (several configs differing only here), or pair each model with its own policy.
     """
     name: str
     propagator: PropagatorType
@@ -134,6 +138,7 @@ class ModelConfig(object):
     mean_seed: bool = False
     force_models: Sequence[ForceModelSpec] = field(default_factory=tuple)
     bodies: Optional[Sequence[str]] = None
+    station_keeping: Optional[StationKeepingSpec] = None
 
 
 @dataclass(frozen=True)
@@ -444,13 +449,32 @@ def station_keeping_for(
         return ()
     run = run_station_keeping(sim, idx, spec, horizon_s, config.dt)
     slot_to_name = {slot: name for name, slot in sim.name_to_index.items()}
+    column = {int(b): j for j, b in enumerate(run.bodies)}
+    mu = float(sim.mu_array[idx[0]] + sim.mu_array[sim.parent_indices[idx[0]]])
+    window = max(1, int(round(window_period_s(spec, mu) / config.dt)))
     return tuple(
         BodyDeltaV(
             body=slot_to_name[s.body], total_dv_m_s=s.total_dv_km_s * 1e3, n_raises=s.n_burns,
             steady_rate_m_s_per_day=s.steady_rate_km_s_per_s * 1e3 * 86400.0,
+            lowest_mean_altitude_km=_lowest_running_mean(
+                run.osculating_altitude_km[:, column[int(s.body)]], window),
+            lowest_altitude_km=float(np.min(run.osculating_altitude_km[:, column[int(s.body)]])),
         )
         for s in run.summary
     )
+
+
+def _lowest_running_mean(osculating_km: NDArray[np.float64], window: int) -> float:
+    """
+    The lowest one-period running mean of the osculating altitude, after the run: every full window
+    of `window` samples, uniform weights. Not the controller's own mean, which is blind (`nan`) from
+    each raise until its window refills - exactly when the orbit sags - so its minimum is just the
+    firing threshold. `nan` if the run is shorter than one window.
+    """
+    if osculating_km.size < window:
+        return float("nan")
+    running = np.convolve(osculating_km, np.full(window, 1.0 / window, dtype=np.float64), mode="valid")
+    return float(np.min(running))
 
 
 def _time_propagation(
@@ -612,7 +636,10 @@ def run_sweep(
     propagation each (`station_keeping_for`), scored against the configuration named by
     `delta_v_baseline`, which is **required** and must name a config in `configs` - it is never
     inferred, because which model is the reference is the comparison's premise, not a default.
-    Every config's `dt` is checked against the controller first (`check_station_keeping_dt`), before
+    A config's own `ModelConfig.station_keeping` overrides this one, so several configs can fly the
+    same physics under different policies; `delta_v_baseline` must then name a config with a policy,
+    and a config with none (and no sweep-level spec) gets no `delta_v`.
+    Every config's `dt` is checked against its controller first (`check_station_keeping_dt`), before
     truth is integrated. `delta_v_baseline` without `station_keeping` is refused too, since it would
     otherwise be silently ignored.
 
@@ -623,7 +650,11 @@ def run_sweep(
     """
     truth_sim = build_scenario()
 
-    if station_keeping is not None:
+    # Each config's controller: its own `ModelConfig.station_keeping`, else the sweep's.
+    policy: Dict[str, Optional[StationKeepingSpec]] = {
+        c.name: c.station_keeping if c.station_keeping is not None else station_keeping for c in configs}
+    kept = [c for c in configs if policy[c.name] is not None]
+    if kept:
         names = [c.name for c in configs]
         if delta_v_baseline is None:
             raise ValueError(
@@ -634,8 +665,14 @@ def run_sweep(
         if delta_v_baseline not in names:
             raise ValueError(
                 f"delta_v_baseline={delta_v_baseline!r} names no config in this sweep; have {names}")
-        for config in configs:
-            check_station_keeping_dt(truth_sim, config, station_keeping)
+        if policy[delta_v_baseline] is None:
+            raise ValueError(
+                f"delta_v_baseline={delta_v_baseline!r} has no station-keeping policy, so no budget to "
+                f"score against")
+        for config in kept:
+            spec = policy[config.name]
+            assert spec is not None
+            check_station_keeping_dt(truth_sim, config, spec)
     elif delta_v_baseline is not None:
         raise ValueError("delta_v_baseline was given without station_keeping; it would be ignored")
 
@@ -704,10 +741,9 @@ def run_sweep(
         if isl is not None and isl_truth is not None:
             isl_metrics = isl_metrics_for(build_scenario, config, horizon_s, isl, isl_truth)
 
-        if station_keeping is not None:
-            budgets[config.name] = station_keeping_for(
-                build_scenario, config, horizon_s, station_keeping,
-            )
+        spec_k = policy[config.name]
+        if spec_k is not None:
+            budgets[config.name] = station_keeping_for(build_scenario, config, horizon_s, spec_k)
 
         results.append(SweepResult(
             config_name=config.name,
@@ -718,12 +754,12 @@ def run_sweep(
             isl=isl_metrics,
         ))
 
-    if station_keeping is not None and delta_v_baseline is not None:
+    if kept and delta_v_baseline is not None:
         # Scored after the loop, when the baseline's budget exists whatever its position in `configs`.
         base = budgets[delta_v_baseline]
         results = [
             replace(r, delta_v=delta_v_metrics(budgets[r.config_name], base, delta_v_baseline))
-            if budgets[r.config_name] else r
+            if budgets.get(r.config_name) else r
             for r in results
         ]
 
