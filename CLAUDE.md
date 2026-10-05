@@ -163,6 +163,7 @@ module's row there before changing that module or writing a test against it.
 | `access.py` / `isl.py` | Error in contact windows (ground / inter-satellite) and the exported contact datasets. **`sample_dt_s` must be an integer multiple of every config's `dt`.** `h_graze_km` is required. ISL dataset edges are biased at 60 s; sample at 15 s for export |
 | `sweep.py` | `run_sweep`: configurations as data against one truth; `access=`, `isl=`, `station_keeping=` + `delta_v_baseline=` (or per config: `ModelConfig.station_keeping`), `zonal=`, `tesseral=`, `external=` (e.g. SGP4 tiers) |
 | `stationkeeping.py` | Dead-band altitude controller keyed on mean altitude; `observe()` after every step. The Δv sweep metric needs a named baseline config |
+| `grid.py` | `run_grid` (a sweep repeated along N, dt or horizon), `crossover`, `stability_limit`. Configs are matched across values **by name**. `ModelConfig.compiled` sets the implementation per config |
 | `viz.py` | Plot data, no matplotlib. **`sample_states` advances the simulation.** Body-fixed rotation takes `-theta` |
 | `sgp4_bridge.py` | SGP4 wrapped, never reimplemented; TEME taken as inertial. A TLE's mean elements **never** reach `coe_to_rv`. SGP4 is an `ExternalTier`, not a `PropagatorType` |
 | `horizons_bridge.py` / `artemis2.py` | JPL Horizons at the boundary (network only in `fetch`); Artemis II data in `data/artemis2/` (TDB seconds from `EPOCH_TDB`). ICRF +z is 0.147 deg from the true pole |

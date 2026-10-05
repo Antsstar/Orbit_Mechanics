@@ -92,6 +92,7 @@ from .stationkeeping import (
 )
 from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, TesseralTruth, reference_for
 from .benchmark import measure
+from .kernels import NUMBA_AVAILABLE
 from .simulator import Simulation
 
 __all__ = [
@@ -130,6 +131,12 @@ class ModelConfig(object):
     `station_keeping` is this configuration's own controller policy, overriding `run_sweep`'s
     `station_keeping`. It is what lets one sweep fly the same physics under several policies
     (several configs differing only here), or pair each model with its own policy.
+
+    `compiled` selects the implementation: `True` the compiled kernels, `False` the NumPy reference
+    path, `None` (default) whatever the `Simulation` was built with (`NUMBA_AVAILABLE`). It makes the
+    implementation part of the configuration, so a sweep can time the same physics both ways
+    (`grid.crossover` along body count). `True` without numba is refused: the kernels would run as
+    interpreted Python, which is neither implementation.
     """
     name: str
     propagator: PropagatorType
@@ -139,6 +146,7 @@ class ModelConfig(object):
     force_models: Sequence[ForceModelSpec] = field(default_factory=tuple)
     bodies: Optional[Sequence[str]] = None
     station_keeping: Optional[StationKeepingSpec] = None
+    compiled: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +237,12 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
     would otherwise be silently ignored by a propagator with no use for it.
     """
     idx = _resolve_bodies(sim, config)
+    if config.compiled is not None:
+        if config.compiled and not NUMBA_AVAILABLE:
+            raise ValueError(
+                f"config '{config.name}': compiled=True needs numba; without it the kernels run as "
+                f"interpreted Python, which is neither the compiled nor the reference implementation.")
+        sim.use_compiled_kernel = bool(config.compiled)
     if idx.size == 0:
         return idx
 

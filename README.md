@@ -119,6 +119,17 @@ with the NumPy re-base those were 17 and 24 µs.
 altitude series, error curves — with no plotting dependency of its own, exactly as `sweep.py` has
 none. `benchmarks/figures.py` imports matplotlib and draws these:
 
+### When a model stops working, and where an implementation pays off
+
+![Scaling sweeps](docs/figures/scaling.png)
+
+`orbital_engine.grid` repeats a sweep along one axis and asks two questions of it
+(`benchmarks/scaling_sweep.py`). **Step size:** Cowell + J2 at 550 km stays under 1 km up to an 80 s
+step and under 100 km up to 320 s; between 640 and 1,280 s the error reaches the size of the orbit
+(`grid.stability_limit`). **Body count:** the same physics compiled and in NumPy (`ModelConfig.compiled`)
+never cross from 6 to 384 satellites (`grid.crossover`): NumPy's fixed cost is ~100x and even its
+per-satellite cost ~30x the compiled kernel's.
+
 ### Ground tracks
 
 ![Ground tracks](docs/figures/ground_tracks.png)
