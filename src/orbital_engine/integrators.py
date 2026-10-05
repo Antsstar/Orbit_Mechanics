@@ -1,6 +1,5 @@
 """
-Fixed-step integration for Cowell propagation: classical RK4 (the default, and the only one with a
-fused compiled twin) and two symplectic methods, leapfrog and Yoshida's fourth-order composition (see
+Fixed-step integration for Cowell propagation: classical RK4 (the default) and two symplectic methods, leapfrog and Yoshida's fourth-order composition (see
 `_KickDriftKick`), selected by name (`make_integrator`, `Simulation.set_cowell_integrator`).
 
 **What this is for.** The engine's only propagator until now is the analytic hierarchical Keplerian
@@ -301,7 +300,7 @@ class Yoshida4Integrator(_KickDriftKick):
 
 
 #: Cowell integrators by name - what a configuration names (`Simulation.set_cowell_integrator`,
-#: `sweep.ModelConfig.integrator`). Only `"rk4"` has a fused compiled twin.
+#: `sweep.ModelConfig.integrator`). Each has a fused compiled twin in `kernels.py`.
 INTEGRATOR_NAMES = ("rk4", "leapfrog", "yoshida4", "encke")
 
 
@@ -409,7 +408,7 @@ class EnckeIntegrator:
     central term for J2 in LEO) rather than on the whole orbit.
 
     Two `kepler_advance` solves per step (to `h/2` and `h`) and four provider evaluations, like RK4.
-    NumPy only: no compiled twin, so `Simulation` keeps the Cowell set on the NumPy path.
+    Compiled twin: `kernels.cowell_encke_step`, held to this to 1e-12 (the NumPy path is the reference).
     """
 
     def __init__(self, max_capacity: int, mu_array: NDArray[np.float64]) -> None:

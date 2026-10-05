@@ -12,6 +12,8 @@ Reports five things, because they answer five different questions:
    Keplerian propagation, then the fused Cowell RK4 step per force-model set (point mass, + j2,
    + J3..J6 zonal, + the 4x4 tesseral field, + drag under each density law), with the full `step()` cost alongside so the
    kernel's share is visible.
+   The other Cowell integrators (leapfrog, Yoshida 4, Encke) follow, each reference against its own
+   fused kernel and each kernel against compiled RK4 on the same arena.
 2. **Cost per step by scenario** - what a performance regression would show up in.
 3. **Cost per step against body count** - separates per-body cost from fixed per-step overhead. A
    flat line means the engine is dispatch-bound rather than arithmetic-bound.
@@ -43,7 +45,7 @@ from orbital_engine.atmosphere import DENSITY_MODEL_LAYERED  # noqa: E402
 from orbital_engine.benchmark import measure  # noqa: E402
 from orbital_engine.custom_types import PropagatorType  # noqa: E402
 from orbital_engine.database import Base  # noqa: E402
-from orbital_engine.integrators import RK4Integrator  # noqa: E402
+from orbital_engine.integrators import RK4Integrator, make_integrator  # noqa: E402
 from orbital_engine.propagators import KeplerianPropagator  # noqa: E402
 from orbital_engine.simulator import Simulation  # noqa: E402
 
@@ -196,6 +198,45 @@ def bench_cowell() -> None:
                   f"{ker / n_sats:>10.3f}{full:>10.1f}u")
 
 
+def bench_cowell_integrators() -> None:
+    """Every Cowell integrator's NumPy reference against its fused kernel, and each kernel's cost
+    relative to compiled RK4 on the same arena (the `vs rk4` column; 1.00 is RK4's own row)."""
+    rule("Cowell integrators: NumPy reference against fused kernel, and kernel cost vs compiled RK4")
+    print(f"{'models':<16}{'sats':>6}{'integrator':>12}{'reference':>12}{'kernel':>10}{'speedup':>10}"
+          f"{'us/body':>10}{'vs rk4':>9}")
+    kernel_of = {"rk4": kernels.cowell_rk4_step, "leapfrog": kernels.cowell_leapfrog_step,
+                 "yoshida4": kernels.cowell_yoshida4_step, "encke": kernels.cowell_encke_step}
+    for n_sats in (12, 60):
+        for label, models in COWELL_MODEL_SETS[:4]:
+            sim, sats = build_cowell(n_sats, models)
+            primaries = sim.parent_indices[sats]
+            tables = sim._cowell_drag_tables
+            rk4_kernel = 0.0
+            for name in ("rk4", "leapfrog", "yoshida4", "encke"):
+                integrator = make_integrator(name, sim.max_capacity, sim.mu_array)
+                kernel_fn = kernel_of[name]
+
+                def reference() -> None:
+                    integrator.step(sim.accelerations, sim.t, sim.global_states, COWELL_DT, sats, primaries)
+
+                def kernel() -> None:
+                    kernel_fn(
+                        COWELL_DT, sim.t, sim.global_states, sim.mu_array, sim.parent_indices, sats,
+                        sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
+                        sim._cowell_drag_params, sim._cowell_drag_table_of,
+                        tables.tables, tables.meta,
+                        sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
+                        sim._cowell_rel,
+                    )
+
+                ref = measure(reference, inner=50).best
+                ker = measure(kernel, inner=200).best
+                if name == "rk4":
+                    rk4_kernel = ker
+                print(f"{label:<16}{n_sats:>6}{name:>12}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x"
+                      f"{ker / n_sats:>10.3f}{ker / rk4_kernel:>8.2f}x")
+
+
 def bench_scenarios() -> None:
     rule("Full step by scenario")
     print(f"{'scenario':<20}{'slots':>7}{'tiers':>7}{'us/step':>10}{'noise':>9}")
@@ -246,6 +287,7 @@ def main() -> int:
     print(f"numba available: {kernels.NUMBA_AVAILABLE}")
     bench_propagators()
     bench_cowell()
+    bench_cowell_integrators()
     bench_scenarios()
     bench_scaling()
     bench_components()

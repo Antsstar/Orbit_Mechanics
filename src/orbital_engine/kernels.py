@@ -43,6 +43,7 @@ __all__ = [
     "rebase_relative_states", "DRAG_LAW_EXPONENTIAL", "DRAG_LAW_LAYERED", "DRAG_LAW_MSIS",
     "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL", "TESSERAL_VW_SIZE",
     "COWELL_POINT_MASS", "COWELL_J2", "COWELL_ZONAL", "COWELL_DRAG", "COWELL_TESSERAL",
+    "cowell_leapfrog_step", "cowell_yoshida4_step", "cowell_encke_step",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -1127,6 +1128,641 @@ def cowell_rk4_step(
         rel_out[s, 4] = gvy - pvy
         rel_out[s, 5] = gvz - pvz
 
+    return -1
+
+
+# ==================================================================================================
+# Compiled twins of the non-RK4 Cowell integrators: leapfrog, Yoshida 4, Encke
+# ==================================================================================================
+#
+# Each is one kernel with `cowell_rk4_step`'s argument layout and return contract, and the same
+# fused force composition (`_gravity_accel`, then `_drag_term`, `_zonal_term`, `_tesseral_term` behind
+# their per-body flags, written in the step itself - see the engineering log on why a per-stage call
+# through `_cowell_accel` costs the no-drag tiers). The per-body decoding block is repeated in each
+# rather than factored into a helper for the same reason: a non-inlined call per body would cost as
+# much as the whole pm+j2 body-step.
+
+# Yoshida's triple-jump weights, the same expressions as `integrators._YOSHIDA_W1/_W0` (a test asserts
+# they are bit-identical - `kernels` cannot import `integrators`, which sits above `forces`).
+_YOSHIDA_W1 = 1.0 / (2.0 - 2.0 ** (1.0 / 3.0))
+_YOSHIDA_W0 = -(2.0 ** (1.0 / 3.0)) / (2.0 - 2.0 ** (1.0 / 3.0))
+
+
+@njit
+def _msis_stale_slot(
+    indices: NDArray[np.int64],
+    flags: NDArray[np.int64],
+    drag_params: NDArray[np.float64],
+    drag_table_of: NDArray[np.int64],
+    density_meta: NDArray[np.float64],
+) -> int:
+    """The staleness check of `cowell_rk4_step`, verbatim: the first MSIS drag body whose live indices
+    do not match its plan row (its slot), or -1. Run before any state is written."""
+    for k in range(indices.shape[0]):
+        s = indices[k]
+        if (flags[s] & COWELL_DRAG) != 0 and _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL]) == DRAG_LAW_MSIS:
+            row = drag_table_of[s]
+            if row < 0:
+                return int(s)
+            for c in range(3):
+                if not (drag_params[s, _DRAG_F107_COL + c] == density_meta[row, TABLE_F107_COL + c]):
+                    return int(s)
+    return -1
+
+
+@njit
+def cowell_leapfrog_step(
+    dt: float,
+    t: float,
+    state: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
+    parent_indices: NDArray[np.int32],
+    indices: NDArray[np.int64],
+    flags: NDArray[np.int64],
+    j2_params: NDArray[np.float64],
+    zonal_params: NDArray[np.float64],
+    drag_params: NDArray[np.float64],
+    drag_table_of: NDArray[np.int64],
+    density_tables: NDArray[np.float64],
+    density_meta: NDArray[np.float64],
+    tesseral_params: NDArray[np.float64],
+    tesseral_vw: NDArray[np.float64],
+    rel_out: NDArray[np.float64],
+) -> int:
+    """
+    One Stormer-Verlet (kick-drift-kick) step of every body in `indices`: the compiled twin of
+    `integrators.LeapfrogIntegrator.step` driving `Simulation.accelerations`, fused with the
+    subtraction `Simulation.step` applies afterwards. Argument layout, return value and state/`rel_out`
+    contract are `cowell_rk4_step`'s. Two force evaluations per step: at the committed row at `t`
+    (velocity included), and at `(parent + r', parent_v + v_half)` at `t + dt`, which the reference
+    accumulates as `tau = t; tau += 1.0 * dt`. Scalars live in registers; the only scratch is the
+    caller-owned tesseral V/W table.
+    """
+    stale = _msis_stale_slot(indices, flags, drag_params, drag_table_of, density_meta)
+    if stale >= 0:
+        return stale
+    for k in range(indices.shape[0]):
+        s = indices[k]
+        par = parent_indices[s]
+        fl = flags[s]
+        pm = (fl & COWELL_POINT_MASS) != 0
+        jj = (fl & COWELL_J2) != 0
+        zz = (fl & COWELL_ZONAL) != 0
+        dd = (fl & COWELL_DRAG) != 0
+        tt = (fl & COWELL_TESSERAL) != 0
+        mu_par = mu_array[par]
+        mu_total = mu_array[s] + mu_par
+        j2 = 0.0
+        r_eq = 0.0
+        if jj:
+            j2 = j2_params[s, 0]
+            r_eq = j2_params[s, 1]
+        law = DRAG_LAW_EXPONENTIAL
+        b = 0.0
+        rho0 = 0.0
+        h0 = 0.0
+        scale_height = 0.0
+        r_ref = 0.0
+        omega = 0.0
+        table = LAYERED_TABLE_ROW
+        if dd:
+            b = drag_params[s, _DRAG_B_COL]
+            rho0 = drag_params[s, _DRAG_RHO0_COL]
+            h0 = drag_params[s, _DRAG_H0_COL]
+            scale_height = drag_params[s, _DRAG_SCALE_HEIGHT_COL]
+            r_ref = drag_params[s, _DRAG_R_REF_COL]
+            omega = drag_params[s, _DRAG_OMEGA_COL]
+            law = _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL])
+            if law == DRAG_LAW_MSIS:
+                table = drag_table_of[s]
+        n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
+
+        px = state[par, 0]
+        py = state[par, 1]
+        pz = state[par, 2]
+        pvx = state[par, 3]
+        pvy = state[par, 4]
+        pvz = state[par, 5]
+        cx = state[s, 0]
+        cy = state[s, 1]
+        cz = state[s, 2]
+        cvx = state[s, 3]
+        cvy = state[s, 4]
+        cvz = state[s, 5]
+        rx = cx - px
+        ry = cy - py
+        rz = cz - pz
+        vx = cvx - pvx
+        vy = cvy - pvy
+        vz = cvz - pvz
+
+        # a(t, committed row): the first evaluation.
+        ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            ax, ay, az = _drag_term(ax, ay, az, px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz,
+                                    law, b, rho0, h0, scale_height, r_ref, omega, table, density_tables, n_nodes)
+        if zz:
+            ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            cos_t, sin_t = _tesseral_angle(tesseral_params, s, t)
+            ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
+                                        tesseral_params, s, cos_t, sin_t, tesseral_vw)
+
+        # The one substep, weight 1.0.
+        tau = t
+        h = 1.0 * dt
+        hh = 0.5 * h
+        vhx = vx + hh * ax
+        vhy = vy + hh * ay
+        vhz = vz + hh * az
+        rx = rx + h * vhx
+        ry = ry + h * vhy
+        rz = rz + h * vhz
+        tau += h
+        cx = px + rx
+        cy = py + ry
+        cz = pz + rz
+        cvx = pvx + vhx
+        cvy = pvy + vhy
+        cvz = pvz + vhz
+        ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            ax, ay, az = _drag_term(ax, ay, az, px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz,
+                                    law, b, rho0, h0, scale_height, r_ref, omega, table, density_tables, n_nodes)
+        if zz:
+            ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            cos_t, sin_t = _tesseral_angle(tesseral_params, s, tau)
+            ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
+                                        tesseral_params, s, cos_t, sin_t, tesseral_vw)
+        vx = vhx + hh * ax
+        vy = vhy + hh * ay
+        vz = vhz + hh * az
+
+        gx = px + rx
+        gy = py + ry
+        gz = pz + rz
+        gvx = pvx + vx
+        gvy = pvy + vy
+        gvz = pvz + vz
+        state[s, 0] = gx
+        state[s, 1] = gy
+        state[s, 2] = gz
+        state[s, 3] = gvx
+        state[s, 4] = gvy
+        state[s, 5] = gvz
+        rel_out[s, 0] = gx - px
+        rel_out[s, 1] = gy - py
+        rel_out[s, 2] = gz - pz
+        rel_out[s, 3] = gvx - pvx
+        rel_out[s, 4] = gvy - pvy
+        rel_out[s, 5] = gvz - pvz
+    return -1
+
+
+@njit
+def cowell_yoshida4_step(
+    dt: float,
+    t: float,
+    state: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
+    parent_indices: NDArray[np.int32],
+    indices: NDArray[np.int64],
+    flags: NDArray[np.int64],
+    j2_params: NDArray[np.float64],
+    zonal_params: NDArray[np.float64],
+    drag_params: NDArray[np.float64],
+    drag_table_of: NDArray[np.int64],
+    density_tables: NDArray[np.float64],
+    density_meta: NDArray[np.float64],
+    tesseral_params: NDArray[np.float64],
+    tesseral_vw: NDArray[np.float64],
+    rel_out: NDArray[np.float64],
+) -> int:
+    """
+    One Yoshida fourth-order step (three kick-drift-kick substeps, weights `w1, w0, w1`) of every body
+    in `indices`: the compiled twin of `integrators.Yoshida4Integrator.step`. Layout and contract are
+    `cowell_rk4_step`'s. The acceleration ending one substep starts the next (first-same-as-last), so
+    the step costs four evaluations, the first at the committed row. Substep times accumulate as the
+    reference does (`tau = t; tau += h` per substep, `h = w * dt`).
+    """
+    stale = _msis_stale_slot(indices, flags, drag_params, drag_table_of, density_meta)
+    if stale >= 0:
+        return stale
+    for k in range(indices.shape[0]):
+        s = indices[k]
+        par = parent_indices[s]
+        fl = flags[s]
+        pm = (fl & COWELL_POINT_MASS) != 0
+        jj = (fl & COWELL_J2) != 0
+        zz = (fl & COWELL_ZONAL) != 0
+        dd = (fl & COWELL_DRAG) != 0
+        tt = (fl & COWELL_TESSERAL) != 0
+        mu_par = mu_array[par]
+        mu_total = mu_array[s] + mu_par
+        j2 = 0.0
+        r_eq = 0.0
+        if jj:
+            j2 = j2_params[s, 0]
+            r_eq = j2_params[s, 1]
+        law = DRAG_LAW_EXPONENTIAL
+        b = 0.0
+        rho0 = 0.0
+        h0 = 0.0
+        scale_height = 0.0
+        r_ref = 0.0
+        omega = 0.0
+        table = LAYERED_TABLE_ROW
+        if dd:
+            b = drag_params[s, _DRAG_B_COL]
+            rho0 = drag_params[s, _DRAG_RHO0_COL]
+            h0 = drag_params[s, _DRAG_H0_COL]
+            scale_height = drag_params[s, _DRAG_SCALE_HEIGHT_COL]
+            r_ref = drag_params[s, _DRAG_R_REF_COL]
+            omega = drag_params[s, _DRAG_OMEGA_COL]
+            law = _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL])
+            if law == DRAG_LAW_MSIS:
+                table = drag_table_of[s]
+        n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
+
+        px = state[par, 0]
+        py = state[par, 1]
+        pz = state[par, 2]
+        pvx = state[par, 3]
+        pvy = state[par, 4]
+        pvz = state[par, 5]
+        cx = state[s, 0]
+        cy = state[s, 1]
+        cz = state[s, 2]
+        cvx = state[s, 3]
+        cvy = state[s, 4]
+        cvz = state[s, 5]
+        rx = cx - px
+        ry = cy - py
+        rz = cz - pz
+        vx = cvx - pvx
+        vy = cvy - pvy
+        vz = cvz - pvz
+
+        ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+        if dd:
+            ax, ay, az = _drag_term(ax, ay, az, px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz,
+                                    law, b, rho0, h0, scale_height, r_ref, omega, table, density_tables, n_nodes)
+        if zz:
+            ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+        if tt:
+            cos_t, sin_t = _tesseral_angle(tesseral_params, s, t)
+            ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
+                                        tesseral_params, s, cos_t, sin_t, tesseral_vw)
+
+        tau = t
+        for sub in range(3):
+            w = _YOSHIDA_W1
+            if sub == 1:
+                w = _YOSHIDA_W0
+            h = w * dt
+            hh = 0.5 * h
+            vhx = vx + hh * ax
+            vhy = vy + hh * ay
+            vhz = vz + hh * az
+            rx = rx + h * vhx
+            ry = ry + h * vhy
+            rz = rz + h * vhz
+            tau += h
+            cx = px + rx
+            cy = py + ry
+            cz = pz + rz
+            cvx = pvx + vhx
+            cvy = pvy + vhy
+            cvz = pvz + vhz
+            ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+            if dd:
+                ax, ay, az = _drag_term(ax, ay, az, px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz,
+                                        law, b, rho0, h0, scale_height, r_ref, omega, table, density_tables, n_nodes)
+            if zz:
+                ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+            if tt:
+                cos_t, sin_t = _tesseral_angle(tesseral_params, s, tau)
+                ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
+                                            tesseral_params, s, cos_t, sin_t, tesseral_vw)
+            vx = vhx + hh * ax
+            vy = vhy + hh * ay
+            vz = vhz + hh * az
+
+        gx = px + rx
+        gy = py + ry
+        gz = pz + rz
+        gvx = pvx + vx
+        gvy = pvy + vy
+        gvz = pvz + vz
+        state[s, 0] = gx
+        state[s, 1] = gy
+        state[s, 2] = gz
+        state[s, 3] = gvx
+        state[s, 4] = gvy
+        state[s, 5] = gvz
+        rel_out[s, 0] = gx - px
+        rel_out[s, 1] = gy - py
+        rel_out[s, 2] = gz - pz
+        rel_out[s, 3] = gvx - pvx
+        rel_out[s, 4] = gvy - pvy
+        rel_out[s, 5] = gvz - pvz
+    return -1
+
+
+@njit
+def _stumpff_scalar(z: float) -> tuple[float, float]:
+    """Stumpff `C(z), S(z)` - `integrators._stumpff` for one value: the same series below `|z| = 1e-3`
+    (so no cancellation), the same trigonometric / hyperbolic closed forms outside it."""
+    if abs(z) < 1e-3:
+        c = 0.5 - z / 24.0 + z * z / 720.0 - z * z * z / 40320.0
+        s = 1.0 / 6.0 - z / 120.0 + z * z / 5040.0 - z * z * z / 362880.0
+    elif z > 0.0:
+        sp = math.sqrt(z)
+        c = (1.0 - math.cos(sp)) / z
+        s = (sp - math.sin(sp)) / (sp * sp * sp)
+    else:
+        sn = math.sqrt(-z)
+        c = (math.cosh(sn) - 1.0) / (-z)
+        s = (math.sinh(sn) - sn) / (sn * sn * sn)
+    return c, s
+
+
+@njit
+def _battin_f_scalar(q: float) -> float:
+    """`integrators.battin_f` for one value: `(1 + q)^(3/2) - 1` without cancellation."""
+    return q * (3.0 + 3.0 * q + q * q) / (1.0 + math.pow(1.0 + q, 1.5))
+
+
+@njit
+def _kepler_advance_scalar(
+    r0x: float, r0y: float, r0z: float, v0x: float, v0y: float, v0z: float, dt: float, mu: float,
+) -> tuple[float, float, float, float, float, float]:
+    """
+    `integrators.kepler_advance` for one body: the universal-variable Kepler equation by Newton to
+    1e-14 in the universal anomaly (Curtis Alg. 3.3), f and g with their derivatives. One difference
+    from the vectorised reference, and it is not an error: the reference iterates *every* body until
+    the slowest has converged, so an early-converged body there takes a few extra Newton steps that
+    change it at rounding level only. This stops each body at its own convergence. The `chi**3` of the
+    reference is `chi * chi * chi` here (within an ulp of libm's `pow`). Raises `RuntimeError` after 60
+    iterations, as the reference does.
+    """
+    rn = math.sqrt(r0x * r0x + r0y * r0y + r0z * r0z)
+    vr = (r0x * v0x + r0y * v0y + r0z * v0z) / rn
+    alpha = 2.0 / rn - (v0x * v0x + v0y * v0y + v0z * v0z) / mu
+    sq = math.sqrt(mu)
+    if alpha != 0.0:
+        chi = sq * abs(alpha) * dt
+    else:
+        chi = sq * dt / rn
+    converged = False
+    for _ in range(60):
+        z = alpha * chi * chi
+        c, s = _stumpff_scalar(z)
+        f_val = rn * vr / sq * chi * chi * c + (1.0 - alpha * rn) * (chi * chi * chi) * s + rn * chi - sq * dt
+        f_der = rn * vr / sq * chi * (1.0 - z * s) + (1.0 - alpha * rn) * chi * chi * c + rn
+        step = f_val / f_der
+        chi = chi - step
+        if abs(step) <= 1e-14 * max(1.0, abs(chi)):
+            converged = True
+            break
+    if not converged:
+        raise RuntimeError("kepler_advance: universal Kepler equation did not converge in 60 iterations")
+    z = alpha * chi * chi
+    c, s = _stumpff_scalar(z)
+    f = 1.0 - chi * chi / rn * c
+    g = dt - (chi * chi * chi) * s / sq
+    rx = f * r0x + g * v0x
+    ry = f * r0y + g * v0y
+    rz = f * r0z + g * v0z
+    rr = math.sqrt(rx * rx + ry * ry + rz * rz)
+    f_dot = sq / (rr * rn) * (z * chi * s - chi)
+    g_dot = 1.0 - chi * chi / rr * c
+    return (rx, ry, rz,
+            f_dot * r0x + g_dot * v0x, f_dot * r0y + g_dot * v0y, f_dot * r0z + g_dot * v0z)
+
+
+@njit
+def cowell_encke_step(
+    dt: float,
+    t: float,
+    state: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
+    parent_indices: NDArray[np.int32],
+    indices: NDArray[np.int64],
+    flags: NDArray[np.int64],
+    j2_params: NDArray[np.float64],
+    zonal_params: NDArray[np.float64],
+    drag_params: NDArray[np.float64],
+    drag_table_of: NDArray[np.int64],
+    density_tables: NDArray[np.float64],
+    density_meta: NDArray[np.float64],
+    tesseral_params: NDArray[np.float64],
+    tesseral_vw: NDArray[np.float64],
+    rel_out: NDArray[np.float64],
+) -> int:
+    """
+    One Encke step of every body in `indices`: the compiled twin of `integrators.EnckeIntegrator.step`.
+    Layout and contract are `cowell_rk4_step`'s. The summed `mu = mu_array[s] + mu_array[parent]` is
+    read here (it is the `mu_total` the point-mass term uses). The reference conic is advanced to
+    `dt/2` and `dt` by `_kepler_advance_scalar`; the deviation `dy = (dr, dv)` is then integrated by RK4
+    under `-(mu / rho^3)(f(q) r + dr) + a_p`, `a_p` the fused total acceleration plus `mu r / r^3`.
+    The four stages are one loop body so the fused force composition appears once; each stage's `dy`
+    is `0`, `(h/2) k1`, `(h/2) k2`, `h k3` and the weighted sum accumulates in the reference's order
+    `((k1 + 2 k2) + 2 k3) + k4`. **Every body must carry the point-mass bit** - the caller checks
+    (`Simulation.step`); a body without it would have its central term subtracted from nothing.
+    A Kepler solve that fails to converge raises `RuntimeError` mid-loop, leaving the bodies before it
+    already advanced; the reference raises before writing any state of the failing call.
+    """
+    stale = _msis_stale_slot(indices, flags, drag_params, drag_table_of, density_meta)
+    if stale >= 0:
+        return stale
+    h = dt
+    half = 0.5 * h
+    for k in range(indices.shape[0]):
+        s = indices[k]
+        par = parent_indices[s]
+        fl = flags[s]
+        pm = (fl & COWELL_POINT_MASS) != 0
+        jj = (fl & COWELL_J2) != 0
+        zz = (fl & COWELL_ZONAL) != 0
+        dd = (fl & COWELL_DRAG) != 0
+        tt = (fl & COWELL_TESSERAL) != 0
+        mu_par = mu_array[par]
+        mu_total = mu_array[s] + mu_par
+        j2 = 0.0
+        r_eq = 0.0
+        if jj:
+            j2 = j2_params[s, 0]
+            r_eq = j2_params[s, 1]
+        law = DRAG_LAW_EXPONENTIAL
+        b = 0.0
+        rho0 = 0.0
+        h0 = 0.0
+        scale_height = 0.0
+        r_ref = 0.0
+        omega = 0.0
+        table = LAYERED_TABLE_ROW
+        if dd:
+            b = drag_params[s, _DRAG_B_COL]
+            rho0 = drag_params[s, _DRAG_RHO0_COL]
+            h0 = drag_params[s, _DRAG_H0_COL]
+            scale_height = drag_params[s, _DRAG_SCALE_HEIGHT_COL]
+            r_ref = drag_params[s, _DRAG_R_REF_COL]
+            omega = drag_params[s, _DRAG_OMEGA_COL]
+            law = _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL])
+            if law == DRAG_LAW_MSIS:
+                table = drag_table_of[s]
+        n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
+
+        px = state[par, 0]
+        py = state[par, 1]
+        pz = state[par, 2]
+        pvx = state[par, 3]
+        pvy = state[par, 4]
+        pvz = state[par, 5]
+        r0x = state[s, 0] - px
+        r0y = state[s, 1] - py
+        r0z = state[s, 2] - pz
+        v0x = state[s, 3] - pvx
+        v0y = state[s, 4] - pvy
+        v0z = state[s, 5] - pvz
+
+        mrx, mry, mrz, mvx, mvy, mvz = _kepler_advance_scalar(r0x, r0y, r0z, v0x, v0y, v0z, half, mu_total)
+        erx, ery, erz, evx, evy, evz = _kepler_advance_scalar(r0x, r0y, r0z, v0x, v0y, v0z, h, mu_total)
+
+        # k0..k5 hold the previous stage's rate (dv, then dd), s0..s5 the weighted sum so far.
+        k0 = 0.0
+        k1 = 0.0
+        k2 = 0.0
+        k3 = 0.0
+        k4 = 0.0
+        k5 = 0.0
+        s0 = 0.0
+        s1 = 0.0
+        s2 = 0.0
+        s3 = 0.0
+        s4 = 0.0
+        s5 = 0.0
+        fac = 0.0
+        for stage in range(4):
+            # Stage inputs: time, reference point on the conic, and the deviation dy.
+            if stage == 0:
+                tau = t
+                rrx = r0x
+                rry = r0y
+                rrz = r0z
+                vrx = v0x
+                vry = v0y
+                vrz = v0z
+                d0 = 0.0
+                d1 = 0.0
+                d2 = 0.0
+                d3 = 0.0
+                d4 = 0.0
+                d5 = 0.0
+            else:
+                if stage == 3:
+                    tau = t + h
+                    rrx = erx
+                    rry = ery
+                    rrz = erz
+                    vrx = evx
+                    vry = evy
+                    vrz = evz
+                    fac = h
+                else:
+                    tau = t + half
+                    rrx = mrx
+                    rry = mry
+                    rrz = mrz
+                    vrx = mvx
+                    vry = mvy
+                    vrz = mvz
+                    fac = 0.5 * h
+                d0 = fac * k0
+                d1 = fac * k1
+                d2 = fac * k2
+                d3 = fac * k3
+                d4 = fac * k4
+                d5 = fac * k5
+
+            rx = rrx + d0
+            ry = rry + d1
+            rz = rrz + d2
+            cx = px + rx
+            cy = py + ry
+            cz = pz + rz
+            cvx = pvx + vrx + d3
+            cvy = pvy + vry + d4
+            cvz = pvz + vrz + d5
+            ax, ay, az = _gravity_accel(px, py, pz, cx, cy, cz, mu_total, mu_par, pm, jj, j2, r_eq)
+            if dd:
+                ax, ay, az = _drag_term(ax, ay, az, px, py, pz, cx, cy, cz, pvx, pvy, pvz, cvx, cvy, cvz,
+                                        law, b, rho0, h0, scale_height, r_ref, omega, table, density_tables, n_nodes)
+            if zz:
+                ax, ay, az = _zonal_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, zonal_params, s)
+            if tt:
+                cos_t, sin_t = _tesseral_angle(tesseral_params, s, tau)
+                ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
+                                            tesseral_params, s, cos_t, sin_t, tesseral_vw)
+            r2 = rx * rx + ry * ry + rz * rz
+            rn = math.sqrt(r2)
+            kc = mu_total / (r2 * rn)
+            apx = ax + kc * rx
+            apy = ay + kc * ry
+            apz = az + kc * rz
+            rho = math.sqrt(rrx * rrx + rry * rry + rrz * rrz)
+            q = (d0 * (d0 - 2.0 * rx) + d1 * (d1 - 2.0 * ry) + d2 * (d2 - 2.0 * rz)) / r2
+            coef = -(mu_total / (rho * rho * rho))
+            bf = _battin_f_scalar(q)
+            k0 = d3
+            k1 = d4
+            k2 = d5
+            k3 = coef * (bf * rx + d0) + apx
+            k4 = coef * (bf * ry + d1) + apy
+            k5 = coef * (bf * rz + d2) + apz
+            if stage == 0:
+                s0 = k0
+                s1 = k1
+                s2 = k2
+                s3 = k3
+                s4 = k4
+                s5 = k5
+            elif stage == 3:
+                s0 = s0 + k0
+                s1 = s1 + k1
+                s2 = s2 + k2
+                s3 = s3 + k3
+                s4 = s4 + k4
+                s5 = s5 + k5
+            else:
+                s0 = s0 + 2.0 * k0
+                s1 = s1 + 2.0 * k1
+                s2 = s2 + 2.0 * k2
+                s3 = s3 + 2.0 * k3
+                s4 = s4 + 2.0 * k4
+                s5 = s5 + 2.0 * k5
+
+        sixth = h / 6.0
+        gx = px + erx + sixth * s0
+        gy = py + ery + sixth * s1
+        gz = pz + erz + sixth * s2
+        gvx = pvx + evx + sixth * s3
+        gvy = pvy + evy + sixth * s4
+        gvz = pvz + evz + sixth * s5
+        state[s, 0] = gx
+        state[s, 1] = gy
+        state[s, 2] = gz
+        state[s, 3] = gvx
+        state[s, 4] = gvy
+        state[s, 5] = gvz
+        rel_out[s, 0] = gx - px
+        rel_out[s, 1] = gy - py
+        rel_out[s, 2] = gz - pz
+        rel_out[s, 3] = gvx - pvx
+        rel_out[s, 4] = gvy - pvy
+        rel_out[s, 5] = gvz - pvz
     return -1
 
 

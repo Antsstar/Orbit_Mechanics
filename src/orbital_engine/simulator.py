@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from typing import List, Optional, Any, Dict, Sequence, Tuple, Union, cast
+from typing import Callable, List, Optional, Any, Dict, Sequence, Tuple, Union, cast
 from .custom_types import ScalarSeconds, PropagatorType, ForceModelMask, COEIndex
 from numpy.typing import NDArray
 
@@ -14,8 +14,9 @@ from .propagators import (
 )
 from .kernels import (
     COWELL_DRAG, COWELL_J2, COWELL_POINT_MASS, COWELL_TESSERAL, COWELL_ZONAL,
-    NUMBA_AVAILABLE, TESSERAL_VW_SIZE, calc_global_states, cowell_rk4_step, kepler_propagate,
-    rebase_relative_states, secular_j2_propagate,
+    NUMBA_AVAILABLE, TESSERAL_VW_SIZE, calc_global_states, cowell_encke_step, cowell_leapfrog_step,
+    cowell_rk4_step, cowell_yoshida4_step, kepler_propagate, rebase_relative_states,
+    secular_j2_propagate,
 )
 from .database import get_session, CelestialBodyORM, BaseBodyORM, VesselORM, VirtualBodyORM, SystemORM
 from .body import BodyHandle
@@ -35,6 +36,15 @@ from . import events  # event-driven step splitting: Event, locate_crossing, use
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
 logger = logging.getLogger(__name__)
+
+#: The fused compiled Cowell step of each integrator name (`integrators.INTEGRATOR_NAMES`); every one
+#: has `kernels.cowell_rk4_step`'s argument layout and return contract.
+_COWELL_KERNELS: Dict[str, Callable[..., int]] = {
+    "rk4": cowell_rk4_step,
+    "leapfrog": cowell_leapfrog_step,
+    "yoshida4": cowell_yoshida4_step,
+    "encke": cowell_encke_step,
+}
 
 
 class Simulation:
@@ -135,8 +145,8 @@ class Simulation:
         # max_capacity) is allocated exactly once - see integrators.py's module docstring for why an
         # integrator must be a stateful object rather than a bare function.
         self._cowell_integrator: Integrator = RK4Integrator(max_capacity)
-        # Its name, which is what `set_cowell_integrator` and a sweep config select by. Only "rk4" has
-        # the fused compiled twin; any other keeps the Cowell set on the NumPy path (`_refresh_cowell_plan`).
+        # Its name, which is what `set_cowell_integrator` and a sweep config select by. Each name has
+        # a fused compiled twin (`_COWELL_KERNELS`); `_refresh_cowell_plan` decides whether it applies.
         self._cowell_integrator_name: str = "rk4"
 
         # Secular-J2 propagator scratch (see propagators.SecularJ2Propagator). `_secular_j2_idx` is
@@ -505,8 +515,7 @@ class Simulation:
         fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit | tesseral_bit
         foreign = (self.force_model_mask[idx] & ~fused_bits) != np.uint64(0)
         parent_is_cowell = np.isin(self._cowell_primaries, idx)
-        self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any()
-                                     and self._cowell_integrator_name == "rk4")
+        self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
 
         j2_params = self.force_model_params.get(geopotential.J2_MODEL)
         self._cowell_j2_params = self._no_j2_params if j2_params is None else j2_params
@@ -541,12 +550,11 @@ class Simulation:
 
     def set_cowell_integrator(self, name: str) -> None:
         """
-        Select the integrator every Cowell body is advanced with: `"rk4"` (the default, and the only one
-        with a fused compiled twin), `"leapfrog"` or `"yoshida4"` (symplectic), or `"encke"` (the
-        deviation from the osculating conic, re-anchored every step; every Cowell body then needs
-        `point_mass_gravity`). See `integrators.py`.
-        Rebuilds the Cowell plan, so a non-RK4 choice moves the Cowell set onto the NumPy path - which
-        is what a timing comparison between integrators then measures, until those have twins too.
+        Select the integrator every Cowell body is advanced with: `"rk4"` (the default), `"leapfrog"` or
+        `"yoshida4"` (symplectic), or `"encke"` (the deviation from the osculating conic, re-anchored
+        every step; every Cowell body then needs `point_mass_gravity`). See `integrators.py`. Each has a
+        fused compiled twin in `kernels.py` (`_COWELL_KERNELS`), selected under the same plan conditions.
+        Rebuilds the Cowell plan.
         """
         if name not in INTEGRATOR_NAMES:
             raise ValueError(f"unknown integrator {name!r}; have {INTEGRATOR_NAMES}")
@@ -1172,6 +1180,14 @@ class Simulation:
             # this branch is available. It returns -1 or - having written nothing - the slot of an MSIS
             # drag body whose live indices no longer match the plan's profile; one re-plan then either
             # repairs the plan or disqualifies it, and the reference path below takes over.
+            if self._cowell_integrator_name == "encke":
+                # Checked on the live mask before either path: the fused kernel would otherwise
+                # subtract a central term the body never had.
+                pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
+                if bool(np.any((self.force_model_mask[self._cowell_idx] & pm_bit) == np.uint64(0))):
+                    raise ValueError(
+                        "the Encke integrator needs point_mass_gravity on every Cowell body: it "
+                        "subtracts the central term from the total acceleration to get the perturbation.")
             done = False
             if self.use_compiled_kernel and self._cowell_fused_ok:
                 done = self._cowell_compiled_step(dt) < 0
@@ -1179,12 +1195,6 @@ class Simulation:
                     self._refresh_cowell_plan()
                     done = self._cowell_fused_ok and self._cowell_compiled_step(dt) < 0
             if not done:
-                if self._cowell_integrator_name == "encke":
-                    pm_bit = np.uint64(1) << np.uint64(get_force_model(gravity.POINT_MASS_MODEL).bit)
-                    if bool(np.any((self.force_model_mask[self._cowell_idx] & pm_bit) == np.uint64(0))):
-                        raise ValueError(
-                            "the Encke integrator needs point_mass_gravity on every Cowell body: it "
-                            "subtracts the central term from the total acceleration to get the perturbation.")
                 parent_state_at_start = self.global_states[self._cowell_primaries].copy()
                 cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
                 cowell_propagator.propagate(
@@ -1824,14 +1834,16 @@ class Simulation:
 
     def _cowell_compiled_step(self, dt: ScalarSeconds) -> int:
         """
-        One call of the fused `kernels.cowell_rk4_step` on the current plan; its return value.
+        One call of the fused compiled step of the current Cowell integrator (`_COWELL_KERNELS`:
+        `kernels.cowell_rk4_step` and its leapfrog / Yoshida / Encke siblings) on the current plan; its
+        return value.
 
         The step starts at `self.t` - the same `t` the reference path hands `RK4Integrator.step` - which
         `_advance` only moves after propagating, so a manoeuvre or event sub-step starts at its own
         clock. The kernel forms the stage times from it exactly as the integrator does.
         """
         tables = self._cowell_drag_tables
-        return int(cowell_rk4_step(
+        return int(_COWELL_KERNELS[self._cowell_integrator_name](
             float(dt), float(self.t), self.global_states, self.mu_array, self.parent_indices,
             self._cowell_idx,
             self._cowell_flags, self._cowell_j2_params, self._cowell_zonal_params,

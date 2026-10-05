@@ -1087,7 +1087,7 @@ def test_cowell_fused_kernel_is_selected_only_for_point_mass_j2_drag_zonal_and_t
         calls.append(1)
         return real(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(simulator_module, "cowell_rk4_step", spy)
+    monkeypatch.setitem(simulator_module._COWELL_KERNELS, "rk4", spy)
 
     sim, sats = _build_cowell_constellation(db_session_factory(), j2_on="half")
     sim.record_history = False

@@ -97,11 +97,11 @@ def test_yoshida_overtakes_rk4_at_long_horizons(db_session_factory: Callable[[],
     assert early < 0.2 and late > 2.0
 
 
-def test_selection_is_data_and_leaves_the_fused_path(db_session: Session) -> None:
+def test_selection_is_data_and_stays_on_the_fused_path(db_session: Session) -> None:
     sim, k = _build(db_session, "rk4")
     assert sim._cowell_fused_ok
     sim.set_cowell_integrator("yoshida4")
-    assert sim.cowell_integrator == "yoshida4" and not sim._cowell_fused_ok
+    assert sim.cowell_integrator == "yoshida4" and sim._cowell_fused_ok   # each integrator has its own twin
     with pytest.raises(ValueError, match="unknown integrator"):
         sim.set_cowell_integrator("euler")
     cfg = ModelConfig("y", PropagatorType.COWELL, 60.0, force_models=(ForceModelSpec("point_mass_gravity"),),

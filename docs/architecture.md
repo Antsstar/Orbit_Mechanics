@@ -2142,9 +2142,33 @@ orbit in eight steps lands on the conic to 4.7e-11 km, where RK4 at the same ste
 **What it buys.** RK4's truncation now acts only on the perturbation-driven deviation. For J2 in LEO
 that is ~1e-3 of the central acceleration, and the error falls by that factor: 1.9e-3 km at a 160 s step
 against RK4's 2.1 km (550 km, 6 satellites, 6,400 s), 545x at 10 s and 3,750x at 640 s, still fourth
-order. The 1 km step limit (`grid.stability_limit`) moves from 80-160 s to 640-1,280 s. **The cost is not
-yet comparable**: Encke runs on the NumPy path (two vectorised Kepler solves and four provider calls a
-step) while RK4 has the fused compiled kernel, so a frontier position for Encke waits on its own twin.
+order. The 1 km step limit (`grid.stability_limit`) moves from 80-160 s to 640-1,280 s. **Cost, compiled**
+(`kernels.cowell_encke_step`, below).
+
+**Compiled twins of the non-RK4 integrators.** `kernels.cowell_leapfrog_step`, `cowell_yoshida4_step`
+and `cowell_encke_step` are fused like `cowell_rk4_step` (same argument layout, same force composition,
+`simulator._COWELL_KERNELS` picks one by integrator name; the plan's conditions are unchanged). The
+Encke kernel carries a scalar universal-variable Kepler solve (Newton to 1e-14) and the same Stumpff
+series; it stops each body at its own convergence where the vectorised reference iterates all bodies
+until the slowest converges, a rounding-level difference. Each is held to its reference at 1e-12
+(`tests/validation/test_kernel_equivalence_integrators.py`; measured <= 3.1e-13 over 500 steps, bit-identical
+on single-body arenas) and the Encke pieces are also compared at function level, because a flipped sign
+on the Stumpff series' `z^3` term (~5e-14 of C) is invisible in the state. Measured per-body kernel cost
+against compiled RK4 on 60 satellites (prediction first: leapfrog ~half of RK4's four evaluations, Yoshida
+~RK4, Encke ~RK4 plus two Kepler solves):
+
+| force set | leapfrog | Yoshida 4 | Encke |
+|---|---|---|---|
+| pm | 0.73-0.83x | 1.25x | 4.7x |
+| pm + j2 | 0.79-0.83x | 1.25-1.67x | 5.3-5.6x |
+| pm + j2 + zonal | 0.61-0.67x | 1.10-1.15x | 2.5-2.6x |
+| pm + j2 + zonal + tesseral | 0.51-0.56x | 1.06-1.27x | 1.5-2.0x |
+
+(two runs, ranges; RK4 itself is 0.09 us per body for pm, 0.8 us with tesseral.) Leapfrog saves less than
+half on cheap force sets because per-body decoding and call dispatch are not halved; Yoshida pays a little
+for its sequential substeps; Encke's two Kepler solves (~0.3 us per body) are a fixed cost the heavy force
+sets amortise. Against their NumPy references the twins are 35-230x faster. Encke's frontier position is
+therefore now comparable: ~2-5x RK4's cost for 545-3,750x less error at the same step.
 
 ---
 

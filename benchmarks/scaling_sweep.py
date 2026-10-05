@@ -4,7 +4,10 @@ overtakes another.
 
     <env>/python.exe benchmarks/scaling_sweep.py
 
-Writes `docs/figures/scaling.png` and prints both tables.
+Writes `docs/figures/scaling.png` and prints the tables. Every Cowell integrator (RK4, leapfrog,
+Yoshida 4, Encke) runs on its fused compiled kernel unless a configuration says `compiled=False`;
+the errors do not depend on that choice (the twins match their references to 1e-12), the wall times
+do, and the step and horizon tables print them.
 
 **Step size.** Cowell + J2 on six 550 km satellites over 6,400 s (every step divides it), against the
 DOP853 + J2 truth, from 10 s to 1,280 s. `grid.stability_limit` reports the largest step that keeps
@@ -63,10 +66,11 @@ def main() -> int:
                             lambda v: [ModelConfig("cowell+j2", PropagatorType.COWELL, v, force_models=FM),
                                        ModelConfig("encke", PropagatorType.COWELL, v, force_models=FM,
                                                    integrator="encke")],
-                            6400.0, oblateness=OBL, timing_batches=1, timing_warmup=0)
-    print("Step size: Cowell + J2, 550 km, 6,400 s")
+                            6400.0, oblateness=OBL, timing_batches=3, timing_warmup=1)
+    print("Step size: Cowell + J2, 550 km, 6,400 s (every integrator on its fused compiled kernel)")
     for r in dt_rows:
-        print(f"  dt {r.value:6.0f} s  {r.config_name:10s} median error {r.result.error.median_km:11.4e} km")
+        print(f"  dt {r.value:6.0f} s  {r.config_name:10s} median error {r.result.error.median_km:11.4e} km"
+              f"   wall {r.result.wall_time_us:9.1f} us")
     limits = {thr: grid.stability_limit(dt_rows, "cowell+j2", thr) for thr in THRESHOLDS_KM}
     for thr, (ok, bad) in limits.items():
         print(f"  RK4 under {thr:g} km up to dt = {ok} s; fails from {bad} s")
@@ -99,10 +103,11 @@ def main() -> int:
                             integrator=name, bodies=["Secondary"]) for name in ("rk4", "yoshida4", "leapfrog")]
 
     h_rows = grid.run_grid("orbits", HORIZON_ORBITS, lambda v: two_body, integrators, lambda v: v * 64.0 * dt,
-                           timing_batches=1, timing_warmup=0)
-    print("\nHorizon: position error (km) at h = P/64, two-body e = 0.2")
+                           timing_batches=3, timing_warmup=1)
+    print("\nHorizon: position error (km) at h = P/64, two-body e = 0.2 (compiled kernels)")
     for r in h_rows:
-        print(f"  {r.value:5.0f} orbits  {r.config_name:9s} {r.result.error.median_km:11.4e}")
+        print(f"  {r.value:5.0f} orbits  {r.config_name:9s} {r.result.error.median_km:11.4e}"
+              f"   wall {r.result.wall_time_us:10.1f} us")
     h_cross = grid.crossover(h_rows, "rk4", "yoshida4", metric="median_km")
     print(f"  Yoshida overtakes RK4 at {h_cross:.1f} orbits" if h_cross else "  no crossover")
 

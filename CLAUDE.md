@@ -158,7 +158,7 @@ module's row there before changing that module or writing a test against it.
 | `thrust.py` | `"thrust"`, Cowell-only, RSW direction (norm throttles). **Mass is state**: re-seed `mass_kg` to re-run. Not fused |
 | `manoeuvres.py` | Impulsive Δv in RSW under every propagator; `schedule_delta_v` splits the step at the epoch. Keplerian/secular-J2 re-derive elements (and rates). Not a registry entry |
 | `events.py` | Event-driven step splitting (Illinois false position over trial propagations) with `Event.latch`, plus `Event.action` / `max_fires` (`apsis_event`, `node_event`, `burn`, `enable_model`). Blind to an even number of crossings in one step. An action must not add or clear events |
-| `integrators.py` | `RK4Integrator`: copies each stage's accelerations (the provider returns a shared buffer). Not allocation-free. Also `leapfrog` / `yoshida4` (symplectic) and `encke` (deviation from the conic, re-anchored each step; **needs `point_mass_gravity`**), chosen by `set_cowell_integrator` or `ModelConfig.integrator`; non-RK4 runs on the NumPy path (no twin) |
+| `integrators.py` | `RK4Integrator`: copies each stage's accelerations (the provider returns a shared buffer). Not allocation-free. Also `leapfrog` / `yoshida4` (symplectic) and `encke` (deviation from the conic, re-anchored each step; **needs `point_mass_gravity`**), chosen by `set_cowell_integrator` or `ModelConfig.integrator`; each has a fused twin (`kernels.cowell_{rk4,leapfrog,yoshida4,encke}_step`) |
 | `propagators.py` | `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`, coefficients mandatory); `mean_seed=True` corrects `p` only |
 | `geometry.py` | Elevation / azimuth / range rate (**positive = opening**), access windows, `line_of_sight`, `segment_clearance`. Spherical, radians, azimuth from north. **`theta0` is referenced to `epoch_s`** (default absolute sim time), unlike `viz.ground_track` |
 | `access.py` / `isl.py` | Error in contact windows (ground / inter-satellite) and the exported contact datasets. **`sample_dt_s` must be an integer multiple of every config's `dt`.** `h_graze_km` is required. ISL dataset edges are biased at 60 s; sample at 15 s for export |
@@ -215,7 +215,7 @@ Both halves of `registry.py` are now wired. `step()` dispatches Cowell bodies th
 `COWELL` and `SECULAR_J2` drive dispatch; any other `PropagatorType` member is unimplemented. `BodyHandle`
 (`body.py`) is still never instantiated and `sim.bodies` is always empty.
 
-Cowell's compiled twin is **fused**: `kernels.cowell_rk4_step` hard-codes RK4 with `point_mass_gravity`,
+Cowell's compiled twin is **fused**: `kernels.cowell_rk4_step` (and its `cowell_leapfrog_step` / `cowell_yoshida4_step` / `cowell_encke_step` siblings, one kernel per integrator, `simulator._COWELL_KERNELS`) hard-codes its integrator with `point_mass_gravity`,
 `j2`, `drag` (all three density laws), `zonal` and `tesseral` (per-body flags; `t` is an argument), because numba cannot dispatch over the Python kernel list
 `forces.compose_accelerations` walks. A Cowell body carrying any other model, or parented by another
 Cowell body, sends the whole Cowell set down the NumPy `RK4Integrator` path (`_cowell_fused_ok`). The
@@ -252,7 +252,7 @@ Hot paths exist twice: a readable NumPy version and a compiled scalar version.
 |---|---|---|
 | Propagation | `propagators.KeplerianPropagator` | `kernels.kepler_propagate` |
 | Secular-J2 propagation | `propagators.SecularJ2Propagator` | `kernels.secular_j2_propagate` |
-| Cowell step (RK4 + `point_mass_gravity` + `j2` + `drag` + `zonal` + `tesseral`) | `integrators.RK4Integrator` over `forces.compose_accelerations` | `kernels.cowell_rk4_step` (fused; other masks fall back to the reference) |
+| Cowell step (RK4 + `point_mass_gravity` + `j2` + `drag` + `zonal` + `tesseral`) | `integrators.RK4Integrator` / `LeapfrogIntegrator` / `Yoshida4Integrator` / `EnckeIntegrator` over `forces.compose_accelerations` | `kernels.cowell_{rk4,leapfrog,yoshida4,encke}_step` (fused; other masks fall back to the reference) |
 | Global states | `Simulation.calc_global` (else branch) | `kernels.calc_global_states` |
 | Re-base of Cowell / secular-J2 rows after `calc_global` | `Simulation._rebase` (else branch) | `kernels.rebase_relative_states` (bit-identical; NumPy path if a body's parent is in its own re-base set) |
 
