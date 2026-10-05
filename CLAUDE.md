@@ -42,7 +42,8 @@ stub returns `Any` and redundant where it does not. Prefer an **annotated assign
 The other recurring case is an array built **without an explicit dtype**: older stubs type
 `np.linspace(a, b, n)` as `floating[Any]` and a fancy-indexed integer array as `signedinteger[Any]`,
 which then fails against an `NDArray[np.float64]` / `NDArray[np.int64]` target on the Python 3.10 job
-only. Pass `dtype=np.float64` (or wrap in `np.asarray(..., dtype=...)`) and annotate the target. Two
+only. Pass `dtype=np.float64` (or wrap in `np.asarray(..., dtype=...)`) and annotate the target.
+A bare `np.ndarray` in an annotation fails there too (`type-arg`); use `NDArray[np.float64]`. Two
 agent merges in a row (`isl.py`, `msis_diurnal.py`) failed CI on exactly this after passing locally.
 
 **Coverage is under-reported for `kernels.py`.** `coverage.py` traces bytecode, and `@njit` functions

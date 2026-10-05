@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .simulator import Simulation
 from .sweep import ModelConfig, SweepResult, run_sweep
@@ -101,10 +102,13 @@ def _metric(row: GridRow, metric: str) -> float:
     raise ValueError(f"unknown metric {metric!r}")
 
 
-def series(rows: Sequence[GridRow], config_name: str, metric: str = "wall_time_us") -> Tuple[np.ndarray, np.ndarray]:
+def series(rows: Sequence[GridRow], config_name: str,
+           metric: str = "wall_time_us") -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """`(axis values, metric values)` of one config, sorted by axis value."""
     pts = sorted((r.value, _metric(r, metric)) for r in rows if r.config_name == config_name)
-    return (np.array([p[0] for p in pts], dtype=np.float64), np.array([p[1] for p in pts], dtype=np.float64))
+    xs: NDArray[np.float64] = np.array([p[0] for p in pts], dtype=np.float64)
+    ys: NDArray[np.float64] = np.array([p[1] for p in pts], dtype=np.float64)
+    return xs, ys
 
 
 def crossover(rows: Sequence[GridRow], a: str, b: str, metric: str = "wall_time_us") -> Optional[float]:
