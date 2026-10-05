@@ -13,6 +13,7 @@ from .propagators import (
     Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates, mean_seeded_p,
 )
 from .kernels import (
+    COWELL_DRAG, COWELL_J2, COWELL_POINT_MASS, COWELL_TESSERAL, COWELL_ZONAL,
     NUMBA_AVAILABLE, TESSERAL_VW_SIZE, calc_global_states, cowell_rk4_step, kepler_propagate,
     rebase_relative_states, secular_j2_propagate,
 )
@@ -232,21 +233,19 @@ class Simulation:
         # block reads it gathered. Rebuilt in `_refresh_active_indices`.
         self._rebase_compiled_ok: bool = True
         self._cowell_rel = np.zeros((max_capacity, 6), dtype=np.float64)
-        self._cowell_has_point_mass = np.zeros(max_capacity, dtype=np.bool_)
-        self._cowell_has_j2 = np.zeros(max_capacity, dtype=np.bool_)
+        # Per-body model flags, one `kernels.COWELL_*` bit each, packed so the kernel takes one argument
+        # rather than five (numba pays per argument per call).
+        self._cowell_flags = np.zeros(max_capacity, dtype=np.int64)
         self._no_j2_params = np.zeros((1, len(geopotential.J2_PARAM_NAMES)), dtype=np.float64)
         self._cowell_j2_params: NDArray[np.float64] = self._no_j2_params
-        self._cowell_has_zonal = np.zeros(max_capacity, dtype=np.bool_)
         self._no_zonal_params = np.zeros((1, len(zonal.ZONAL_PARAM_NAMES)), dtype=np.float64)
         self._cowell_zonal_params: NDArray[np.float64] = self._no_zonal_params
-        self._cowell_has_drag = np.zeros(max_capacity, dtype=np.bool_)
         self._no_drag_params = np.zeros((1, len(drag.DRAG_PARAM_NAMES)), dtype=np.float64)
         self._cowell_drag_params: NDArray[np.float64] = self._no_drag_params
         # Drag's density tables (`drag.density_tables`: the layered table, then one row per MSIS
         # triple a Cowell body uses) and each slot's MSIS row, -1 where it has none.
         self._cowell_drag_table_of = np.full(max_capacity, -1, dtype=np.int64)
         self._cowell_drag_tables, _ = drag.density_tables(np.empty((0, 3)))
-        self._cowell_has_tesseral = np.zeros(max_capacity, dtype=np.bool_)
         self._no_tesseral_params = np.zeros((1, len(tesseral.TESSERAL_PARAM_NAMES)), dtype=np.float64)
         self._cowell_tesseral_params: NDArray[np.float64] = self._no_tesseral_params
         # The tesseral term's V/W recursion table, filled per evaluation by the kernel: fixed-size
@@ -483,12 +482,14 @@ class Simulation:
         j2_bit = np.uint64(1) << np.uint64(get_force_model(geopotential.J2_MODEL).bit)
         zonal_bit = np.uint64(1) << np.uint64(get_force_model(zonal.ZONAL_MODEL).bit)
         drag_bit = np.uint64(1) << np.uint64(get_force_model(drag.DRAG_MODEL).bit)
-        np.not_equal(self.force_model_mask & pm_bit, np.uint64(0), out=self._cowell_has_point_mass)
-        np.not_equal(self.force_model_mask & j2_bit, np.uint64(0), out=self._cowell_has_j2)
-        np.not_equal(self.force_model_mask & zonal_bit, np.uint64(0), out=self._cowell_has_zonal)
-        np.not_equal(self.force_model_mask & drag_bit, np.uint64(0), out=self._cowell_has_drag)
         tesseral_bit = np.uint64(1) << np.uint64(get_force_model(tesseral.TESSERAL_MODEL).bit)
-        np.not_equal(self.force_model_mask & tesseral_bit, np.uint64(0), out=self._cowell_has_tesseral)
+        # One packed per-body bitfield for the kernel (see `kernels.COWELL_*`); built here, once.
+        self._cowell_flags.fill(0)
+        for model_bit, flag in (
+            (pm_bit, COWELL_POINT_MASS), (j2_bit, COWELL_J2), (zonal_bit, COWELL_ZONAL),
+            (drag_bit, COWELL_DRAG), (tesseral_bit, COWELL_TESSERAL),
+        ):
+            self._cowell_flags[(self.force_model_mask & model_bit) != np.uint64(0)] |= flag
 
         fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit | tesseral_bit
         foreign = (self.force_model_mask[idx] & ~fused_bits) != np.uint64(0)
@@ -511,7 +512,7 @@ class Simulation:
         activity = np.empty((0, 3), dtype=np.float64)
         msis_rows = np.empty(0, dtype=np.int64)
         if drag_params is not None:
-            with_drag = idx[self._cowell_has_drag[idx]]
+            with_drag = idx[(self._cowell_flags[idx] & COWELL_DRAG) != 0]
             selector = drag_params[with_drag, drag.DENSITY_MODEL_COL]
             if bool(np.any(selector >= drag.DIURNAL_THRESHOLD)):
                 self._cowell_fused_ok = False
@@ -1745,11 +1746,10 @@ class Simulation:
         return int(cowell_rk4_step(
             float(dt), float(self.t), self.global_states, self.mu_array, self.parent_indices,
             self._cowell_idx,
-            self._cowell_has_point_mass, self._cowell_has_j2, self._cowell_j2_params,
-            self._cowell_has_zonal, self._cowell_zonal_params,
-            self._cowell_has_drag, self._cowell_drag_params, self._cowell_drag_table_of,
+            self._cowell_flags, self._cowell_j2_params, self._cowell_zonal_params,
+            self._cowell_drag_params, self._cowell_drag_table_of,
             tables.tables, tables.meta,
-            self._cowell_has_tesseral, self._cowell_tesseral_params, self._cowell_tesseral_vw,
+            self._cowell_tesseral_params, self._cowell_tesseral_vw,
             self._cowell_rel,
         ))
 

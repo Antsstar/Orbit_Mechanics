@@ -2095,6 +2095,20 @@ work. `benchmarks/tesseral_sweep.py --leo`: the tesseral tier **14.05 s -> 0.095
 J2..J6 tier's 0.061 s), the GEO scan 4.3 s -> 0.4 s, and every printed number - both tables, the
 equilibria, the LEO errors and window shifts - identical to the last digit.
 
+**Packing the arguments back.** The five per-body bool flag arrays became one int64 bitfield
+(`kernels.COWELL_POINT_MASS | COWELL_J2 | COWELL_ZONAL | COWELL_DRAG | COWELL_TESSERAL`, decoded with
+`&` once per body; `Simulation._cowell_flags`, built in `_refresh_cowell_plan`), so `cowell_rk4_step`
+takes 16 arguments instead of 20. A numba micro-benchmark (`@njit` taking N arrays) put dispatch at
+~0.10-0.11 us per float array and ~0.18 us per bool array, predicting ~0.5 us saved by replacing five
+bool arrays with one int array. Measured (min-of-batches, two interleaved runs each, old code from
+`git archive HEAD`): `pm` 12 sats 3.15-3.20 -> 2.40-2.42 us, 60 sats 5.59-5.69 -> 4.79-4.84 us;
+`pm+j2+zon+tess` 12 sats 10.88-10.97 -> 10.11-10.19 us, 60 sats 44.0-44.2 -> 43.4-44.0 us (inside
+noise). About 0.77 us per call, more than predicted, because bool arrays unbox slower than the
+micro-benchmark's float ones. Final states are bit-identical to the five-array signature. The
+coefficient arrays were *not* stacked into one 2-D array: they are the live `force_model_params`
+arrays, read without a copy, and a stacked copy would go stale whenever a coefficient is written
+after the plan is built (the kernel's "read live" contract); that would save ~0.3 us more.
+
 ---
 
 ## Validation layers

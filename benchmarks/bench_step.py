@@ -182,11 +182,10 @@ def bench_cowell() -> None:
             def kernel() -> None:
                 kernels.cowell_rk4_step(
                     COWELL_DT, sim.t, sim.global_states, sim.mu_array, sim.parent_indices, sats,
-                    sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
-                    sim._cowell_has_zonal, sim._cowell_zonal_params,
-                    sim._cowell_has_drag, sim._cowell_drag_params, sim._cowell_drag_table_of,
+                    sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
+                    sim._cowell_drag_params, sim._cowell_drag_table_of,
                     tables.tables, tables.meta,
-                    sim._cowell_has_tesseral, sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
+                    sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
                     sim._cowell_rel,
                 )
 

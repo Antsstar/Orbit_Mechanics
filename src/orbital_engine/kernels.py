@@ -42,6 +42,7 @@ __all__ = [
     "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate", "cowell_rk4_step",
     "rebase_relative_states", "DRAG_LAW_EXPONENTIAL", "DRAG_LAW_LAYERED", "DRAG_LAW_MSIS",
     "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL", "TESSERAL_VW_SIZE",
+    "COWELL_POINT_MASS", "COWELL_J2", "COWELL_ZONAL", "COWELL_DRAG", "COWELL_TESSERAL",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -837,6 +838,18 @@ def _cowell_accel(
     return ax, ay, az
 
 
+# Per-body model flags of `cowell_rk4_step`, one bit each in a single int64 array. Packed rather than
+# five bool arrays because numba's per-call dispatch cost scales with the argument count (~0.1 us per
+# array, measured), and it is paid on every tier whether or not the body uses the term. Compile-time
+# constants under `@njit`; a bit is only ever tested with `& BIT`, never compared, so any other bits a
+# caller sets are ignored.
+COWELL_POINT_MASS = 1
+COWELL_J2 = 2
+COWELL_ZONAL = 4
+COWELL_DRAG = 8
+COWELL_TESSERAL = 16
+
+
 @njit
 def cowell_rk4_step(
     dt: float,
@@ -845,17 +858,13 @@ def cowell_rk4_step(
     mu_array: NDArray[np.float64],
     parent_indices: NDArray[np.int32],
     indices: NDArray[np.int64],
-    has_point_mass: NDArray[np.bool_],
-    has_j2: NDArray[np.bool_],
+    flags: NDArray[np.int64],
     j2_params: NDArray[np.float64],
-    has_zonal: NDArray[np.bool_],
     zonal_params: NDArray[np.float64],
-    has_drag: NDArray[np.bool_],
     drag_params: NDArray[np.float64],
     drag_table_of: NDArray[np.int64],
     density_tables: NDArray[np.float64],
     density_meta: NDArray[np.float64],
-    has_tesseral: NDArray[np.bool_],
     tesseral_params: NDArray[np.float64],
     tesseral_vw: NDArray[np.float64],
     rel_out: NDArray[np.float64],
@@ -899,6 +908,13 @@ def cowell_rk4_step(
     too close to the equivalence bound to leave to chance. `state[parent]` is read and never written,
     so a Cowell body whose parent is itself in `indices` is excluded by the caller's plan.
 
+    **Argument layout.** `flags[s]` is body `s`'s enabled terms as an OR of `COWELL_POINT_MASS`,
+    `COWELL_J2`, `COWELL_ZONAL`, `COWELL_DRAG`, `COWELL_TESSERAL` (decoded with `&` once per body); it
+    replaced five separate bool arrays, which changed only the argument count, never the arithmetic -
+    results are bit-identical to the five-array signature. The coefficient arrays stay separate
+    because they are the live `force_model_params` arrays the kernel reads without a copy; stacking
+    them would need a per-step re-sync or a stale-coefficient hazard.
+
     Per-body flags rather than one global set so a mixed arena - some satellites with J2, some
     without, some with J3..J6 or drag - stays on the compiled path. `j2_params` is
     `force_model_params["j2"]` when any body has the J2 bit, and a one-row dummy otherwise; a row is
@@ -928,7 +944,7 @@ def cowell_rk4_step(
     # The staleness check, before anything is written - see "Return value".
     for k in range(n):
         s = indices[k]
-        if has_drag[s] and _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL]) == DRAG_LAW_MSIS:
+        if (flags[s] & COWELL_DRAG) != 0 and _drag_law(drag_params[s, _DRAG_DENSITY_MODEL_COL]) == DRAG_LAW_MSIS:
             row = drag_table_of[s]
             if row < 0:
                 return int(s)
@@ -939,10 +955,11 @@ def cowell_rk4_step(
     for k in range(n):
         s = indices[k]
         par = parent_indices[s]
-        pm = has_point_mass[s]
-        jj = has_j2[s]
-        zz = has_zonal[s]
-        dd = has_drag[s]
+        fl = flags[s]
+        pm = (fl & COWELL_POINT_MASS) != 0
+        jj = (fl & COWELL_J2) != 0
+        zz = (fl & COWELL_ZONAL) != 0
+        dd = (fl & COWELL_DRAG) != 0
         mu_par = mu_array[par]
         mu_total = mu_array[s] + mu_par
         j2 = 0.0
@@ -970,7 +987,7 @@ def cowell_rk4_step(
                 table = drag_table_of[s]
         n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
         # The tesseral field's orientation at the three distinct stage times, read once per body.
-        tt = has_tesseral[s]
+        tt = (fl & COWELL_TESSERAL) != 0
         cos1 = 1.0
         sin1 = 0.0
         cos2 = 1.0

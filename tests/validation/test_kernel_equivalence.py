@@ -492,11 +492,10 @@ def _fused_plan_args(sim: Simulation) -> tuple[object, ...]:
     `indices` and `rel_out`)."""
     tables = sim._cowell_drag_tables
     return (
-        sim._cowell_has_point_mass, sim._cowell_has_j2, sim._cowell_j2_params,
-        sim._cowell_has_zonal, sim._cowell_zonal_params,
-        sim._cowell_has_drag, sim._cowell_drag_params, sim._cowell_drag_table_of,
+        sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
+        sim._cowell_drag_params, sim._cowell_drag_table_of,
         tables.tables, tables.meta,
-        sim._cowell_has_tesseral, sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
+        sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
     )
 
 
@@ -997,7 +996,7 @@ def test_zonal_term_is_visible_to_the_state_comparison(
     """
     with_sim, idx = _build_cowell_zonal(db_session_factory(), variant="j2+zonal")
     without_sim, _ = _build_cowell_zonal(db_session_factory(), variant="j2+zonal")
-    without_sim._cowell_has_zonal[:] = False
+    without_sim._cowell_flags &= ~kernels.COWELL_ZONAL
     _, with_rel = _run_cowell_kernel(with_sim, idx, COWELL_DT, 50)
     _, without_rel = _run_cowell_kernel(without_sim, idx, COWELL_DT, 50)
     diff = _relative_difference(with_rel, without_rel, np.ones(idx.size, dtype=bool))
@@ -1099,21 +1098,22 @@ def test_cowell_fused_kernel_is_selected_only_for_point_mass_j2_drag_zonal_and_t
 
     sim.enable_force_model(zonal.ZONAL_MODEL, [int(sats[1])], **_ZONAL_FULL)
     assert sim._cowell_fused_ok, "zonal is fused; enabling it must keep the compiled plan"
-    assert sim._cowell_has_zonal[sats[1]] and not sim._cowell_has_zonal[sats[0]]
+    assert sim._cowell_flags[sats[1]] & kernels.COWELL_ZONAL and not sim._cowell_flags[sats[0]] & kernels.COWELL_ZONAL
     assert sim._cowell_zonal_params is sim.force_model_params[zonal.ZONAL_MODEL]
     sim.step(COWELL_DT)
     assert calls == [1, 1], "the fused kernel was not used for a point_mass_gravity + j2 + zonal configuration"
 
     sim.enable_force_model(drag.DRAG_MODEL, [int(sats[1]), int(sats[2])], **_DRAG_COMMON, **_DRAG_LAYERED)
     assert sim._cowell_fused_ok, "drag is fused; enabling it must keep the compiled plan"
-    assert sim._cowell_has_drag[sats[1]] and not sim._cowell_has_drag[sats[0]]
+    assert sim._cowell_flags[sats[1]] & kernels.COWELL_DRAG and not sim._cowell_flags[sats[0]] & kernels.COWELL_DRAG
     assert sim._cowell_drag_params is sim.force_model_params[drag.DRAG_MODEL]
     sim.step(COWELL_DT)
     assert calls == [1, 1, 1], "the fused kernel was not used for a configuration with drag"
 
     sim.enable_force_model(tesseral.TESSERAL_MODEL, [int(sats[2]), int(sats[3])], **_TESSERAL_FULL)
     assert sim._cowell_fused_ok, "tesseral is fused; enabling it must keep the compiled plan"
-    assert sim._cowell_has_tesseral[sats[2]] and not sim._cowell_has_tesseral[sats[1]]
+    assert (sim._cowell_flags[sats[2]] & kernels.COWELL_TESSERAL
+            and not sim._cowell_flags[sats[1]] & kernels.COWELL_TESSERAL)
     assert sim._cowell_tesseral_params is sim.force_model_params[tesseral.TESSERAL_MODEL]
     sim.step(COWELL_DT)
     assert calls == [1, 1, 1, 1], "the fused kernel was not used for a configuration with tesseral"
@@ -1351,7 +1351,7 @@ def test_drag_term_is_visible_to_the_state_comparison(
     """
     with_sim, idx = _build_cowell_drag(db_session_factory(), variant=variant)
     without_sim, _ = _build_cowell_drag(db_session_factory(), variant=variant)
-    without_sim._cowell_has_drag[:] = False
+    without_sim._cowell_flags &= ~kernels.COWELL_DRAG
     _, with_rel = _run_cowell_kernel(with_sim, idx, COWELL_DT, 50)
     _, without_rel = _run_cowell_kernel(without_sim, idx, COWELL_DT, 50)
     diff = _relative_difference(with_rel, without_rel, np.ones(idx.size, dtype=bool))
@@ -1639,7 +1639,7 @@ def test_tesseral_term_is_visible_to_the_state_comparison(
     """
     with_sim, idx = _build_cowell_tesseral(db_session_factory(), variant="j2+zonal+tesseral")
     without_sim, _ = _build_cowell_tesseral(db_session_factory(), variant="j2+zonal+tesseral")
-    without_sim._cowell_has_tesseral[:] = False
+    without_sim._cowell_flags &= ~kernels.COWELL_TESSERAL
     _, with_rel = _run_cowell_kernel(with_sim, idx, COWELL_DT, 50)
     _, without_rel = _run_cowell_kernel(without_sim, idx, COWELL_DT, 50)
     diff = _relative_difference(with_rel, without_rel, np.ones(idx.size, dtype=bool))

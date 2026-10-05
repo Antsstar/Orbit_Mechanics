@@ -77,6 +77,7 @@ from orbital_engine.drag import (
     DENSITY_MODEL_EXPONENTIAL, DRAG_MODEL, DRAG_PARAM_NAMES, EARTH_OMEGA,
 )
 from orbital_engine.geopotential import EARTH_J2, EARTH_R_EQ
+from orbital_engine.kernels import COWELL_DRAG
 from orbital_engine.simulator import Simulation
 
 ArrF = NDArray[np.float64]
@@ -406,7 +407,7 @@ def test_cowell_bodies_with_drag_stay_on_the_fused_plan() -> None:
     assert sim._cowell_fused_ok
     sim.enable_force_model(DRAG_MODEL, sats[1], omega=0.0, **_DRAG_COEFFS)
     assert sim._cowell_fused_ok
-    assert sim._cowell_has_drag[sats[1]] and not sim._cowell_has_drag[sats[0]]
+    assert sim._cowell_flags[sats[1]] & COWELL_DRAG and not sim._cowell_flags[sats[0]] & COWELL_DRAG
 
 
 # ==================================================================================================

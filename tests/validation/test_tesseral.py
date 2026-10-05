@@ -46,6 +46,7 @@ from orbital_engine.database import Base
 from orbital_engine.drag import EARTH_OMEGA
 from orbital_engine.geopotential import EARTH_J2, EARTH_R_EQ, J2_MODEL
 from orbital_engine.gravity import POINT_MASS_MODEL
+from orbital_engine.kernels import COWELL_TESSERAL
 from orbital_engine.simulator import Simulation
 from orbital_engine.tesseral import TESSERAL_MODEL, TESSERAL_PAIRS
 
@@ -244,7 +245,7 @@ def test_cowell_body_with_tesseral_stays_on_the_fused_compiled_path(
     assert sim._cowell_fused_ok
     sim.enable_force_model(TESSERAL_MODEL, sats[:1], r_eq=R, omega=EARTH_OMEGA, **tesseral.EARTH_TESSERALS)
     assert sim._cowell_fused_ok
-    assert sim._cowell_has_tesseral[sats[0]] and not sim._cowell_has_tesseral[sats[1]]
+    assert sim._cowell_flags[sats[0]] & COWELL_TESSERAL and not sim._cowell_flags[sats[1]] & COWELL_TESSERAL
     assert sim._cowell_tesseral_params is sim.force_model_params[TESSERAL_MODEL]
     sim.enable_force_model("thrust", sats[1:], thrust_n=0.0, isp_s=300.0, mass_kg=100.0, dry_mass_kg=50.0)
     assert not sim._cowell_fused_ok
