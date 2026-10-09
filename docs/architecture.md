@@ -2172,6 +2172,89 @@ therefore now comparable: ~2-5x RK4's cost for 545-3,750x less error at the same
 
 ---
 
+## Temporary systems: the hierarchy changes while the simulation runs
+
+`hierarchy.py`, through `Simulation.form_system(a, b)` and `dissolve_system(system)`. This is phase 1 of a
+plan to model a close encounter between two massive bodies (asteroids) by pairing them, then undo the
+pairing when they separate. Phase 1 is the structure only. Three things follow: the triggers (encounter
+events with hysteresis), the formation policy as a sweep axis, and the headline comparison.
+
+### The representation already existed
+
+A temporary system has the Earth-Moon shape, built at runtime:
+- a barycentre slot carrying the summed `mu`;
+- the heavier member as head, with zeroed elements, placed by the reflex kick;
+- the other member, parented to the head;
+- the barycentre as a sibling of the outer bubble, on the pair's centre-of-mass orbit about the outer
+  parent.
+
+For a pair the reflex model is exact two-body motion, so inside the pair the mutual attraction is
+exact. What is neglected is the outer primary's tide across the pair. The point is to measure that
+against N-body truth, as a function of when the pair is formed.
+
+The mechanism is not new physics. NBODY-family codes replace a close pair with its centre of mass in
+the outer integration and treat the relative motion separately (Aarseth, *Gravitational N-Body
+Simulations*, 2003, ch. 5, KS regularisation). Patched conics switch a craft's primary at the sphere of
+influence. What is particular here is that both levels are analytic, and that the switching policy will
+be a configuration measured against truth.
+
+### Why it fits the existing machinery
+
+- **Topological order.** The tiers are keyed on `body_sys_map`. A new barycentre points at the outer
+  bubble, and its members point at it. A re-sort therefore places it one tier below the outer system
+  and its members one tier below that, so `calc_global` resolves it before them.
+- **Elements relative to the head.** When a body's bubble differs from its parent, `_rehydrate_coes`
+  already subtracts the head's local state and uses the two-body `mu` sum. The head's elements are
+  zeroed, and the pair's heliocentric orbit moves to the barycentre's row with `mu_sun + m_a + m_b`.
+- **Reflex kick.** The head's local state is `-sum(m_i r_i) / M`, with `M` the barycentre's summed `mu`.
+  For a pair that is `-m_b r / (m_a + m_b)`, exactly the head's offset from the barycentre. At the
+  outer level `M_S r_S = m_a r_a + m_b r_b`, so pairing leaves the outer head's kick unchanged.
+
+### A frame change, kept local
+
+No body moves when a system forms or dissolves; only the frame its state is expressed in changes. The
+integer structure (`sys_head_map`, the tiers, the dispatch caches) is re-derived in full, which is
+exact. The float work is deliberately *not* re-run in full: re-running `_recalculate_all_barycenters`
+and `_rehydrate_coes` over the whole arena would perturb every unrelated body at round-off. Instead, the
+barycentre's state is computed from its two members, and `_rehydrate_coes(rows=...)` (added for this)
+re-derives only the changed rows. Every other row stays bit-identical, which is tested.
+
+A dissolved barycentre's slot is cleared and returned to the free list; this is the first despawn path
+in the engine, and the next `form_system` reuses the slot. History records the body names per snapshot,
+so a barycentre can appear or vanish mid-run.
+
+### What phase 1 measures
+
+`tests/validation/test_hierarchy.py`:
+
+- **Dissolve and re-form.** Dissolving `sun_earth_moon`'s Earth-Moon system and forming it again
+  reuses the slot and returns every element to 1.5e-14 relative. 30 days later the arena is 1.3e-7 km
+  from the untouched build (compiled; 1.4e-7 km NumPy), at 1.5e8 km.
+- **Zero-length step.** A zero-length step after a restructure re-derives every state from elements and
+  kicks. It moves bodies 5.1e-6 km after forming and 3.7e-5 km after dissolving. That is the arena's
+  own floor, not the restructure's: the same zero step on an unrestructured build moves Earth 2.7e-4 km
+  at t = 0 and 4.7e-6 km at day 5. The floor is the elements-to-state round trip of a near-equatorial
+  orbit at 1.5e8 km.
+- **Against truth.** Against DOP853 N-body truth over 30 days, the Moon misses by 3.3e4 km with the pair
+  formed and by 2.0e6 km with it dissolved. The first is the solar perturbation the hierarchy neglects.
+  The second arises because, as separate heliocentric conics, the Moon keeps the ~1 km/s it had
+  relative to Earth. This is a comparison, not a verification.
+- **Cost.** A form or dissolve costs ~1 ms, independent of arena capacity: the pair of operations takes
+  1.8 ms at 64 slots and 2.5 ms at 10,000. That is fixed NumPy overhead, half of it `rv_to_coe` on
+  three rows. An encounter restructures once; a policy that switched every few steps would need this to
+  be cheaper.
+
+**Phase 1 restrictions, each refused rather than approximated:**
+- exactly two members, which must be plain siblings of one bubble with one parent;
+- both members Keplerian;
+- nothing else parented to, or in the bubble of, either member (or of the dissolved system).
+
+Three or more siblings in one bubble is the reflex model's unmeasured approximation (siblings do not
+attract each other directly), so it is never created implicitly. A restructure is not time-reversible
+once a policy with hysteresis drives it.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
@@ -2244,7 +2327,8 @@ engineering log.
 9. `_rehydrate_coes` — recompute local states and elements from final global positions
 10. `_refresh_active_indices` — cache sibling/head index arrays and the flattened topological order
 
-Step 10 is the hook a future spawn/despawn path must call. After build, only `set_propagator` calls it.
+Step 10 is the hook a spawn/despawn path must call. After build, `set_propagator` calls it, and so does
+`hierarchy._restructure` (with steps 4 and 6) when a temporary system forms or dissolves.
 
 Per `step()`: split the step at any scheduled manoeuvre epoch (`_advance` per sub-interval, impulse
 between them) → then, per sub-interval: Cowell integrate (relative to each parent's start-of-step state) → secular-J2 advance
@@ -2267,8 +2351,9 @@ optionally record.
   section).
 - **Slot compaction and handle indirection.** Dropped from phase 1 once measurement showed they
   addressed ~4% of the step. They become worth doing when there is a despawn path to compact *for*.
-- **Spawn / despawn.** Slots come off a free list and are never returned. Loading bodies mid-run — a
-  founding goal of the database design — is not yet implemented.
+- **Spawn / despawn of bodies.** Only a temporary system's barycentre slot is ever returned to the free
+  list (`hierarchy.dissolve_system`). Loading *bodies* mid-run, a founding goal of the database design,
+  is not yet implemented.
 - **`BodyHandle`.** Written, never instantiated; `sim.bodies` is always empty.
 - **Accuracy testing of `_resolve_circular`.** The binary-system path was written and exercised as a
   robustness check — *does this run* — not a correctness one. Alpha Centauri is in the seed database

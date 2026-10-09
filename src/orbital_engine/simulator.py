@@ -32,6 +32,7 @@ from . import tesseral  # registers "tesseral"; TESSERAL_MODEL is in the fused C
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
+from . import hierarchy  # temporary systems: form_system / dissolve_system, used by the API below
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
@@ -86,6 +87,10 @@ class Simulation:
         self._hist_global: List[NDArray[np.float64]] = []
         self._hist_local: List[NDArray[np.float64]] = []
         self._hist_coe: List[NDArray[np.float64]] = []
+        # The recorded names of each snapshot: the same list object until the recorded set changes
+        # (a runtime restructure, `hierarchy.py`, adds or removes a barycentre), so this costs one
+        # reference per step.
+        self._hist_names: List[List[str]] = []
         self._recorded_names: List[str] = []
         self._recorded_slots: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
@@ -845,21 +850,32 @@ class Simulation:
         valid_sys = (self.mu_array > 0) & sys_mask  # Avoid divide by zeros
         self.global_states[valid_sys] = mass_weighted_states[valid_sys] / self.mu_array[valid_sys, None]    # Their mu should be a sum of all mu now.
 
-    def _rehydrate_coes(self) -> None:
+    def _rehydrate_coes(self, rows: Optional[NDArray[np.int64]] = None) -> None:
         """
         Calculate normalized local Cartesian vectors then generates mathematically accurate Classical Orbital Elements.
         Current Definition uses Two-Body mass sum for mu (mu_parent + mu_child).
+
+        `rows` restricts both the local states and the elements to those slots; every other row is
+        left untouched, bit for bit. That is what a runtime restructure (`hierarchy.py`) needs: forming
+        or dissolving a system is a change of frame for its members alone. The work per row is
+        elementwise, so a row rehydrated alone gets the same bits it would in the full pass. A row's
+        parent must already have a valid local state (its own, or one in `rows`).
         """
+        scope = self.active_mask.copy()
+        if rows is not None:
+            scope[:] = False
+            scope[rows] = True
+            scope &= self.active_mask
         # 1. Compute local states, clean up heads and roots data.
         # Self-reference made this very simple, if the node self references then the local state will be 0.0
-        self.local_states[self.active_mask] = (                     # All local states are relative to their system bubble barycenter.
-            self.global_states[self.active_mask] - 
-            self.global_states[self.body_sys_map[self.active_mask]]
+        self.local_states[scope] = (                     # All local states are relative to their system bubble barycenter.
+            self.global_states[scope] -
+            self.global_states[self.body_sys_map[scope]]
         )
 
-        self.coe_states[self.is_head, :] = 0.0 # Heads move reflexively to their siblings within the system. Coe's are thus meaningless.
-        self.coe_states[self.active_mask & (self.parent_indices == np.arange(self.max_capacity))] = 0.0 # All root nodes haven no parent hence no orbit parameters.
-        valid_mask = self.active_mask & ~self.is_head & (self.parent_indices != np.arange(self.max_capacity))   # Any body that actually has an orbit.
+        self.coe_states[self.is_head & (scope | (rows is None)), :] = 0.0 # Heads move reflexively to their siblings within the system. Coe's are thus meaningless.
+        self.coe_states[scope & (self.parent_indices == np.arange(self.max_capacity))] = 0.0 # All root nodes haven no parent hence no orbit parameters.
+        valid_mask = scope & ~self.is_head & (self.parent_indices != np.arange(self.max_capacity))   # Any body that actually has an orbit.
         # Pick anything that is active, not a head and isn't a self referenced object (root)
 
         # print(rel_r, rel_v)
@@ -1705,6 +1721,16 @@ class Simulation:
         crossings are in `event_epochs`. Emptied by `clear_events`."""
         return tuple(self._event_fires)
 
+    def form_system(self, a: int, b: int, *, name: Optional[str] = None) -> int:
+        """Pair two sibling bodies into a temporary two-body system; returns the barycentre's slot.
+        A change of frame only: no body moves. See `hierarchy.py` for the model and its limits."""
+        return hierarchy.form_system(self, a, b, name=name)
+
+    def dissolve_system(self, system: int) -> Tuple[int, int]:
+        """Return a two-member system's members to the outer bubble and free its slot; returns
+        `(head, sibling)`. The inverse of `form_system`. See `hierarchy.py`."""
+        return hierarchy.dissolve_system(self, system)
+
     def apply_delta_v(
         self,
         bodies: Union[int, Sequence[int], NDArray[np.integer[Any]]],
@@ -1903,6 +1929,7 @@ class Simulation:
         self._hist_global.append(self.global_states[self._recorded_slots].copy())
         self._hist_local.append(self.local_states[self._recorded_slots].copy())
         self._hist_coe.append(self.coe_states[self._recorded_slots].copy())
+        self._hist_names.append(self._recorded_names)
 
     @property
     def history(self) -> pd.DataFrame:
@@ -1919,19 +1946,19 @@ class Simulation:
                 "x", "y", "z", "vx", "vy", "vz", "e", "theta",
             ])
 
-        n_snaps = len(self._hist_seconds)
-        n_bodies = len(self._recorded_names)
+        # Snapshots can differ in length: a runtime restructure adds or removes a barycentre.
+        g = np.concatenate(self._hist_global)
+        loc = np.concatenate(self._hist_local)
+        coe = np.concatenate(self._hist_coe)
 
-        g = np.stack(self._hist_global).reshape(n_snaps * n_bodies, 6)
-        loc = np.stack(self._hist_local).reshape(n_snaps * n_bodies, 6)
-        coe = np.stack(self._hist_coe).reshape(n_snaps * n_bodies, 6)
-
-        seconds = np.repeat(np.asarray(self._hist_seconds, dtype=np.float64), n_bodies)
+        counts = np.asarray([len(n) for n in self._hist_names], dtype=np.int64)
+        seconds = np.repeat(np.asarray(self._hist_seconds, dtype=np.float64), counts)
+        names: List[str] = [name for snap in self._hist_names for name in snap]
 
         return pd.DataFrame({
             "timestamp": [self.start_epoch + timedelta(seconds=s) for s in seconds],
             "seconds": seconds,
-            "body": self._recorded_names * n_snaps,
+            "body": names,
             "g_x": g[:, 0], "g_y": g[:, 1], "g_z": g[:, 2],
             "g_vx": g[:, 3], "g_vy": g[:, 4], "g_vz": g[:, 5],
             "x": loc[:, 0], "y": loc[:, 1], "z": loc[:, 2],
@@ -1945,6 +1972,7 @@ class Simulation:
         self._hist_global = []
         self._hist_local = []
         self._hist_coe = []
+        self._hist_names = []
 
 if __name__ == "__main__":
     # sim = Simulation(body_names=["Earth", "Moon", "Sun"])

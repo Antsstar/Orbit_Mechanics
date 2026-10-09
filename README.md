@@ -855,6 +855,12 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        of compiled RK4 per step), held equivalent to their NumPy references to 1e-12
      - Encke on hyperbolic orbits: a bracketed, safeguarded Kepler solve that converges on every
        conic tested (3,240 cases, 1-100 km/s, near-radial to circular)
+     - temporary systems, phase 1: two bodies paired into a two-body system and unpaired again at
+       runtime, as a change of frame that leaves every other body bit-identical
+   - **In progress:** temporary systems for close encounters. Next come encounter events that form and
+     dissolve a pair with hysteresis, then the formation radius as a sweep axis, and finally the error
+     against N-body truth as a function of that radius (expected minimum near the Laplace sphere of
+     influence)
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay

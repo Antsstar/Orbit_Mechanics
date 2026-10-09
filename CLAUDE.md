@@ -92,7 +92,10 @@ Units throughout: **km, km/s, radians, seconds**, `mu` in km³/s².
 - Root nodes self-reference: `parent_indices[i] == i`.
 - COE column 0 is the **semi-latus rectum `p`**, not semi-major axis — chosen so parabolic orbits stay
   representable. Always index via `COEIndex` (`custom_types.py`), never bare integers.
-- Slots come off a free list (`free_indices`) and are never returned. There is no despawn path.
+- Slots come off a free list (`free_indices`). The only slots ever returned are temporary-system
+  barycentres (`dissolve_system`); bodies are never despawned. A restructure keeps every untouched
+  row bit-identical: it re-derives the integer maps in full, but the float state only for the changed
+  rows (`_rehydrate_coes(rows=...)`). Never re-run the build's whole-arena float steps after build.
 - **`Simulation.accelerations(t, state)` returns `accel_accum` itself, not a copy.** An integrator that
   holds more than one stage result (every RK method) must copy each before requesting the next, or all
   stages alias one buffer and the integration is silently wrong.
@@ -157,6 +160,7 @@ module's row there before changing that module or writing a test against it.
 | `ephemeris.py` | `"ephemeris_third_body"`: tabulated perturbers (Hermite) at every RK4 stage time — fourth order. Tables are centred on the parent; out-of-range queries raise. Not fused |
 | `thrust.py` | `"thrust"`, Cowell-only, RSW direction (norm throttles). **Mass is state**: re-seed `mass_kg` to re-run. Not fused |
 | `manoeuvres.py` | Impulsive Δv in RSW under every propagator; `schedule_delta_v` splits the step at the epoch. Keplerian/secular-J2 re-derive elements (and rates). Not a registry entry |
+| `hierarchy.py` | Temporary systems: `sim.form_system(a, b)` / `sim.dissolve_system(s)`, a change of frame (no body moves). Pairs of plain Keplerian siblings only, no dependants. Phase 1 of the encounter plan: triggers and policy still to come |
 | `events.py` | Event-driven step splitting (Illinois false position over trial propagations) with `Event.latch`, plus `Event.action` / `max_fires` (`apsis_event`, `node_event`, `burn`, `enable_model`). Blind to an even number of crossings in one step. An action must not add or clear events |
 | `integrators.py` | `RK4Integrator`: copies each stage's accelerations (the provider returns a shared buffer). Not allocation-free. Also `leapfrog` / `yoshida4` (symplectic) and `encke` (deviation from the conic, re-anchored each step; **needs `point_mass_gravity`**), chosen by `set_cowell_integrator` or `ModelConfig.integrator`; each has a fused twin (`kernels.cowell_{rk4,leapfrog,yoshida4,encke}_step`) |
 | `propagators.py` | `SecularJ2Propagator` (`PropagatorType.SECULAR_J2`, coefficients mandatory); `mean_seed=True` corrects `p` only |
