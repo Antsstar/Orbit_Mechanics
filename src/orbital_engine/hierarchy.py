@@ -228,6 +228,10 @@ def _release_slot(sim: "Simulation", s: int) -> None:
 
 # --- Encounters: forming and dissolving a pair by event ----------------------------------------------
 
+#: Units an `EncounterPolicy`'s radii can be given in.
+ENCOUNTER_UNITS = ("km", "hill")
+
+
 @dataclass(frozen=True)
 class EncounterPolicy:
     """
@@ -236,11 +240,18 @@ class EncounterPolicy:
     must be positive: with one radius, a pair grazing it would form and dissolve on every crossing,
     each restructure costing ~1 ms and carrying the switching error. Plain data, so a policy can be a
     sweep configuration. `tol_s` is the event tolerance the crossings are located to.
+
+    `unit="hill"` reads both radii as multiples of the pair's Hill radius (`hill_radius_km`),
+    evaluated **at every event evaluation**, so the threshold follows the pair as its distance from
+    the outer primary changes. That makes a policy dimensionless and transferable between scenarios;
+    whether one multiple is right across masses is what `benchmarks/encounter_sweep.py` measures. The
+    field names keep `_km` for the default unit.
     """
 
     form_km: float
     dissolve_km: float
     tol_s: float = events.DEFAULT_EVENT_TOL_S
+    unit: str = "km"
 
     def __post_init__(self) -> None:
         if not (0.0 < self.form_km < self.dissolve_km):
@@ -249,11 +260,38 @@ class EncounterPolicy:
                 f"{self.dissolve_km}): the gap is the hysteresis that stops a grazing pair flickering.")
         if not self.tol_s > 0.0:
             raise ValueError(f"EncounterPolicy tol_s={self.tol_s!r} must be positive.")
+        if self.unit not in ENCOUNTER_UNITS:
+            raise ValueError(f"EncounterPolicy unit={self.unit!r}: use one of {ENCOUNTER_UNITS}.")
+
+    def radii_km(self, sim: "Simulation", a: int, b: int) -> Tuple[float, float]:
+        """`(form, dissolve)` in km for the pair now: the radii themselves, or times its Hill radius."""
+        scale = hill_radius_km(sim, a, b) if self.unit == "hill" else 1.0
+        return self.form_km * scale, self.dissolve_km * scale
 
 
 def separation_km(sim: "Simulation", a: int, b: int) -> float:
     """Distance between two bodies' global positions, km."""
     return float(np.linalg.norm(sim.global_states[a, :3] - sim.global_states[b, :3]))
+
+
+def hill_radius_km(sim: "Simulation", a: int, b: int) -> float:
+    """
+    The Hill radius of the pair `(a, b)` about their shared parent, now: `R (m / 3 M)^(1/3)`, with
+    `m` the pair's summed `mu`, `M` the parent's own `mu` and `R` the distance from the pair's centre
+    of mass to the parent. It is the separation at which the pair's mutual attraction equals the
+    parent's tidal pull across it (Hill's problem; Murray & Dermott, *Solar System Dynamics*, 1999;
+    the form is quoted from memory, not checked against the text). Read from global states, so it is the same whether the pair is formed or not. The
+    current distance is used, not a semi-major axis, so the radius breathes with an eccentric orbit.
+    """
+    m = float(sim.mu_array[a] + sim.mu_array[b])
+    # Paired, one member heads the pair's bubble and the outer parent is the barycentre's; unpaired,
+    # the two are plain siblings sharing it. O(1): this runs at every event evaluation.
+    s = int(sim.body_sys_map[a])
+    paired = s == int(sim.body_sys_map[b]) and bool(sim.is_head[a] or sim.is_head[b])
+    parent = int(sim.parent_indices[s]) if paired else int(sim.parent_indices[a])
+    cm = (sim.mu_array[a] * sim.global_states[a, :3] + sim.mu_array[b] * sim.global_states[b, :3]) / m
+    r = float(np.linalg.norm(cm - sim.global_states[parent, :3]))
+    return r * float(np.cbrt(m / (3.0 * float(sim.mu_array[parent]))))
 
 
 def paired_system(sim: "Simulation", a: int, b: int) -> Optional[int]:
@@ -286,10 +324,10 @@ def encounter_events(a: int, b: int, policy: EncounterPolicy) -> Tuple[events.Ev
     bodies = np.array([a], dtype=np.int64)
 
     def inside_form(sim: "Simulation", _bodies: NDArray[np.int64]) -> NDArray[np.float64]:
-        return np.array([separation_km(sim, a, b) - policy.form_km], dtype=np.float64)
+        return np.array([separation_km(sim, a, b) - policy.radii_km(sim, a, b)[0]], dtype=np.float64)
 
     def inside_dissolve(sim: "Simulation", _bodies: NDArray[np.int64]) -> NDArray[np.float64]:
-        return np.array([separation_km(sim, a, b) - policy.dissolve_km], dtype=np.float64)
+        return np.array([separation_km(sim, a, b) - policy.radii_km(sim, a, b)[1]], dtype=np.float64)
 
     def form(sim: "Simulation", fired: NDArray[np.int64], t: float) -> None:
         _form_if_eligible(sim, a, b)
@@ -317,6 +355,16 @@ def _form_if_eligible(sim: "Simulation", a: int, b: int) -> None:
             float(sim.t), "skip", f"{names[a]}+{names[b]}", (a, b), -1, refusal))
 
 
+@dataclass(frozen=True)
+class EncounterSpec:
+    """A pair, by body name, and the policy that pairs it: what `sweep.ModelConfig.encounters` holds,
+    so a formation policy is a configuration like any other and can be swept."""
+
+    a: str
+    b: str
+    policy: EncounterPolicy
+
+
 def watch_encounter(sim: "Simulation", a: int, b: int, policy: EncounterPolicy) -> Tuple[events.Event, events.Event]:
     """
     Register `encounter_events(a, b, policy)` on `sim`, and form the pair now if it is already inside
@@ -326,6 +374,6 @@ def watch_encounter(sim: "Simulation", a: int, b: int, policy: EncounterPolicy) 
     form_event, dissolve_event = encounter_events(a, b, policy)
     sim.add_event(form_event)
     sim.add_event(dissolve_event)
-    if separation_km(sim, a, b) < policy.form_km:
+    if separation_km(sim, a, b) < policy.radii_km(sim, a, b)[0]:
         _form_if_eligible(sim, a, b)
     return form_event, dissolve_event

@@ -78,6 +78,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cas
 import numpy as np
 from numpy.typing import NDArray
 
+from .hierarchy import EncounterSpec
 from .access import (
     AccessMetrics, AccessSpec, access_grid, compare_windows, windows_from_positions,
     windows_from_simulation, windows_from_truth,
@@ -141,6 +142,12 @@ class ModelConfig(object):
     `integrator` names the Cowell integrator (`integrators.INTEGRATOR_NAMES`: "rk4", "leapfrog",
     "yoshida4"); `None` keeps the default RK4. Only meaningful for `PropagatorType.COWELL`, and refused
     on any other propagator rather than silently ignored.
+
+    `encounters` are temporary-system policies (`hierarchy.EncounterSpec`: a pair by name and its
+    `EncounterPolicy`), registered by `apply_config` after the propagator, so the formation radius is a
+    sweep axis. A pair the configuration cannot pair (a non-Keplerian member, say) is not refused: the
+    encounter is logged as a skip in `Simulation.hierarchy_changes`, which is the honest result for
+    that configuration.
     """
     name: str
     propagator: PropagatorType
@@ -152,6 +159,7 @@ class ModelConfig(object):
     station_keeping: Optional[StationKeepingSpec] = None
     compiled: Optional[bool] = None
     integrator: Optional[str] = None
+    encounters: Sequence[EncounterSpec] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -290,6 +298,13 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
                 )
             coefficients[key] = float(sim.name_to_index[body_name])
         sim.enable_force_model(fm.name, idx.tolist(), **coefficients)
+
+    for enc in config.encounters:
+        for body_name in (enc.a, enc.b):
+            if body_name not in sim.name_to_index:
+                raise KeyError(f"config '{config.name}': encounter body {body_name!r} is not in this "
+                               f"simulation; have {sorted(sim.name_to_index)}")
+        sim.watch_encounter(sim.name_to_index[enc.a], sim.name_to_index[enc.b], enc.policy)
 
     return idx
 

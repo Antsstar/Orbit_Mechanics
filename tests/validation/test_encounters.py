@@ -30,9 +30,13 @@ import pytest
 from sqlalchemy.orm import Session
 
 from orbital_engine import scenarios
-from orbital_engine.hierarchy import EncounterPolicy, encounter_events, paired_system, separation_km
+from orbital_engine.custom_types import PropagatorType
+from orbital_engine.hierarchy import (
+    EncounterPolicy, EncounterSpec, encounter_events, hill_radius_km, paired_system, separation_km,
+)
 from orbital_engine.reference import reference_for
 from orbital_engine.simulator import Simulation
+from orbital_engine.sweep import ModelConfig, apply_config, run_sweep
 
 DAY = 86400.0
 DT = 3600.0
@@ -158,3 +162,70 @@ def test_compiled_and_numpy_paths_agree(db_session_factory: Callable[[], Session
         _run(sim)
         out.append(sim.global_states[[a, b], :3].copy())
     assert float(np.max(np.abs(out[0] - out[1]))) < 1e-4
+
+
+# --- Phase 3: the radius in Hill units, as a sweep axis -------------------------------------------------
+
+def test_hill_radius(db_session: Session) -> None:
+    """`R (m / 3M)^(1/3)` at 2.77 AU for mu 79.9: 4.144e8 x (79.9 / 3.981e11)^(1/3) = 2.43e5 km. It is
+    the same whether the pair is formed (read from global states), and it follows R."""
+    sim, a, b = _build(db_session)
+    r_h = hill_radius_km(sim, a, b)
+    m = sim.mu_array[a] + sim.mu_array[b]
+    assert abs(r_h / (2.77 * scenarios.AU_KM * (m / (3.0 * scenarios.MU_SUN)) ** (1.0 / 3.0)) - 1.0) < 1e-3
+    sim.form_system(a, b)
+    assert abs(hill_radius_km(sim, a, b) / r_h - 1.0) < 1e-12
+    sim.step(DAY)
+    assert hill_radius_km(sim, a, b) != r_h
+
+
+def test_hill_units_are_evaluated_at_the_crossing(db_session_factory: Callable[[], Session]) -> None:
+    policy = EncounterPolicy(form_km=0.5, dissolve_km=1.0, unit="hill")
+    sim, a, b = _build(db_session_factory())
+    sim.watch_encounter(a, b, policy)
+    _run(sim)
+    t_form = sim.hierarchy_changes[0].t
+    twin, ta, tb = _build(db_session_factory())
+    n = int(t_form // DT)
+    _run(twin, n)
+    twin.step(t_form - n * DT)
+    assert abs(separation_km(twin, ta, tb) - 0.5 * hill_radius_km(twin, ta, tb)) < 1e-3
+    with pytest.raises(ValueError, match="unit"):
+        EncounterPolicy(form_km=1.0, dissolve_km=2.0, unit="au")
+
+
+def test_a_policy_is_a_sweep_configuration(db_session_factory: Callable[[], Session]) -> None:
+    names = [scenarios.ASTEROID_A, scenarios.ASTEROID_B]
+    paired = ModelConfig("k=1", PropagatorType.KEPLERIAN, DT, bodies=names, encounters=(
+        EncounterSpec(*names, EncounterPolicy(1.0, 2.0, unit="hill")),))
+    results = run_sweep(lambda: scenarios.asteroid_encounter(db_session_factory()),
+                        [ModelConfig("unpaired", PropagatorType.KEPLERIAN, DT, bodies=names), paired],
+                        N_STEPS * DT, timing_batches=1, timing_warmup=0)
+    assert results[1].error.max_km < results[0].error.max_km / 50.0
+    bad = ModelConfig("bad", PropagatorType.KEPLERIAN, DT, bodies=names, encounters=(
+        EncounterSpec(names[0], "Ceres", EncounterPolicy(1.0, 2.0, unit="hill")),))
+    sim = scenarios.asteroid_encounter(db_session_factory())
+    with pytest.raises(KeyError, match="Ceres"):
+        apply_config(sim, bad)
+
+
+def test_the_best_radius_is_one_hill_radius_at_any_mass(db_session_factory: Callable[[], Session]) -> None:
+    """A cheap cut of `benchmarks/encounter_sweep.py` (which fits r* ~ s^0.328 over four mass scales):
+    at 0.01x and 10x the masses, on a long approach (closest approach at day 60 of 120), the lowest
+    error on a coarse grid of Hill multiples falls at the same k, and pairing there is >100x better
+    than not pairing. Laplace scaling would move the best k by 1.6x between these two masses."""
+    names = [scenarios.ASTEROID_A, scenarios.ASTEROID_B]
+    ks = [0.5, 0.7, 1.0, 1.4, 2.0]
+    best = {}
+    for s in (0.01, 10.0):
+        def build(s: float = s) -> Simulation:
+            return scenarios.asteroid_encounter(db_session_factory(), mu_a=scenarios.MU_CERES * s,
+                                                mu_b=scenarios.MU_VESTA * s, t_ca_s=60.0 * DAY)
+        configs = [ModelConfig("unpaired", PropagatorType.KEPLERIAN, 1200.0, bodies=names)] + [
+            ModelConfig(f"{k}", PropagatorType.KEPLERIAN, 1200.0, bodies=names, encounters=(
+                EncounterSpec(*names, EncounterPolicy(k, 2.0 * k, unit="hill")),)) for k in ks]
+        res = run_sweep(build, configs, 120.0 * DAY, timing_batches=1, timing_warmup=0)
+        errs = [r.error.max_km for r in res[1:]]
+        best[s] = ks[int(np.argmin(errs))]
+        assert min(errs) < res[0].error.max_km / 100.0
+    assert best[0.01] == best[10.0] == 1.0

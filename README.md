@@ -860,10 +860,16 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - temporary systems, phase 2: close encounters form and dissolve a pair by event, with
        hysteresis. On a synthetic Ceres/Vesta-mass flyby this is 100x closer to N-body truth than
        leaving the pair apart (270 km vs 2.7e4 km)
-   - **In progress:** temporary systems, phase 3. The formation radius becomes a sweep axis, with the
-     error against N-body truth measured as a function of it. The first prediction (an optimum at the
-     Laplace sphere of influence) was overturned in phase 2: the error is a velocity integrated over the
-     encounter, which puts the optimum at the Hill scale, (m/M)^(1/3). Phase 3 tests that exponent.
+     - temporary systems, phase 3: the formation radius as a sweep axis, in live Hill radii
+       (`docs/figures/encounters.png`). Across 0.01-10x Ceres/Vesta-like masses, the best radius is one
+       Hill radius and scales as s^0.328. That is the Hill exponent (0.333), not the Laplace sphere of
+       influence (0.400) first predicted. Pairing anywhere near it is ~200x closer to N-body truth
+       than not pairing.
+   - **Planned:**
+     - patched-conic reparenting, including a body orbiting a system barycentre as one point mass
+     - regime-based propagator switching, judged on the cost-error frontier
+     - a system's field beyond the monopole as a fidelity ladder for outside bodies: averaged
+       quadrupole, then the periodic (Fourier) quadrupole at harmonics of the inner orbits
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay

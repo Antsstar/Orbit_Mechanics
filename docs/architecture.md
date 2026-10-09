@@ -2300,6 +2300,65 @@ These balance at `r ~ R (m / M)^(1/3)`, the Hill scale, ~3e5 km here, which is b
 starting separation (4.3e5 km at most). Phase 3 sweeps the radius over a longer approach and varies
 the masses to test the 1/3 exponent against the 2/5 one.
 
+### Phase 3: the formation radius as a sweep axis, in Hill radii
+
+Two additions make the radius a configuration:
+- `EncounterPolicy(unit="hill")` reads both radii as multiples `k` of the pair's Hill radius
+  `R (m / 3M)^(1/3)` (`hill_radius_km`). It is evaluated **at every event evaluation**, so the
+  threshold follows the pair's distance from its parent. This is the dynamic sphere of influence a
+  nested hierarchy needs: each bubble's radius is measured against its own parent.
+- `ModelConfig.encounters` holds `EncounterSpec(a, b, policy)`, so `run_sweep` and `run_grid` sweep
+  the radius like any other axis.
+
+`benchmarks/encounter_sweep.py` writes `docs/figures/encounters.png`. Its setup:
+- the long-approach encounter, with closest approach at day 60 of 120, starting 10-100 Hill radii apart;
+- 25 values of `k` from 0.05 to 10, each dissolving at `2k`;
+- the masses scaled by 0.01, 0.1, 1 and 10;
+- truth from DOP853 N-body.
+
+Results:
+
+| Mass scale | Best k | Error at best (km) | Unpaired (km) |
+|---|---:|---:|---:|
+| 0.01 | 1.08 | 5.2 | 3.3e3 |
+| 0.1 | 1.10 | 9.8 | 3.3e4 |
+| 1 | 1.16 | 224 | 3.3e5 |
+| 10 | 1.02 | 8.3e3 | 3.1e6 |
+
+The best radius scales as `s^0.328` (Hill: 0.333; Laplace: 0.400), and the best `k` as `s^-0.005`. With
+each slope held fixed and its amplitude fitted, the RMS log-misfit is 5% for Hill and 19% for
+Laplace. **The best formation radius is one Hill radius, at every mass tested.** Using the Laplace
+radius as the unit instead moves the best `k` between masses, and the reduced test catches that
+mutation.
+
+Two honest qualifications:
+- **The depth of the minimum is partly luck.** The minima are sharp V-shapes. The two neglected
+  terms have opposite signs and cancel near the balance. Where the minimum sits is meaningful (it is
+  where the two contributions are equal in magnitude), but its depth is not robust. The robust
+  improvement is the plateau around it. At 1x, every `k` from 0.57 to 2.1 gives 1.4e3-1.9e3 km
+  against 3.3e5 km unpaired, about 200x.
+- **Large radii have a wall.** At 10x with `k >= 5`, the dissolve radius exceeds the final
+  separation, so the pair is never dissolved. The neglected tide then makes it *worse* than never
+  pairing (3.8e6 km at `k = 10`).
+
+### Two switches, two criteria, and what follows
+
+The Hill radius answers one question: *does a body belong to this bubble, or to the outer primary?*
+That is the tidal balance. Inside a bubble there is a second, different switch: *resolve the members,
+or treat the system as one point mass at its barycentre?* Its error is the system's quadrupole, of
+relative size `(d / r)^2` for an inner separation `d`, so its radius is a multiple of the system's
+size, not of its Hill radius. The arena can already represent a massless body orbiting a
+barycentre as a point mass with the summed `mu`: rewired at runtime with parent and bubble both set
+to the barycentre, a satellite follows that conic to 1e-7 km. The database build, however, rewrites
+a barycentre parent to the head. Phase 4's `reparent` makes the barycentre a supported parent.
+
+Beyond the monopole, the fidelity ladder continues. An inner pair's quadrupole rotates with its
+orbit, so the field outside is periodic at harmonics of the inner mean motion (`2n` for a circular
+pair), and averaging it gives a ring-like secular term. The full ladder is: monopole, averaged
+quadrupole, periodic (Fourier) quadrupole, resolved members. None of this is new physics
+(disturbing-function and Hansen expansions; the doubly averaged quadrupole of hierarchical triples).
+What fits this engine is making each rung a configuration with a measured cost and error.
+
 ---
 
 ## Validation layers
