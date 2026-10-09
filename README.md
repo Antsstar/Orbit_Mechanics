@@ -853,8 +853,8 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        under J2 in LEO, exact for two-body motion
      - compiled twins for every integrator (leapfrog 0.5-0.8x, Yoshida 1.1-1.25x, Encke 1.5-5x the cost
        of compiled RK4 per step), held equivalent to their NumPy references to 1e-12
-   - **Planned:**
-     - Encke on hyperbolic orbits (its Kepler solve does not yet converge just above escape speed)
+     - Encke on hyperbolic orbits: a bracketed, safeguarded Kepler solve that converges on every
+       conic tested (3,240 cases, 1-100 km/s, near-radial to circular)
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay

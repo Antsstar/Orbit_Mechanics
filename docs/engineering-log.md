@@ -1492,6 +1492,33 @@ Found while building `msis_diurnal.py` (the diurnal-bulge density law) and its v
    very entry. Make edits containing backslashes with the Edit tool, and `py_compile` a script before a
    long run.
 
+## Universal Kepler solve above escape speed: three fixes, each exposed by a wider grid
+
+`integrators.kepler_advance` (Encke's reference arc) failed just above escape speed. Each fix passed
+the grid it was tested on and failed the next, wider one:
+
+1. **The stopping test sat below the rounding floor.** At 10.7 km/s, Newton converged and then
+   oscillated at 1.5e-14 relative, just above the 1e-14 tolerance, until it ran out of iterations.
+   The residual is `~sqrt(mu) dt` in size, so its rounding sets a floor on chi. Now 1e-12, which
+   matches `iod`; convergence is quadratic, so the step that passes it lands at round-off anyway.
+2. **The elliptic starting guess is useless on a fast hyperbola.** `sqrt(mu) |alpha| dt` overshoots,
+   and F(chi) is exponential there: from above, Newton descends in constant steps of `sqrt(-a)` (37 km^0.5
+   per iteration at 20 km/s). Vallado's hyperbolic guess (Alg. 8) fixed 728 near-planet cases, but
+   failed going back from far out: its denominator cancels on an inbound hyperbola.
+3. **Guesses are not enough; bracket it.** `chi = int sqrt(mu)/r dt` and `r >= r_p`, so the root lies
+   in `[0, sqrt(mu) dt / r_p]`, and `F' = r > 0` makes it unique. Newton steps that leave the
+   bracket, overflow, or fail to halve the step before last become bisections (Numerical Recipes'
+   `rtsafe`). The last condition matters: without it the constant-step crawl stays inside the bracket
+   and takes up to 172 iterations. Two consequences for the vectorised version: a converged body must
+   be **frozen**, because a later safeguard step can bisect it back across a wide bracket. And a body
+   that finished on a bisection needs one **Newton polish**, or an ulp of difference between NumPy's
+   and libm's `cosh` sends the compiled twin down a different path that shows at 5e-11.
+
+The test grid now checks conservation, not a second solver: energy, angular momentum scaled by
+`|r||v|` (r x v cancels near-radial) and the eccentricity vector, plus the return under -dt.
+`iod.kepler_universal` was deliberately left on plain Newton. It is the independent check elsewhere,
+and its users (Lambert, Gauss) are elliptic.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

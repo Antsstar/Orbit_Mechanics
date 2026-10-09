@@ -2148,9 +2148,9 @@ order. The 1 km step limit (`grid.stability_limit`) moves from 80-160 s to 640-1
 **Compiled twins of the non-RK4 integrators.** `kernels.cowell_leapfrog_step`, `cowell_yoshida4_step`
 and `cowell_encke_step` are fused like `cowell_rk4_step` (same argument layout, same force composition,
 `simulator._COWELL_KERNELS` picks one by integrator name; the plan's conditions are unchanged). The
-Encke kernel carries a scalar universal-variable Kepler solve (Newton to 1e-14) and the same Stumpff
-series; it stops each body at its own convergence where the vectorised reference iterates all bodies
-until the slowest converges, a rounding-level difference. Each is held to its reference at 1e-12
+Encke kernel carries a scalar universal-variable Kepler solve (bracketed, safeguarded Newton to
+1e-12) and the same Stumpff series. Both it and the vectorised reference stop each body at its own
+convergence (the reference freezes a converged body), so they take the same iterates. Each is held to its reference at 1e-12
 (`tests/validation/test_kernel_equivalence_integrators.py`; measured <= 3.1e-13 over 500 steps, bit-identical
 on single-body arenas) and the Encke pieces are also compared at function level, because a flipped sign
 on the Stumpff series' `z^3` term (~5e-14 of C) is invisible in the state. Measured per-body kernel cost

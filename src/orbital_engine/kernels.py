@@ -1500,34 +1500,78 @@ def _kepler_advance_scalar(
 ) -> tuple[float, float, float, float, float, float]:
     """
     `integrators.kepler_advance` for one body: the universal-variable Kepler equation by Newton to
-    1e-14 in the universal anomaly (Curtis Alg. 3.3), f and g with their derivatives. One difference
-    from the vectorised reference, and it is not an error: the reference iterates *every* body until
-    the slowest has converged, so an early-converged body there takes a few extra Newton steps that
-    change it at rounding level only. This stops each body at its own convergence. The `chi**3` of the
-    reference is `chi * chi * chi` here (within an ulp of libm's `pow`). Raises `RuntimeError` after 60
+    1e-12 in the universal anomaly (Curtis Alg. 3.3; bracketed and safeguarded, with Vallado's starting
+    guess on a hyperbola: see the reference), f and g with their derivatives. Both stop each body at its own convergence (the reference freezes a
+    converged body), so they take the same iterates. The `chi**3` of the
+    reference is `chi * chi * chi` here (within an ulp of libm's `pow`). Raises `RuntimeError` after 100
     iterations, as the reference does.
     """
     rn = math.sqrt(r0x * r0x + r0y * r0y + r0z * r0z)
     vr = (r0x * v0x + r0y * v0y + r0z * v0z) / rn
     alpha = 2.0 / rn - (v0x * v0x + v0y * v0y + v0z * v0z) / mu
     sq = math.sqrt(mu)
+    a0 = rn * vr / sq
+    b0 = 1.0 - alpha * rn
+    hx = r0y * v0z - r0z * v0y
+    hy = r0z * v0x - r0x * v0z
+    hz = r0x * v0y - r0y * v0x
+    p = (hx * hx + hy * hy + hz * hz) / mu
+    r_p = p / (1.0 + math.sqrt(max(0.0, 1.0 - p * alpha)))
+    bound = 1.01 * sq * abs(dt) / r_p if r_p > 0.0 else math.inf
+    if dt < 0.0:
+        lo, hi = -bound, 0.0
+    else:
+        lo, hi = 0.0, bound
     if alpha != 0.0:
         chi = sq * abs(alpha) * dt
     else:
         chi = sq * dt / rn
+    if alpha < 0.0 and dt != 0.0:   # Vallado's hyperbolic guess, kept only where the reference keeps it
+        sg = 1.0 if dt > 0.0 else -1.0
+        den = rn * vr + sg * math.sqrt(-mu / alpha) * b0
+        if den != 0.0:
+            arg = -2.0 * mu * alpha * dt / den
+            if arg > 0.0:
+                chi_h = sg * math.sqrt(-1.0 / alpha) * math.log(arg)
+                if math.isfinite(chi_h) and chi_h * dt > 0.0:
+                    chi = chi_h
+    chi = min(max(chi, lo), hi)
+    dx_old = hi - lo
+    dx = dx_old
     converged = False
-    for _ in range(60):
+    bisected = False
+    for _ in range(100):
         z = alpha * chi * chi
         c, s = _stumpff_scalar(z)
-        f_val = rn * vr / sq * chi * chi * c + (1.0 - alpha * rn) * (chi * chi * chi) * s + rn * chi - sq * dt
-        f_der = rn * vr / sq * chi * (1.0 - z * s) + (1.0 - alpha * rn) * chi * chi * c + rn
-        step = f_val / f_der
-        chi = chi - step
-        if abs(step) <= 1e-14 * max(1.0, abs(chi)):
+        f_val = a0 * chi * chi * c + b0 * (chi * chi * chi) * s + rn * chi - sq * dt
+        f_der = a0 * chi * (1.0 - z * s) + b0 * chi * chi * c + rn
+        finite = math.isfinite(f_val)
+        if (f_val < 0.0) if finite else (chi < 0.0):   # overflow: chi is too far out
+            lo = chi
+        if (f_val > 0.0) if finite else (chi > 0.0):
+            hi = chi
+        new = 0.5 * (lo + hi)
+        bisected = True
+        if finite:
+            newton = chi - f_val / f_der
+            if lo < newton < hi and abs(2.0 * f_val) <= abs(dx_old * f_der):
+                new = newton
+                bisected = False
+        step = new - chi
+        chi = new
+        dx_old = dx
+        dx = abs(step)
+        if abs(step) <= 1e-12 * max(1.0, abs(chi)):
             converged = True
             break
     if not converged:
-        raise RuntimeError("kepler_advance: universal Kepler equation did not converge in 60 iterations")
+        raise RuntimeError("kepler_advance: universal Kepler equation did not converge in 100 iterations")
+    if bisected:   # the reference's polish: a bisection stops at the bracket's width, not round-off
+        z = alpha * chi * chi
+        c, s = _stumpff_scalar(z)
+        f_val = a0 * chi * chi * c + b0 * (chi * chi * chi) * s + rn * chi - sq * dt
+        f_der = a0 * chi * (1.0 - z * s) + b0 * chi * chi * c + rn
+        chi = chi - f_val / f_der
     z = alpha * chi * chi
     c, s = _stumpff_scalar(z)
     f = 1.0 - chi * chi / rn * c

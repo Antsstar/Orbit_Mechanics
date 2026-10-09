@@ -24,6 +24,8 @@ so Encke runs the arenas where every body carries `point_mass_gravity`.
 """
 from __future__ import annotations
 
+import math
+
 from typing import Callable
 
 import numpy as np
@@ -210,6 +212,9 @@ def test_scalar_battin_f_matches_the_reference() -> None:
     ("eccentric", [6471.0, 0.0, 0.0], [0.0, 9.5, 3.0], 900.0),
     ("hyperbolic", [8000.0, 0.0, 0.0], [0.0, 9.0, 4.0], 1200.0),
     ("near_parabolic", [7000.0, 0.0, 0.0], [0.0, 10.6, 0.0], 600.0),
+    ("just_above_escape", [7000.0, 0.0, 0.0], [0.0, 10.7, 0.0], 600.0),
+    ("fast_hyperbolic", [7000.0, 0.0, 0.0], [0.0, 20.0, 0.0], 6000.0),
+    ("inbound_hyperbolic", [7000.0, 0.0, 0.0], [-14.1, 10.0, 0.0], -6000.0),
     ("backward", [6921.0, 0.0, 0.0], [0.0, 5.5, 5.5], -60.0),
 ])
 def test_scalar_kepler_advance_matches_the_reference(
@@ -223,6 +228,36 @@ def test_scalar_kepler_advance_matches_the_reference(
     ref = np.concatenate([r_ref[0], v_ref[0]])
     scale = np.maximum(np.abs(ref), 1e-3)
     assert float(np.max(np.abs(got - ref) / scale)) < 1e-12, label
+
+
+def test_scalar_kepler_advance_matches_the_reference_on_every_conic() -> None:
+    """
+    The safeguarded solve branches (Newton, bisection, overflow side), so the twin is held to the
+    reference over the grid of `test_encke.test_kepler_advance_converges_on_every_conic`: to 1e-12
+    where the problem is well conditioned (periapsis above the surface, |dt| <= 6e4 s), and to 1e-10
+    elsewhere. *Measured* 1.0e-11 there, on a near-parabolic arc over 6e5 s and on passes tens of
+    km from the point mass, where an ulp of difference in cosh is amplified.
+    """
+    mu = 398600.4418
+    worst_clear = worst_all = 0.0
+    for radius in (7000.0, 1.0e6):
+        for speed in (1.0, 7.5, 10.6717, 10.7, 15.0, 20.0, 50.0, 100.0):
+            for fpa in np.radians([-89.0, -45.0, 0.0, 10.0, 80.0]):
+                r0 = [radius, 0.0, 0.0]
+                v0 = [speed * math.sin(fpa), speed * math.cos(fpa), 0.0]
+                p = (radius * v0[1]) ** 2 / mu
+                e = math.sqrt(max(0.0, 1.0 - p * (2.0 / radius - speed * speed / mu)))
+                for dt in (-60000.0, -60.0, 10.0, 600.0, 6000.0, 600000.0):
+                    r_ref, v_ref = integrators.kepler_advance(np.array([r0]), np.array([v0]), dt, np.array([mu]))
+                    ref = np.concatenate([r_ref[0], v_ref[0]])
+                    got = np.array(kernels._kepler_advance_scalar(*r0, *v0, dt, mu))
+                    scale = np.maximum(np.abs(ref), 1e-3 * np.max(np.abs(ref)))
+                    err = float(np.max(np.abs(got - ref) / scale))
+                    worst_all = max(worst_all, err)
+                    if p / (1.0 + e) >= 6378.137 and abs(dt) <= 6.0e4:
+                        worst_clear = max(worst_clear, err)
+    assert worst_clear < 1e-12
+    assert worst_all < 1e-10
 
 
 # --- Wired path: Simulation.step on and off the compiled kernel, with manoeuvre splits ---------------
