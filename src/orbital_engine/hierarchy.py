@@ -42,15 +42,32 @@ unchanged.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 
+from . import events
 from .custom_types import PropagatorType
 
 if TYPE_CHECKING:
     from .simulator import Simulation
+
+
+@dataclass(frozen=True)
+class HierarchyChange:
+    """One entry of `Simulation.hierarchy_changes`: what happened, when, to which bodies.
+
+    `kind` is `"form"`, `"dissolve"` or `"skip"` (an encounter that crossed its formation radius but
+    whose pair was not eligible; `note` says why). `system` is the barycentre slot, `-1` for a skip."""
+
+    t: float
+    kind: str
+    name: str
+    bodies: Tuple[int, int]
+    system: int
+    note: str = ""
 
 
 def _dependants(sim: "Simulation", slots: NDArray[np.int64], allowed: NDArray[np.int64]) -> NDArray[np.int64]:
@@ -69,6 +86,42 @@ def _restructure(sim: "Simulation") -> None:
     sim.resolve_force_models()
 
 
+def _head_first(sim: "Simulation", a: int, b: int) -> Tuple[int, int]:
+    """The heavier body first; a tie goes to the lower slot, as `_resolve_circular` elects."""
+    if sim.mu_array[a] > sim.mu_array[b] or (sim.mu_array[a] == sim.mu_array[b] and a < b):
+        return a, b
+    return b, a
+
+
+def form_refusal(sim: "Simulation", a: int, b: int, name: Optional[str] = None) -> Optional[str]:
+    """Why `form_system(a, b, name=name)` would refuse, or `None` if it would not. A pure read."""
+    a, b = int(a), int(b)
+    if a == b:
+        return "form_system needs two distinct bodies."
+    names = {v: k for k, v in sim.name_to_index.items()}
+    for k in (a, b):
+        if not (0 <= k < sim.max_capacity) or not sim.active_mask[k]:
+            return f"slot {k} is not an active body."
+        if sim.is_system[k] or sim.is_head[k]:
+            return f"{names[k]!r} is a system or a head; only plain siblings can pair."
+        if sim.propagator_type[k] != np.uint8(PropagatorType.KEPLERIAN):
+            return f"{names[k]!r} is not Keplerian; a temporary system's members must be."
+    if sim.body_sys_map[a] != sim.body_sys_map[b] or sim.parent_indices[a] != sim.parent_indices[b]:
+        return f"{names[a]!r} and {names[b]!r} are not siblings of one bubble with one parent."
+    if sim.mu_array[a] + sim.mu_array[b] <= 0.0:
+        return "a system needs mass: both members are massless."
+    pair = np.array([a, b], dtype=np.int64)
+    deps = _dependants(sim, pair, pair)
+    if deps.size:
+        return f"{[names[int(k)] for k in deps]} depend on a member; not supported yet."
+    if not sim.free_indices:
+        return f"the arena is full (capacity {sim.max_capacity})."
+    head, sib = _head_first(sim, a, b)
+    if (name if name is not None else f"{names[head]}+{names[sib]}") in sim.name_to_index:
+        return f"a body named {name if name is not None else names[head] + '+' + names[sib]!r} already exists."
+    return None
+
+
 def form_system(sim: "Simulation", a: int, b: int, *, name: Optional[str] = None) -> int:
     """
     Make `a` and `b` a two-body system inside their shared bubble and return its barycentre's slot.
@@ -76,35 +129,16 @@ def form_system(sim: "Simulation", a: int, b: int, *, name: Optional[str] = None
     The heavier member becomes the head (ties go to the lower slot, as `_resolve_circular` elects);
     the other orbits it. The barycentre takes the pair's place in the outer bubble, on the orbit
     about the shared parent that the pair's centre of mass is actually on. `name` defaults to
-    `"<a>+<b>"`, heavier first.
+    `"<a>+<b>"`, heavier first. Raises `ValueError` with `form_refusal`'s reason, before changing
+    anything, if the pair is not eligible.
     """
     a, b = int(a), int(b)
-    if a == b:
-        raise ValueError("form_system needs two distinct bodies.")
+    refusal = form_refusal(sim, a, b, name)
+    if refusal is not None:
+        raise ValueError(refusal)
     names = {v: k for k, v in sim.name_to_index.items()}
-    pair = np.array([a, b], dtype=np.int64)
-    for k in (a, b):
-        if not (0 <= k < sim.max_capacity) or not sim.active_mask[k]:
-            raise ValueError(f"slot {k} is not an active body.")
-        if sim.is_system[k] or sim.is_head[k]:
-            raise ValueError(f"{names[k]!r} is a system or a head; only plain siblings can pair.")
-        if sim.propagator_type[k] != np.uint8(PropagatorType.KEPLERIAN):
-            raise ValueError(f"{names[k]!r} is not Keplerian; a temporary system's members must be.")
-    if sim.body_sys_map[a] != sim.body_sys_map[b] or sim.parent_indices[a] != sim.parent_indices[b]:
-        raise ValueError(f"{names[a]!r} and {names[b]!r} are not siblings of one bubble with one parent.")
-    if sim.mu_array[a] + sim.mu_array[b] <= 0.0:
-        raise ValueError("a system needs mass: both members are massless.")
-    deps = _dependants(sim, pair, pair)
-    if deps.size:
-        raise ValueError(f"{[names[int(k)] for k in deps]} depend on a member; not supported yet.")
-    if not sim.free_indices:
-        raise ValueError(f"the arena is full (capacity {sim.max_capacity}).")
-
-    head, sib = (a, b) if (sim.mu_array[a] > sim.mu_array[b] or
-                           (sim.mu_array[a] == sim.mu_array[b] and a < b)) else (b, a)
+    head, sib = _head_first(sim, a, b)
     name = name if name is not None else f"{names[head]}+{names[sib]}"
-    if name in sim.name_to_index:
-        raise ValueError(f"a body named {name!r} already exists.")
 
     outer, parent = int(sim.body_sys_map[a]), int(sim.parent_indices[a])
     s = sim.free_indices.pop()
@@ -127,6 +161,7 @@ def form_system(sim: "Simulation", a: int, b: int, *, name: Optional[str] = None
 
     _restructure(sim)
     sim._rehydrate_coes(rows=np.array([s, head, sib], dtype=np.int64))
+    sim._hierarchy_log.append(HierarchyChange(float(sim.t), "form", name, (head, sib), s))
     return s
 
 
@@ -166,6 +201,7 @@ def dissolve_system(sim: "Simulation", system: int) -> Tuple[int, int]:
     _release_slot(sim, s)
     _restructure(sim)
     sim._rehydrate_coes(rows=np.array([head, sib], dtype=np.int64))
+    sim._hierarchy_log.append(HierarchyChange(float(sim.t), "dissolve", names[s], (head, sib), s))
     return head, sib
 
 
@@ -188,3 +224,108 @@ def _release_slot(sim: "Simulation", s: int) -> None:
     sim._secular_j2_rates[s] = 0.0
     sim.accel_accum[s] = 0.0
     sim.free_indices.append(s)
+
+
+# --- Encounters: forming and dissolving a pair by event ----------------------------------------------
+
+@dataclass(frozen=True)
+class EncounterPolicy:
+    """
+    When a pair is formed and dissolved: inside `form_km` of each other it is paired, and it stays
+    paired until the separation exceeds `dissolve_km`. The gap between the two is hysteresis, and it
+    must be positive: with one radius, a pair grazing it would form and dissolve on every crossing,
+    each restructure costing ~1 ms and carrying the switching error. Plain data, so a policy can be a
+    sweep configuration. `tol_s` is the event tolerance the crossings are located to.
+    """
+
+    form_km: float
+    dissolve_km: float
+    tol_s: float = events.DEFAULT_EVENT_TOL_S
+
+    def __post_init__(self) -> None:
+        if not (0.0 < self.form_km < self.dissolve_km):
+            raise ValueError(
+                f"EncounterPolicy needs 0 < form_km < dissolve_km (got {self.form_km}, "
+                f"{self.dissolve_km}): the gap is the hysteresis that stops a grazing pair flickering.")
+        if not self.tol_s > 0.0:
+            raise ValueError(f"EncounterPolicy tol_s={self.tol_s!r} must be positive.")
+
+
+def separation_km(sim: "Simulation", a: int, b: int) -> float:
+    """Distance between two bodies' global positions, km."""
+    return float(np.linalg.norm(sim.global_states[a, :3] - sim.global_states[b, :3]))
+
+
+def paired_system(sim: "Simulation", a: int, b: int) -> Optional[int]:
+    """The system slot if `a` and `b` are exactly the two members of one system, else `None`."""
+    s = int(sim.body_sys_map[a])
+    if s != int(sim.body_sys_map[b]) or s in (a, b) or not sim.is_system[s]:
+        return None
+    members = np.flatnonzero(sim.active_mask & (sim.body_sys_map == s))
+    members = members[members != s]
+    return s if members.size == 2 else None
+
+
+def encounter_events(a: int, b: int, policy: EncounterPolicy) -> Tuple[events.Event, events.Event]:
+    """
+    The two events that run `policy` for the pair `(a, b)`: separation falling through `form_km`
+    forms the pair, separation rising through `dissolve_km` dissolves it.
+
+    Both are detected on `a`'s slot (an event is per body; the partner is part of the function), and
+    both actions read the pairing state from the arena rather than holding it, so the events are
+    plain data and reusable across simulations, like every other `Event`. An inward crossing of
+    `dissolve_km`, or an outward one of `form_km`, fires nothing: that is the hysteresis. A pair that
+    is not eligible when it crosses inward (a member already paired elsewhere, say) is logged as a
+    `"skip"` in `Simulation.hierarchy_changes` and left unpaired, never approximated.
+
+    **The step must be shorter than the encounter.** Events find a sign change between the start and
+    end of a step; a pair that enters and leaves `form_km` within one step crosses twice and fires
+    nothing (`events.py`'s even-crossing blind spot). Keep `dt` below `form_km / v_rel`.
+    """
+    a, b = int(a), int(b)
+    bodies = np.array([a], dtype=np.int64)
+
+    def inside_form(sim: "Simulation", _bodies: NDArray[np.int64]) -> NDArray[np.float64]:
+        return np.array([separation_km(sim, a, b) - policy.form_km], dtype=np.float64)
+
+    def inside_dissolve(sim: "Simulation", _bodies: NDArray[np.int64]) -> NDArray[np.float64]:
+        return np.array([separation_km(sim, a, b) - policy.dissolve_km], dtype=np.float64)
+
+    def form(sim: "Simulation", fired: NDArray[np.int64], t: float) -> None:
+        _form_if_eligible(sim, a, b)
+
+    def dissolve(sim: "Simulation", fired: NDArray[np.int64], t: float) -> None:
+        s = paired_system(sim, a, b)
+        if s is not None:
+            dissolve_system(sim, s)
+
+    return (events.Event(name="encounter: form", function=inside_form, bodies=bodies, direction=-1,
+                         tol_s=policy.tol_s, action=form),
+            events.Event(name="encounter: dissolve", function=inside_dissolve, bodies=bodies, direction=1,
+                         tol_s=policy.tol_s, action=dissolve))
+
+
+def _form_if_eligible(sim: "Simulation", a: int, b: int) -> None:
+    if paired_system(sim, a, b) is not None:
+        return
+    refusal = form_refusal(sim, a, b)
+    if refusal is None:
+        form_system(sim, a, b)
+    else:
+        names = {v: k for k, v in sim.name_to_index.items()}
+        sim._hierarchy_log.append(HierarchyChange(
+            float(sim.t), "skip", f"{names[a]}+{names[b]}", (a, b), -1, refusal))
+
+
+def watch_encounter(sim: "Simulation", a: int, b: int, policy: EncounterPolicy) -> Tuple[events.Event, events.Event]:
+    """
+    Register `encounter_events(a, b, policy)` on `sim`, and form the pair now if it is already inside
+    `form_km` (an event only sees a crossing, so a pair that starts inside would otherwise never
+    form). Between the two radii it starts unpaired. Returns the two events.
+    """
+    form_event, dissolve_event = encounter_events(a, b, policy)
+    sim.add_event(form_event)
+    sim.add_event(dissolve_event)
+    if separation_km(sim, a, b) < policy.form_km:
+        _form_if_eligible(sim, a, b)
+    return form_event, dissolve_event

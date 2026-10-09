@@ -233,6 +233,9 @@ class Simulation:
         # This is the answer to "when were the eclipses?", which is the question a comparison sweep
         # actually asks of an event, so it is kept rather than derived again downstream.
         self._event_epochs: List[float] = []
+        # Every runtime restructure (`hierarchy.py`): forms, dissolves, and encounters skipped
+        # because their pair was not eligible. Read through `hierarchy_changes`.
+        self._hierarchy_log: List[hierarchy.HierarchyChange] = []
         # Snapshot of everything `_advance` mutates, so a trial propagation can be undone exactly.
         # `accel_accum`, `_kick`, `_accum`, `_cowell_rel` and `_secular_j2_rel` are deliberately
         # absent: every one of them is fully rewritten at its dispatch rows before being read
@@ -1730,6 +1733,16 @@ class Simulation:
         """Return a two-member system's members to the outer bubble and free its slot; returns
         `(head, sibling)`. The inverse of `form_system`. See `hierarchy.py`."""
         return hierarchy.dissolve_system(self, system)
+
+    def watch_encounter(self, a: int, b: int, policy: hierarchy.EncounterPolicy) -> Tuple[events.Event, events.Event]:
+        """Form `a` and `b` into a pair when they come within `policy.form_km` and dissolve it beyond
+        `policy.dissolve_km`, at the located crossing epochs. See `hierarchy.encounter_events`."""
+        return hierarchy.watch_encounter(self, a, b, policy)
+
+    @property
+    def hierarchy_changes(self) -> tuple[hierarchy.HierarchyChange, ...]:
+        """Every form, dissolve and skipped encounter so far, in order (`hierarchy.HierarchyChange`)."""
+        return tuple(self._hierarchy_log)
 
     def apply_delta_v(
         self,

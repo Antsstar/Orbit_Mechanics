@@ -22,6 +22,8 @@ import numpy as np
 
 from sqlalchemy.orm import Session
 
+from . import frames as fr
+from . import iod
 from . import sgp4_bridge  # no sgp4 import at module level; the extra is only needed to call it
 from .custom_types import PropagatorType
 from .database import CelestialBodyORM, SystemORM, VesselORM, VirtualBodyORM
@@ -42,6 +44,7 @@ __all__ = [
     "geostationary_satellites", "geostationary_radius_km", "geo_satellite_name",
     "sun_synchronous_satellites", "sun_synchronous_inclination_deg", "sso_satellite_name",
     "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME", "artemis3_rendezvous", "LANDER_NAME",
+    "asteroid_encounter", "ASTEROID_A", "ASTEROID_B", "MU_CERES", "MU_VESTA", "AU_KM",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -1290,3 +1293,75 @@ def artemis3_rendezvous(
     session.commit()
     return Simulation(body_names=["Earth", ORION_NAME, LANDER_NAME], system_names=["Earth System"],
                       session=session, max_capacity=8)
+
+
+ASTEROID_A = "Asteroid A"
+ASTEROID_B = "Asteroid B"
+#: Ceres- and Vesta-like gravitational parameters, km^3/s^2. Dawn-era values quoted from memory
+#: (Park et al. 2016: 62.6284; Konopliv et al. 2014: 17.2883), unverified. They only set the scale of
+#: a synthetic encounter; nothing here claims to be Ceres or Vesta.
+MU_CERES = 62.6284
+MU_VESTA = 17.2883
+AU_KM = 149597870.7
+
+
+def asteroid_encounter(
+    session: Session,
+    *,
+    mu_a: float = MU_CERES,
+    mu_b: float = MU_VESTA,
+    orbit_radius_km: float = 2.77 * AU_KM,
+    miss_km: float = 2000.0,
+    v_rel_km_s: float = 1.0,
+    t_ca_s: float = 5.0 * 86400.0,
+    capacity: int = 16,
+) -> Simulation:
+    """
+    Two massive asteroids that pass close to each other `t_ca_s` after the start: a **synthetic**
+    encounter for temporary systems (`hierarchy.py`).
+
+    The geometry is set at closest approach, ignoring the asteroids' mutual attraction. `ASTEROID_A`
+    is on a circular heliocentric orbit of radius `orbit_radius_km` (default 2.77 AU, Ceres' distance)
+    at `(R, 0, 0)`. `ASTEROID_B` is `miss_km` further out radially, with A's orbital velocity plus
+    `v_rel_km_s` out of plane, so the relative velocity is perpendicular to the miss vector. Both
+    states are carried back `t_ca_s` along their own heliocentric conics, then converted to elements
+    for the database. The real encounter is closer than `miss_km`, because the mutual attraction
+    focuses it: for the defaults, periapsis of the relative hyperbola is ~1,920 km (e ~ 25).
+
+    Both asteroids are siblings in the Solar System bubble, which the Sun heads, so they start
+    unpaired. Pair them with `sim.watch_encounter(...)` or `sim.form_system(...)`.
+    """
+    mu_pair_sun = (MU_SUN + mu_a, MU_SUN + mu_b)
+    vc = math.sqrt(mu_pair_sun[0] / orbit_radius_km)
+    states = (
+        (np.array([orbit_radius_km, 0.0, 0.0]), np.array([0.0, vc, 0.0])),
+        (np.array([orbit_radius_km + miss_km, 0.0, 0.0]), np.array([0.0, vc, v_rel_km_s])),
+    )
+    coes = []
+    for (r, v), mu in zip(states, mu_pair_sun):
+        r0, v0 = iod.kepler_universal(r, v, -t_ca_s, mu)
+        coe, ok = fr.ReferenceFrames.rv_to_coe(r0[None, :], v0[None, :], np.array([mu]))
+        if not bool(ok[0]):
+            raise ValueError("asteroid_encounter: degenerate initial orbit.")
+        coes.append(coe[0])
+
+    ssb = VirtualBodyORM(name="SSB")
+    session.add(ssb)
+    session.flush()
+    solar = SystemORM(name="Solar System", barycenter_id=ssb.id)
+    session.add(solar)
+    session.flush()
+    sun = CelestialBodyORM(name="Sun", mu=MU_SUN, system_id=solar.id, radius=696340.0,
+                           p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0)
+    session.add(sun)
+    session.flush()
+    solar.head_body_id = sun.id
+    for name, mu, coe in ((ASTEROID_A, mu_a, coes[0]), (ASTEROID_B, mu_b, coes[1])):
+        session.add(CelestialBodyORM(
+            name=name, mu=mu, system_id=solar.id, parent_id=sun.id, radius=0.0,
+            p=float(coe[0]), e=float(coe[1]), i=float(coe[2]), raan=float(coe[3]),
+            arg_pe=float(coe[4]), theta=float(coe[5]),
+        ))
+    session.commit()
+    return Simulation(body_names=["Sun", ASTEROID_A, ASTEROID_B], system_names=["Solar System"],
+                      session=session, max_capacity=capacity)

@@ -2253,6 +2253,53 @@ Three or more siblings in one bubble is the reflex model's unmeasured approximat
 attract each other directly), so it is never created implicitly. A restructure is not time-reversible
 once a policy with hysteresis drives it.
 
+### Phase 2: encounters form and dissolve a pair by event
+
+`EncounterPolicy(form_km, dissolve_km)` is plain data. `encounter_events(a, b, policy)` turns it into
+two `events.Event`s:
+- the separation falling through `form_km` forms the pair;
+- the separation rising through `dissolve_km` dissolves it.
+
+The crossings are located by the existing event machinery, so a switch lands on its radius, not at
+the next step boundary. `Simulation.watch_encounter` registers both events, and forms the pair at once
+if it starts inside `form_km`.
+
+Three design points:
+- **Hysteresis is required.** `form_km < dissolve_km` is enforced. With a single radius, a grazing
+  pair would restructure on every crossing.
+- **The actions are stateless.** They read whether the pair is formed from the arena (`paired_system`)
+  rather than holding it. The events therefore stay plain, reusable data, like every other `Event`.
+- **An ineligible pair is skipped, not approximated.** If a member is already paired elsewhere, or the
+  arena is full, the action records a `"skip"` with the reason. `form_refusal` is the same check
+  `form_system` raises on. Every form, dissolve and skip is in `Simulation.hierarchy_changes`.
+
+One limit is inherited from `events.py`: a pair that enters and leaves `form_km` within one step crosses
+twice and fires nothing. Keep `dt` below `form_km / v_rel`.
+
+The scenario is `scenarios.asteroid_encounter`, a synthetic close approach of Ceres- and Vesta-like
+masses at 2.77 AU: 2,000 km nominal miss at 1 km/s, closest approach at day 5. Against DOP853 N-body
+truth over 10 days (`tests/validation/test_encounters.py`):
+
+- **Unpaired.** The deflection the asteroids give each other is missing. The impulse approximation
+  `2 mu / (b v)` = 0.080 km/s, shared by mass, predicts 2.7e4 km for the lighter body and 7.4e3 km for
+  the heavier. *Measured:* 2.71e4 and 7.47e3 km.
+- **Paired between 1e5 and 2e5 km.** 270 km and 74 km, 100x better.
+- **The switches land on the radii.** An unpaired twin advanced to each switch epoch sits at the radius
+  to better than 1e-3 km.
+
+**A prediction this overturned.** The phase 1 plan expected the error, as a function of `form_km`, to
+be U-shaped with its minimum near the Laplace sphere of influence `R (m/M)^(2/5)` (7.7e4 km here).
+Instead it falls monotonically across 5e3-2e5 km (3.4e3, 1.8e3, 1.0e3, 495, 270, 118 km for B), and is
+smallest, 80 km, with the pair formed from the start. The Laplace radius balances *accelerations*;
+what the error accumulates is *velocity*, integrated over the encounter:
+- outside the radius, the neglected mutual pull gives `dv ~ mu / (r v)`;
+- inside it, the neglected solar tide gives `dv ~ mu_sun r^2 / (R^3 v)` (tidal acceleration
+  `mu_sun r / R^3` over a crossing time `r / v`).
+
+These balance at `r ~ R (m / M)^(1/3)`, the Hill scale, ~3e5 km here, which is beyond this scenario's
+starting separation (4.3e5 km at most). Phase 3 sweeps the radius over a longer approach and varies
+the masses to test the 1/3 exponent against the 2/5 one.
+
 ---
 
 ## Validation layers
