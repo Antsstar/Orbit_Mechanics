@@ -16,9 +16,10 @@ Units follow the engine convention throughout: km, km/s, radians, seconds, mu in
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
 
 from sqlalchemy.orm import Session
 
@@ -46,6 +47,7 @@ __all__ = [
     "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME", "artemis3_rendezvous", "LANDER_NAME",
     "asteroid_encounter", "ASTEROID_A", "ASTEROID_B", "MU_CERES", "MU_VESTA", "AU_KM",
     "planet_flyby", "FLYBY_CRAFT", "FLYBY_PLANET", "binary_probe", "BINARY_PROBE",
+    "walker_elements", "walker_constellation", "walker_satellite_name",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -264,6 +266,90 @@ def earth_constellation(
         session=session,
         max_capacity=capacity if capacity is not None else len(names) + 8,
     )
+
+
+def walker_elements(
+    total: int, planes: int, phasing: int, pattern: str = "delta",
+) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.int64]]:
+    """
+    `(raan, u, plane)` for each satellite of a Walker constellation `i: T/P/F`, radians, ordered plane
+    by plane: `T = total` satellites in `P = planes` circular planes of equal inclination, `S = T/P`
+    per plane, phasing `F` in `0 .. P-1`.
+
+    Walker (1984, "Satellite constellations", *J. British Interplanetary Society* 37, 559-571; notation
+    from memory): plane `p` has right ascension `2 pi p / P` for a **delta** pattern (planes spread
+    over the full circle) or `pi p / P` for a **star** (polar) pattern (planes spread over a half
+    circle, so ascending and descending passes interleave). Satellite `k` of plane `p` is at argument of
+    latitude `u = 2 pi k / S + 2 pi F p / T`: neighbours in a plane are `2 pi / S` apart, and each plane
+    is phased `2 pi F / T` ahead of the one before. `F = 0` puts adjacent planes in phase. The pattern is
+    a group orbit: every satellite sees the same set of distances to all the others, at every time,
+    under two-body motion. `tests/validation/test_walker.py` checks that rather than any quoted value.
+    """
+    if total < 1 or planes < 1 or total % planes != 0:
+        raise ValueError(f"Walker T/P needs T a positive multiple of P, got T={total}, P={planes}.")
+    if not 0 <= phasing < planes:
+        raise ValueError(f"Walker phasing F must be in 0..P-1, got F={phasing} with P={planes}.")
+    if pattern not in ("delta", "star"):
+        raise ValueError(f"Walker pattern {pattern!r}: use 'delta' or 'star'.")
+    per_plane = total // planes
+    plane: NDArray[np.int64] = np.repeat(np.arange(planes, dtype=np.int64), per_plane)
+    k = np.tile(np.arange(per_plane, dtype=np.float64), planes)
+    spread = 2.0 * math.pi if pattern == "delta" else math.pi
+    raan: NDArray[np.float64] = np.asarray(spread * plane / planes, dtype=np.float64)
+    u: NDArray[np.float64] = np.asarray(
+        np.mod(2.0 * math.pi * k / per_plane + 2.0 * math.pi * phasing * plane / total, 2.0 * math.pi),
+        dtype=np.float64)
+    return raan, u, plane
+
+
+def walker_satellite_name(plane: int, slot: int) -> str:
+    return f"SAT-{plane:02d}-{slot:03d}"
+
+
+def walker_constellation(
+    session: Session,
+    *,
+    total: int,
+    planes: int,
+    phasing: int,
+    inclination_deg: float,
+    altitude_km: float,
+    pattern: str = "delta",
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    A Walker `inclination: total/planes/phasing` constellation of massless vessels about Earth,
+    circular at `altitude_km` (from `EARTH_RADIUS`): `walker_elements` laid out in the database. Named
+    `walker_satellite_name(plane, slot)`, the same names `earth_constellation` uses, which with
+    `phasing=0` and `pattern="delta"` it reproduces exactly. Unlike that builder, it refuses a total that
+    is not a multiple of the plane count: a Walker pattern has equal planes by definition.
+    """
+    raan, u, plane = walker_elements(total, planes, phasing, pattern)
+    bary = VirtualBodyORM(name="Earth Barycenter")
+    session.add(bary)
+    session.flush()
+    system = SystemORM(name="Earth System", barycenter_id=bary.id)
+    session.add(system)
+    session.flush()
+    earth = CelestialBodyORM(name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+                             p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0)
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+    radius = EARTH_RADIUS + altitude_km
+    per_plane = total // planes
+    names: List[str] = ["Earth"]
+    for j in range(total):
+        name = walker_satellite_name(int(plane[j]), j % per_plane)
+        session.add(VesselORM(
+            name=name, mu=0.0, system_id=system.id, parent_id=earth.id,
+            dry_mass=260.0, fuel_mass=0.0, drag_area=4.0,
+            p=radius, e=0.0, i=math.radians(inclination_deg),   # circular: p == a == r; u is theta
+            raan=float(raan[j]), arg_pe=0.0, theta=float(u[j])))
+        names.append(name)
+    session.commit()
+    return Simulation(body_names=names, system_names=["Earth System"], session=session,
+                      max_capacity=capacity if capacity is not None else len(names) + 8)
 
 
 # --------------------------------------------------------------------------------------------------
