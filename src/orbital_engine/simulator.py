@@ -41,6 +41,13 @@ from . import hierarchy  # temporary systems: form_system / dissolve_system, use
 # can opt in with logging.getLogger("orbital_engine").setLevel(logging.DEBUG).
 logger = logging.getLogger(__name__)
 
+#: Convergence order of each Cowell integrator, for the adaptive path's Richardson error estimate.
+_INTEGRATOR_ORDER: Dict[str, int] = {"rk4": 4, "leapfrog": 2, "yoshida4": 4, "encke": 4}
+
+#: Ceiling on adaptive Cowell sub-steps per arena step; exceeding it raises rather than silently
+#: accepting an error above the tolerance.
+MAX_COWELL_SUBSTEPS = 4096
+
 #: The fused compiled Cowell step of each integrator name (`integrators.INTEGRATOR_NAMES`); every one
 #: has `kernels.cowell_rk4_step`'s argument layout and return contract.
 _COWELL_KERNELS: Dict[str, Callable[..., int]] = {
@@ -156,6 +163,12 @@ class Simulation:
         # Its name, which is what `set_cowell_integrator` and a sweep config select by. Each name has
         # a fused compiled twin (`_COWELL_KERNELS`); `_refresh_cowell_plan` decides whether it applies.
         self._cowell_integrator_name: str = "rk4"
+        # Adaptive Cowell sub-stepping (`set_cowell_tolerance`): off by default. The suggested sub-step
+        # length is state carried between steps, so it is in the event snapshot.
+        self.cowell_tolerance_km: Optional[float] = None
+        self._cowell_h_suggest: float = float("inf")
+        self._cowell_substep_count: int = 0
+        self._event_snap_h_suggest: float = float("inf")
 
         # Secular-J2 propagator scratch (see propagators.SecularJ2Propagator). `_secular_j2_idx` is
         # the cached active-slot list, same convention as `_cowell_idx` above. `_secular_j2_rates`
@@ -1222,23 +1235,10 @@ class Simulation:
                     raise ValueError(
                         "the Encke integrator needs point_mass_gravity on every Cowell body: it "
                         "subtracts the central term from the total acceleration to get the perturbation.")
-            done = False
-            if self.use_compiled_kernel and self._cowell_fused_ok:
-                done = self._cowell_compiled_step(dt) < 0
-                if not done:
-                    self._refresh_cowell_plan()
-                    done = self._cowell_fused_ok and self._cowell_compiled_step(dt) < 0
-            if not done:
-                parent_state_at_start = self.global_states[self._cowell_primaries].copy()
-                cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
-                cowell_propagator.propagate(
-                    dt=dt, integrator=self._cowell_integrator, provider=self.accelerations,
-                    t=self.t, state=self.global_states, indices=cowell_idx,
-                    primaries=self._cowell_primaries,
-                )
-                # The integrator's result is (parent_state_at_start + relative_state); subtracting
-                # the start-of-step parent reference recovers the pure relative state.
-                self._cowell_rel[cowell_idx] = self.global_states[cowell_idx] - parent_state_at_start
+            if self.cowell_tolerance_km is None:
+                self._cowell_step(dt, float(self.t))
+            else:
+                self._cowell_adaptive(dt)
 
         if self._secular_j2_idx.size > 0:
             if self.use_compiled_kernel:
@@ -1554,6 +1554,7 @@ class Simulation:
         np.copyto(self._event_snap_local, self.local_states)
         np.copyto(self._event_snap_coe, self.coe_states)
         self._event_snap_t = float(self.t)
+        self._event_snap_h_suggest = self._cowell_h_suggest
         n = self._thrust_idx.size
         if n > 0:
             np.take(self._thrust_params, self._thrust_idx, axis=0, out=self._event_snap_thrust[:n])
@@ -1564,6 +1565,7 @@ class Simulation:
         np.copyto(self.local_states, self._event_snap_local)
         np.copyto(self.coe_states, self._event_snap_coe)
         self.t = self._event_snap_t
+        self._cowell_h_suggest = self._event_snap_h_suggest
         n = self._thrust_idx.size
         if n > 0:
             self._thrust_params[self._thrust_idx] = self._event_snap_thrust[:n]
@@ -1904,7 +1906,108 @@ class Simulation:
             )
         return dv
 
-    def _cowell_compiled_step(self, dt: ScalarSeconds) -> int:
+    def _cowell_step(self, dt: ScalarSeconds, t0: float) -> None:
+        """
+        One integrator step of length `dt` for the whole Cowell set, starting at time `t0`, on the fused
+        kernel when the plan allows and on the NumPy reference otherwise. Leaves
+        `global_states[cowell_idx]` at the parent's *start-of-step* position plus the new relative state,
+        and that relative state in `_cowell_rel`. Called once per `_advance` with `t0 = self.t` (the
+        fixed-step path, unchanged), or several times in a row by `_cowell_adaptive`: the parents are
+        not moved until `calc_global`, so every sub-step integrates against the same frozen parent.
+        """
+        cowell_idx = self._cowell_idx
+        done = False
+        if self.use_compiled_kernel and self._cowell_fused_ok:
+            done = self._cowell_compiled_step(dt, t0) < 0
+            if not done:
+                self._refresh_cowell_plan()
+                done = self._cowell_fused_ok and self._cowell_compiled_step(dt, t0) < 0
+        if not done:
+            parent_state_at_start = self.global_states[self._cowell_primaries].copy()
+            cowell_propagator = get_propagators()[int(PropagatorType.COWELL)]
+            cowell_propagator.propagate(
+                dt=dt, integrator=self._cowell_integrator, provider=self.accelerations,
+                t=t0, state=self.global_states, indices=cowell_idx,
+                primaries=self._cowell_primaries,
+            )
+            # The integrator's result is (parent_state_at_start + relative_state); subtracting
+            # the start-of-step parent reference recovers the pure relative state.
+            self._cowell_rel[cowell_idx] = self.global_states[cowell_idx] - parent_state_at_start
+
+    def _cowell_substeps(self, dt: ScalarSeconds, n: int) -> None:
+        """`n` equal `_cowell_step`s across `dt`, at their exact start times."""
+        h = float(dt) / n
+        t0 = float(self.t)
+        for k in range(n):
+            self._cowell_step(h, t0 + k * h)
+
+    def _cowell_adaptive(self, dt: ScalarSeconds) -> None:
+        """
+        The Cowell set across `dt` in as many equal sub-steps as `cowell_tolerance_km` needs, chosen by
+        **step doubling**: `n` sub-steps against `2n` from the same start, the local error of the
+        finer estimated as `|r_2n - r_n| / (2^p - 1)` with `p` the integrator's order (Richardson;
+        Hairer, Norsett & Wanner, *Solving ODEs I*, sec. II.4). Refined by doubling until under
+        tolerance; the finer result is kept. The next step starts from the sub-step length the error
+        suggests, `h (tol / err)^(1/(p+1))` with a 0.9 safety factor, clamped to [0.5, 4]x, and that
+        suggestion is part of the event snapshot so a trial propagation cannot steer the real one.
+
+        The tolerance is on position, km, per arena step, taken as the maximum over the Cowell set: one
+        hard body sets the sub-step for all of them. A Cowell body parented by another Cowell body is
+        refused, because its parent would move between sub-steps and the frozen-parent frame would no
+        longer hold.
+        """
+        idx = self._cowell_idx
+        if bool(np.isin(self._cowell_primaries, idx).any()):
+            raise ValueError("adaptive Cowell stepping needs every Cowell body's parent to be "
+                             "non-Cowell: a Cowell parent would move between sub-steps.")
+        tol = float(self.cowell_tolerance_km)  # type: ignore[arg-type]
+        order = _INTEGRATOR_ORDER[self._cowell_integrator_name]
+        start = self.global_states[idx].copy()
+        n = max(1, int(np.ceil(float(dt) / self._cowell_h_suggest - 1e-9)))
+        self._cowell_substeps(dt, n)
+        coarse = self._cowell_rel[idx, :3].copy()
+        while True:
+            self.global_states[idx] = start
+            self._cowell_substeps(dt, 2 * n)
+            fine = self._cowell_rel[idx, :3]
+            err = float(np.max(np.linalg.norm(fine - coarse, axis=1))) / (2.0 ** order - 1.0)
+            self._cowell_substep_count += 3 * n
+            if err <= tol:
+                break
+            if 2 * n >= MAX_COWELL_SUBSTEPS:
+                raise ValueError(
+                    f"adaptive Cowell stepping: {2 * n} sub-steps of a {float(dt)} s step still leave a "
+                    f"local error of {err:.3e} km above cowell_tolerance_km={tol}. Loosen the tolerance "
+                    f"or shorten the step.")
+            coarse = fine.copy()
+            n *= 2
+        h = float(dt) / (2 * n)
+        factor = 4.0 if err == 0.0 else min(4.0, max(0.5, 0.9 * (tol / err) ** (1.0 / (order + 1))))
+        # Only the error may shrink the suggestion. A step shorter than the suggestion - an event's
+        # micro-step across a crossing bracket is ~1e-9 s - says nothing about the sub-step the
+        # dynamics need, and letting it set the next suggestion would ask the next full step for
+        # ~1e12 sub-steps.
+        suggested = h * factor
+        self._cowell_h_suggest = suggested if factor < 1.0 else max(suggested, self._cowell_h_suggest)
+
+    def set_cowell_tolerance(self, tolerance_km: Optional[float]) -> None:
+        """
+        Adaptive sub-stepping for the Cowell set (`_cowell_adaptive`): `tolerance_km`, the local position
+        error allowed per arena step, or `None` for the fixed step (the default; bit-identical to
+        an engine without this option). The arena step `dt` stays the clock every other body and every
+        event uses; only the Cowell integration is subdivided inside it, where the error needs it.
+        """
+        if tolerance_km is not None and not tolerance_km > 0.0:
+            raise ValueError(f"cowell tolerance {tolerance_km!r} must be positive, or None for fixed steps.")
+        self.cowell_tolerance_km = None if tolerance_km is None else float(tolerance_km)
+
+    @property
+    def cowell_substeps_taken(self) -> int:
+        """Cowell integrator steps taken by the adaptive path so far, including rejected attempts and the
+        coarse half of every doubling: the cost the tolerance bought."""
+        return self._cowell_substep_count
+
+    def _cowell_compiled_step(self, dt: ScalarSeconds, t0: Optional[float] = None) -> int:
         """
         One call of the fused compiled step of the current Cowell integrator (`_COWELL_KERNELS`:
         `kernels.cowell_rk4_step` and its leapfrog / Yoshida / Encke siblings) on the current plan; its
@@ -1916,7 +2019,7 @@ class Simulation:
         """
         tables = self._cowell_drag_tables
         return int(_COWELL_KERNELS[self._cowell_integrator_name](
-            float(dt), float(self.t), self.global_states, self.mu_array, self.parent_indices,
+            float(dt), float(self.t if t0 is None else t0), self.global_states, self.mu_array, self.parent_indices,
             self._cowell_idx,
             self._cowell_flags, self._cowell_j2_params, self._cowell_zonal_params,
             self._cowell_drag_params, self._cowell_drag_table_of,

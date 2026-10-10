@@ -879,8 +879,10 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - a staged third-body perturber, carried to each RK4 stage time: fourth order again, and the probe
        lands 18.6 m from N-body truth after a 109-degree Earth flyby (814 km frozen). With it, the
        choice of integration centre stops mattering
+     - adaptive Cowell sub-stepping as a sweep axis (`cowell_tolerance_km`): one clock kept, with
+       the Cowell integration subdivided where the error is. On the flyby, a 3,600 s step at 1e-5 km
+       tolerance lands 4.2 m from truth in 5 s, against 18.6 m in ~80 s at a fixed 30 s step
    - **Planned:**
-     - per-regime or adaptive stepping (one clock is what currently limits regime-based load management)
      - a system's field beyond the monopole as a fidelity ladder for outside bodies: averaged
        quadrupole, then the periodic (Fourier) quadrupole at harmonics of the inner orbits
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository

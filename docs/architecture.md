@@ -2463,10 +2463,49 @@ What it first appeared to show, and what it actually shows:
   0.012 s at 600 s), because the two event functions are evaluated every step. Load management has
   an overhead, and here it is larger than the Keplerian physics it manages.
 
-**What a regime cannot do yet.** There is one clock, so a regime cannot change the step: the far side
-runs at the near side's step, and a cheap far regime saves cost per step, not steps. A second
-limitation is that `set_cowell_integrator` is arena-wide, so a regime cannot choose its integrator.
-Per-regime or adaptive stepping is the lever that would let load management save steps.
+**What a regime cannot do.** There is one clock, so a regime cannot change the step, and
+`set_cowell_integrator` is arena-wide, so a regime cannot choose its integrator. The step problem is
+solved below without breaking the single clock.
+
+### Adaptive Cowell sub-stepping: steps where the error is, one clock kept
+
+`Simulation.set_cowell_tolerance(tol_km)` / `ModelConfig.cowell_tolerance_km` (a sweep axis; `None`, the
+default, is the fixed step, bit for bit). The arena step stays the clock that every other body and
+every event uses. Only the Cowell set's integration is subdivided inside it, into as many equal
+sub-steps as a **step-doubling** error estimate needs:
+- integrate `n` sub-steps and `2n` from the same start;
+- take the local error of the finer as `|r_2n - r_n| / (2^p - 1)` (Richardson);
+- refine by doubling until it is under tolerance, and keep the finer result.
+
+The next step starts from the sub-step length the error suggests, which is carried in the event
+snapshot. Sub-steps fit the frozen-parent frame because parents do not move until `calc_global`. A
+Cowell body parented by another Cowell body is refused, because that parent would move between
+sub-steps. Both implementations are subdivided the same way: the fused kernel takes an explicit
+start time, and the compiled and NumPy paths agree to 1e-6 km over an e = 0.9 orbit, with identical
+sub-step counts.
+
+**A bug worth recording.** The first version let every accepted step set the next suggestion. The
+event machinery's micro-step across a crossing bracket (~1e-9 s) then set it to nanoseconds, and the
+next 2,700 s step asked for ~4e11 sub-steps: the run hung at the first regime switch. Now only the
+error may shrink the suggestion. A step shorter than the suggestion says nothing about the dynamics.
+
+**Measured** on the staged regime flyby at a **3,600 s** arena step (`benchmarks/regime_frontier.py`):
+
+| Tolerance (km) | Error at day 20 | Sub-steps | Wall time |
+|---:|---:|---:|---:|
+| 1e-2 | 4.5 km | 1,941 | 2.6 s |
+| 1e-4 | 59 m | 3,156 | 4.1 s |
+| 1e-5 | 4.2 m | 4,200 | 5.2 s |
+| 1e-6 | 1.2 m | 5,979 | 7.8 s |
+
+The fixed-step staged Cowell needs a 30 s step (57,600 steps, ~80 s) for 18.6 m. Adaptive at 1e-5 is
+4x more accurate at 15x less cost. (Errors from `run_sweep`'s truth, atol 1e-12; below ~1 m the
+truth's own tolerance starts to show, and 1e-5 -> 1e-6 gains only 3.6x.) The sub-steps concentrate on the periapsis pass: up to 651 in one
+arena step, median 3.
+
+This is the load management the regime work was after, and the answer was not per-regime steps. The
+fine steps are needed for hours around periapsis, inside a sphere-of-influence region 8 days wide.
+Error control finds those hours itself; a regime boundary could not.
 
 Beyond the monopole, the fidelity ladder continues. An inner pair's quadrupole rotates with its
 orbit, so the field outside is periodic at harmonics of the inner mean motion (`2n` for a circular

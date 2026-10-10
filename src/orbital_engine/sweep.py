@@ -155,6 +155,11 @@ class ModelConfig(object):
     (`regimes.RegimeSwitch`) switch a massless body's whole model - centre, propagator and force
     models - by the same events; a regime switch overrides the config's own propagator and force
     models for that body, which is the point.
+
+    `cowell_tolerance_km` turns on adaptive sub-stepping of the Cowell set inside each step
+    (`Simulation.set_cowell_tolerance`): the local position error allowed per step. `None` (default) is
+    the fixed step. It applies to whatever is Cowell, including bodies a regime makes Cowell, so it is
+    not refused on a Keplerian config.
     """
     name: str
     propagator: PropagatorType
@@ -169,6 +174,7 @@ class ModelConfig(object):
     encounters: Sequence[EncounterSpec] = field(default_factory=tuple)
     patches: Sequence[PatchSpec] = field(default_factory=tuple)
     regimes: Sequence["RegimeSwitch"] = field(default_factory=tuple)
+    cowell_tolerance_km: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -265,6 +271,7 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
                 f"config '{config.name}': compiled=True needs numba; without it the kernels run as "
                 f"interpreted Python, which is neither the compiled nor the reference implementation.")
         sim.use_compiled_kernel = bool(config.compiled)
+    sim.set_cowell_tolerance(config.cowell_tolerance_km)
     if config.integrator is not None:
         if config.propagator != PropagatorType.COWELL:
             raise ValueError(

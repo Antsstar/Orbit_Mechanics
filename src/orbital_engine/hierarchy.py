@@ -449,6 +449,8 @@ def reparent_refusal(sim: "Simulation", body: int, parent: int) -> Optional[str]
         return "a body cannot be its own parent."
     if sim.is_system[body] or sim.is_head[body]:
         return f"{names[body]!r} is a system or a head; only a plain body can be reparented."
+    if sim.mu_array[parent] <= 0.0:
+        return f"{names[parent]!r} is massless; it defines no orbit to be measured against."
     if sim.mu_array[body] != 0.0:
         return (f"{names[body]!r} has mass; reparenting a massive body changes reflex kicks and summed "
                 f"masses, which is form_system's job, not a patched conic's.")

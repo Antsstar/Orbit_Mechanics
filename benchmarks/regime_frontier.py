@@ -22,6 +22,10 @@ Earth Hill radii (the best patched-conic radius, phase 4), at steps from 30 s to
   alone gives the same error to four digits, so it is not plotted separately: once the perturber is
   staged the centre stops mattering here, and the gap between the two frozen Cowells was the freeze.
 
+- `staged + adaptive, 3,600 s step` - the staged configuration at a fixed 3,600 s arena step with
+  adaptive Cowell sub-stepping (`ModelConfig.cowell_tolerance_km`); each point is a tolerance, from
+  10 km to 1e-6 km. Cost-error panel only: its step is not the axis of the other panel.
+
 Error is the probe's position error at day 20; cost is the wall time of the propagation
 (`run_sweep`, one batch). The engine has one clock, so every configuration takes the same steps;
 what a regime saves is cost per step.
@@ -51,6 +55,9 @@ DAY = 86400.0
 T_CA = 10.0 * DAY
 HORIZON = 2.0 * T_CA
 DTS = [1200.0, 600.0, 300.0, 120.0, 60.0, 30.0]
+TOLERANCES = [10.0, 1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+ADAPTIVE_DT = 3600.0
+ADAPTIVE = ("staged + adaptive, 3,600 s step", "#6250d6", "X")
 P, E, S = scenarios.FLYBY_CRAFT, scenarios.FLYBY_PLANET, "Sun"
 POLICY = EncounterPolicy(0.76, 0.80, unit="hill")
 KEP_SUN, KEP_EARTH = Regime(S), Regime(E)
@@ -60,7 +67,7 @@ STAGED_SUN = Regime(S, PT.COWELL, (F("point_mass_gravity"),
                                    F("third_body", {"staged": 1.0}, body_coefficients={"perturber": E})))
 STAGED_EARTH = Regime(E, PT.COWELL, (F("point_mass_gravity"),
                                      F("third_body", {"staged": 1.0}, body_coefficients={"perturber": S})))
-# Categorical slots 1-6 in fixed order (validated; three below 3:1 on the surface, so every series also
+# Categorical slots 1-7 in fixed order (validated; three below 3:1 on the surface, so every series also
 # has its own marker and a direct label).
 SERIES = [
     ("Kepler, never handed over", None, "#2a78d6", "o"),
@@ -93,6 +100,15 @@ def main() -> int:
         for r in run_sweep(lambda: scenarios.planet_flyby(session(), t_ca_s=T_CA), configs(dt), HORIZON,
                            timing_batches=1, timing_warmup=0):
             points[r.config_name].append((dt, r.wall_time_us / 1e6, r.error.max_km))
+    adaptive = run_sweep(
+        lambda: scenarios.planet_flyby(session(), t_ca_s=T_CA),
+        [ModelConfig(f"tol {tol:g}", PT.KEPLERIAN, ADAPTIVE_DT, bodies=[P],
+                     regimes=(RegimeSwitch(P, E, POLICY, STAGED_EARTH, STAGED_SUN),), cowell_tolerance_km=tol)
+         for tol in TOLERANCES],
+        HORIZON, timing_batches=1, timing_warmup=0)
+    print("Adaptive (3,600 s arena step), by tolerance:")
+    for tol, r in zip(TOLERANCES, adaptive):
+        print(f"  tol {tol:8.0e} km  error {r.error.max_km:9.3e} km  wall {r.wall_time_us / 1e6:6.2f} s")
     print("Probe error at day 20 (km) and wall time (s), by step:")
     print("  " + " " * 28 + "".join(f"{dt:>17.0f} s" for dt in DTS))
     for name, *_ in SERIES:
@@ -107,6 +123,11 @@ def main() -> int:
         ax1.annotate(name, (walls[-1], errs[-1]), textcoords="offset points", xytext=(6, -3),
                      fontsize=8, color=INK)
         ax2.loglog(dts, errs, "-", color=colour, lw=2, marker=marker, ms=6, label=name)
+    a_walls = [r.wall_time_us / 1e6 for r in adaptive]
+    a_errs = [r.error.max_km for r in adaptive]
+    ax1.loglog(a_walls, a_errs, "-", color=ADAPTIVE[1], lw=2, marker=ADAPTIVE[2], ms=7, label=ADAPTIVE[0])
+    ax1.annotate("staged + adaptive\n(points: tolerance)", (a_walls[-1], a_errs[-1]), textcoords="offset points",
+                 xytext=(-10, -22), fontsize=8, color=INK, ha="right")
     ax1.set_xlabel("wall time of the 20-day propagation (s)")
     ax1.set_ylabel("probe error at day 20 vs N-body (km)")
     ax1.set_title("Cost against error: each point a step size (30-1,200 s)", fontsize=11, color=INK)
