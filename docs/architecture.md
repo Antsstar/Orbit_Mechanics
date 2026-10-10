@@ -2799,6 +2799,33 @@ roll does not move a boresight. `velocity` now takes its roll from the direction
 
 ---
 
+## The JSON layer (`api/`)
+
+The engine's configurations were already data, but Python data. A UI, an HTTP service and an MCP server
+all need the same translation to JSON, so it is written once, in `orbital_engine.api`, and the adapters
+are shells over it with no engine logic of their own.
+
+- **The catalog is read from the code.** Scenario parameters come from the builders' signatures and
+  type hints, emitted as JSON Schema, which is what a form generator and an MCP tool definition both
+  consume. Force-model coefficients come from the registry. A builder or model added to the engine
+  appears without an edit. The only hand-kept facts are which coefficients name a body (`BODY_PARAMS`)
+  and which columns the engine owns (`ENGINE_OWNED`), because the registry does not record them.
+- **Strict, with every error at once.** An ignored key is a silently missing coefficient, which is the
+  plausible-wrong-orbit failure the engine is built to avoid, so unknown keys are errors. Parsing
+  collects every problem with its JSON path before raising, so a form can mark every bad field in
+  one round trip.
+- **Validation is the engine's own.** Whether a config fits a scenario is decided by `apply_config`
+  and the force models' validators, run on a fresh build per config. The API does not re-implement
+  those rules, so it cannot disagree with them.
+- **Truth that cannot judge is warned.** Truth's force model is explicit (`reference.py`), so a J2
+  config judged against point-mass truth, or a drag config against drag-free truth, is reported in
+  `warnings` rather than refused: sometimes that comparison is the point.
+- **No physics of its own.** A sweep or a simulation through a document is bit-identical to the
+  direct call (`tests/unit/test_api.py`).
+
+Not in version 1: encounters, patches, regimes and station keeping in configs (refused by
+`config_to_json`, not dropped), access / ISL metrics, tesseral truth, and `ephemeris_third_body`.
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.

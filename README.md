@@ -922,8 +922,11 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - mean-element seeding for the averaged-quadrupole rung: the periodic offset an osculating start
        carries (5 km, 2.2e-5 km/s) is removed, so the averaged rung beats the monopole from the start
        (18 against 54 km at 30 d) instead of after a month
+     - a JSON layer (`orbital_engine.api`): a catalog generated from the code (JSON Schema per
+       scenario), strict sweep and simulate documents with every error reported against its path, and
+       results bit-identical to the direct calls
    - **Next:**
-     - visualisation, a general-user UI, and an API / MCP layer over the engine
+     - an HTTP service and an MCP server over the JSON layer, then visualisation and a general-user UI
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,
