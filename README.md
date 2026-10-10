@@ -894,6 +894,12 @@ Ordered so that each stage makes the next one safe rather than merely possible.
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay
    here.
+   - **Done:**
+     - Walker `i: T/P/F` constellations, delta and star
+     - streaming history to disk in constant memory: 10,000 satellites at 10 s cost 32 MB of memory
+       and 4.2 GB of disk per day. The arena itself steps 10,000 satellites in 2.2 ms
+   - **Next:** ISL candidate pairs pruned by geometry, because all-pairs is N^2 (5e7 pairs per
+     sample at 10,000 satellites)
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

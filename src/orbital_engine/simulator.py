@@ -35,6 +35,7 @@ from . import quadrupole  # registers "system_quadrupole"; live rows need their 
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
 if TYPE_CHECKING:
+    from .history import HistorySink
     from .regimes import RegimeSwitch
 from . import hierarchy  # temporary systems: form_system / dissolve_system, used by the API below
 
@@ -102,6 +103,9 @@ class Simulation:
         # (a runtime restructure, `hierarchy.py`, adds or removes a barycentre), so this costs one
         # reference per step.
         self._hist_names: List[List[str]] = []
+        # A streaming sink (`attach_history_sink`), when attached, replaces the in-memory buffers.
+        self._history_sink: Optional["HistorySink"] = None
+        self._history_sink_count: int = 0
         self._recorded_names: List[str] = []
         self._recorded_slots: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
@@ -2092,6 +2096,11 @@ class Simulation:
         The DataFrame is assembled lazily in `history`, so a run that never inspects its history
         never pays for the long-format expansion at all.
         """
+        if self._history_sink is not None:
+            self._history_sink_count += 1
+            if self._history_sink_count % self._history_sink.every == 0:
+                self._history_sink.record(float(self.t), self.global_states)
+            return
         self._hist_seconds.append(float(self.t))
         self._hist_global.append(self.global_states[self._recorded_slots].copy())
         self._hist_local.append(self.local_states[self._recorded_slots].copy())
@@ -2133,6 +2142,26 @@ class Simulation:
             "e": coe[:, 1],
             "theta": coe[:, 5],
         })
+
+    def attach_history_sink(self, sink: "HistorySink", every: int = 1) -> None:
+        """
+        Stream history to `sink` (`history.HistorySink`) instead of keeping it in memory: every
+        `every`-th step's snapshot of the sink's bodies is written there, and the current state is
+        recorded at once as the first snapshot. Turns `record_history` on. The in-memory `history` is
+        not filled while a sink is attached. Close the sink when the run ends.
+        """
+        if every < 1:
+            raise ValueError(f"every must be at least 1, got {every}")
+        sink.every = int(every)
+        self._history_sink = sink
+        self._history_sink_count = 0
+        self.record_history = True
+        sink.record(float(self.t), self.global_states)
+
+    def detach_history_sink(self) -> Optional["HistorySink"]:
+        """Stop streaming and return the sink (not closed); history goes back to memory."""
+        sink, self._history_sink = self._history_sink, None
+        return sink
 
     def clear_history(self) -> None:
         self._hist_seconds = []

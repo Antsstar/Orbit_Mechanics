@@ -2571,6 +2571,48 @@ truth, including the range where the expansion should not be trusted.
 
 ---
 
+## The constellation layer
+
+The repository-boundary decision keeps Walker generation, TLE ingest, visibility and the contact
+datasets here, and puts routing, handover and link budgets downstream. This section is what that
+needs at constellation scale.
+
+**Walker generation** (`scenarios.walker_elements`, `walker_constellation`). A Walker `i: T/P/F` delta
+places plane `p` at RAAN `2 pi p / P`, and satellite `k` of it at argument of latitude
+`2 pi k / S + 2 pi F p / T`, with `S = T/P`. A star pattern spreads the RAANs over `pi`. `F = 0` delta
+reproduces `earth_constellation` bit for bit. The validation is the pattern's symmetry, stated
+correctly: *every satellite sees exactly what satellite (0, 0) sees when it reaches the same
+argument of latitude* (to 1e-9, with a non-Walker offset as the negative control). It is not an
+instant-wise symmetry: a satellite over the equator and one at its highest latitude have different
+neighbourhoods. The first version of the test asserted that, and every pattern failed it.
+
+**Scale.** On a Walker 53 deg 10,000/100/1 shell at 550 km:
+- the build takes 1.7 s;
+- a step costs 2.2 ms on both the Keplerian and secular-J2 compiled paths, ~0.2 us per satellite;
+- the arena itself is not the limit.
+
+The limits are history and the pairwise datasets.
+
+**Streaming history** (`history.HistorySink`, `Simulation.attach_history_sink(sink, every=)`,
+`history.read_history`). The in-memory history keeps every snapshot of global, local and element
+states: 12.4 GB for that shell at 10 s over a day. The sink keeps one preallocated chunk of global
+states for a fixed list of bodies (barycentres refused, since a temporary one can vanish). It writes
+each full chunk as `.npy` files (memory-mappable) plus a JSON manifest, and rewrites the manifest at
+every flush, so a run that dies keeps every chunk it flushed. No new dependency. Measured on the
+shell:
+- memory stays at one chunk (32 MB for 64 snapshots);
+- recording adds 2.2 ms to the 2.0 ms step;
+- disk use is 4.2 GB per day at 10 s;
+- one satellite's hour reads back in 0.14 s.
+
+**Still to do: ISL pairs at scale.** `isl.py` evaluates all `N (N - 1) / 2` pairs, in memory-bounded
+chunks, so memory is fine but work grows as N^2: 5e7 pairs per sample at 10,000 satellites. What
+belongs here is candidate pruning by geometry (pairs that can come within `max_range_km` over a
+window). A fixed link topology such as a "+grid" is a network-design choice, and that belongs
+downstream.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.
