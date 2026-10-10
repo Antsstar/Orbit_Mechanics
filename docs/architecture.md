@@ -2739,8 +2739,27 @@ measuring:
   2% without it.
 - **Slew.** A torque-limited 90 deg slew settles in 325 s, against the bang-bang lower bound of 177 s.
 
-Not yet: the link scan reading a tracker's recorded boresights instead of an ideal law's, which waits
-on the compiled-geometry merge; and body-fixed thrust driven by the tracked attitude.
+**Cones from the tracked attitude** (`link_contact_table_from_recording(..., attitude=tracker)`). For
+the coned vessels a recording tracker follows, the cone's axis at each sample is the tracker's
+recorded boresight, not the ideal law's; the times must match the recording's exactly, or the scan
+raises.
+
+On the cislunar shells, each lunar satellite starts 90 deg off its Earth-pointing antenna's target and
+slews under a torque limit:
+- **No link opens while slewing.** None rises before the pointing error is within the cone plus the
+  constellation's 1.13 deg angular extent.
+- **Once settled, the windows are the law's.** Same pairs and counts, edges within 3.3 s, against a
+  derived ~11 s.
+- **The residual is not zero.** Seen from a satellite orbiting the Moon, the Earth direction turns at a
+  varying rate, and feeding forward the rate cancels a constant rate but not the target's angular
+  acceleration. That leaves ~`alpha / omega_n^2`, measured 1e-4 to 2e-4 rad at `k_p = 0.05` and 20x
+  less at `k_p = 1`.
+
+Two first claims in the test were wrong, and both are recorded there. A slew taking over 600 s was a
+guess; it was ready at 300 s. "A tracked cone only removes visibility" is false: overshooting, the axis
+swings past Earth and briefly sees satellites the ideal cone does not.
+
+Not yet: body-fixed thrust driven by the tracked attitude.
 
 ---
 

@@ -913,13 +913,13 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        and visibility cones per link end
      - attitude dynamics: rigid bodies tracking their pointing law under a torque-limited PD controller.
        The step response matches second-order theory (16.29% overshoot vs 16.30%); a 90 deg slew takes
-       1.8x the bang-bang minimum
+       1.8x the bang-bang minimum. Link cones can follow the tracked attitude, so a slewing antenna
+       opens no link until it has turned
      - the ISL scan made 2-3.5x faster: a compiled per-pair geometry twin, and open-window bookkeeping
        with no search or sort. 10,000 satellites now take 0.97 s per sample at 2,000 km (47 min per
        simulated day)
    - **Next:**
-     - link cones driven by a tracked attitude (`attitude_dynamics.py`) rather than an ideal law, and
-       body-fixed thrust that follows it
+     - body-fixed thrust driven by the tracked attitude
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

@@ -47,7 +47,7 @@ import json
 import math
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -57,6 +57,9 @@ from .access import ContactSample
 from .attitude import Cone, boresights, cone_margin_km
 from .geometry import segment_clearance
 from .isl import IslContact, IslSpec, IslWindow
+
+if TYPE_CHECKING:
+    from .attitude_dynamics import AttitudeTracker
 
 __all__ = ["IslContactTable", "isl_contact_table", "isl_contact_table_from_recording", "candidate_pairs",
            "Occulter", "LinkSpec", "link_contact_table", "link_contact_table_from_recording"]
@@ -511,7 +514,7 @@ _Sample = Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArra
 
 
 def _link_scan(samples: Iterable[_Sample], names: Sequence[str], spec: LinkSpec,
-               compiled: Optional[bool] = None) -> IslContactTable:
+               compiled: Optional[bool] = None, attitude: Optional["AttitudeTracker"] = None) -> IslContactTable:
     """Each sample: `(t, pos, vel, occulter centres 1.., {reference body: (6,) state})`, all relative to
     `spec.occulters[0]`."""
     split = len(spec.group_a) if spec.group_a is not None else None
@@ -524,11 +527,21 @@ def _link_scan(samples: Iterable[_Sample], names: Sequence[str], spec: LinkSpec,
         for name, cone in spec.cones.items():
             scanner.half[list(names).index(name)] = math.radians(cone.half_angle_deg)
     coned = [(list(names).index(n), c.attitude) for n, c in spec.cones.items()]
-    for t, pos, vel, occ, refs in samples:
+    rows: Dict[str, int] = {} if attitude is None else {n: j for j, n in enumerate(attitude.names)}
+    for i, (t, pos, vel, occ, refs) in enumerate(samples):
         bore: Optional[NDArray[np.float64]] = None
         if coned:
             bore = np.full((len(names), 3), np.nan)
             for k, att in coned:
+                tracked = rows.get(names[k])
+                if tracked is not None:                               # the tracked attitude, not the law
+                    assert attitude is not None
+                    if i >= len(attitude.times) or attitude.times[i] != float(t):
+                        raise ValueError(f"the attitude tracker's recorded times do not match the samples "
+                                         f"(sample {i} at t = {float(t)} s); record both every step from "
+                                         f"the same start")
+                    bore[k] = attitude.history[i][tracked]
+                    continue
                 ref = refs.get(att.reference) if att.reference is not None else None
                 bore[k] = boresights(att, pos[k], vel[k], None if ref is None else ref[:3],
                                      None if ref is None else ref[3:])[0]
@@ -589,12 +602,18 @@ def link_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArr
 
 def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpec,
                                       bodies: Optional[Sequence[str]] = None,
-                                      compiled: Optional[bool] = None) -> IslContactTable:
+                                      compiled: Optional[bool] = None,
+                                      attitude: Optional["AttitudeTracker"] = None) -> IslContactTable:
     """
-    Link contacts from a `history.HistorySink` recording (`compiled` as in `link_contact_table`), streamed one chunk at a time. The recording
-    must include every occulter. Positions and velocities are taken relative to `spec.occulters[0]`.
-    Without groups, `bodies` (default: every recorded body that is not an occulter) are paired among
-    themselves.
+    Link contacts from a `history.HistorySink` recording (`compiled` as in `link_contact_table`), streamed
+    one chunk at a time. The recording must include every occulter. Positions and velocities are taken
+    relative to `spec.occulters[0]`. Without groups, `bodies` (default: every recorded body that is not
+    an occulter) are paired among themselves.
+
+    `attitude` (`attitude_dynamics.AttitudeTracker`, recorded with `record=True` over the same steps):
+    for the coned vessels it tracks, the cone's axis is the tracker's recorded boresight at each sample,
+    not the ideal law's. The cone's half-angle still comes from `spec.cones`. The tracker's recorded
+    times must equal the recording's, or the scan raises.
     """
     directory = Path(directory)
     manifest = json.loads((directory / "manifest.json").read_text())
@@ -618,7 +637,7 @@ def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpe
                 occ = (snap[others, :3] - snap[origin, :3]) if others.size else None
                 refs = {n: snap[j] - snap[origin] for n, j in ref_cols.items()}
                 yield float(t[k]), np.ascontiguousarray(rel[:, :3]), np.ascontiguousarray(rel[:, 3:]), occ, refs
-    return _link_scan(samples(), names, spec, compiled)
+    return _link_scan(samples(), names, spec, compiled, attitude)
 
 
 def isl_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArray[np.float64],
