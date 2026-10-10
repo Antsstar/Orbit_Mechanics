@@ -2631,14 +2631,20 @@ arrays, or from a `HistorySink` recording read chunk by chunk.
 |---|---|---|---|---|
 | 1,000 | 2,000 km | 0.013 s | 0.6 min | 47k |
 | 1,000 | 5,000 km | 0.067 s | 3.2 min | 143k |
-| 10,000 | 2,000 km | 1.8 s | 86 min | 4.7M |
-| 10,000 | 5,000 km | 10.4 s | 8.3 h | 14M |
+| 10,000 | 2,000 km | 1.8 s (now 0.97) | 86 min (now 47) | 4.7M |
+| 10,000 | 5,000 km | 10.4 s (now 3.0) | 8.3 h (now 2.4) | 14M |
 
 At 10,000 satellites and 5,000 km, about 13% of the shell is in range at once, so pruning saves
-little. The cost is the per-pair geometry, evaluated in NumPy at both ends of every interval (~60% of
-the time, profiled). A lower bound on the segment's clearance, used to skip it, saved nothing: the
-bound's own NumPy work cost as much. The lever is a compiled per-pair twin under the
-two-implementation rule. A fixed link topology (a "+grid") would be cheaper still, but choosing one is
+little. The cost was first the per-pair geometry (~60%, profiled). A lower bound on the segment's
+clearance, used to skip it, saved nothing: the bound's own NumPy work cost as much. Two changes fixed it:
+- **A compiled twin** (`kernels.isl_pair_geometry`, two-implementation rule), bit-identical without
+  cones.
+- **Open-window bookkeeping without search or sort.** The windows open at sample `k` are exactly the
+  candidates in view at `k`, and both are sorted by pair key, so the open arrays line up with them rank
+  for rank. A mismatch means a pair in view was pruned, and it raises.
+
+Together they bring 10,000 satellites to 0.97 s per sample at 2,000 km and 3.0 s at 5,000 km (it was
+1.8 and 10.4 s). The candidate search now dominates. A fixed link topology (a "+grid") would be cheaper still, but choosing one is
 a network-design decision and belongs downstream.
 
 **Cislunar links** (`isl_scale.LinkSpec`, `link_contact_table`, `link_contact_table_from_recording`).
