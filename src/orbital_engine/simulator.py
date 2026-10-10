@@ -395,6 +395,21 @@ class Simulation:
 
         self._resolve_circular() # Resolve any circular dependencies in the parent graph, ensuring a valid hierarchy.
 
+        # A body parented to a *plain member* of a barycentric bubble - a satellite of the Moon inside the
+        # Earth-Moon system - orbits that member, not the system: its bubble is the parent itself (a
+        # point-mass bubble), exactly as `hierarchy._bubble_for_parent` rules at runtime. Left on the
+        # system, its local state (the Keplerian state about its parent) was read as relative to the
+        # barycentre, and one step moved it a lunar distance (tests/validation/test_lunar_satellites.py).
+        # Heads keep their satellites in the bubble (the reflex-kick path), and barycentre parents are
+        # rewired to the head later (step 8 of `_unfold_database_to_global`).
+        idx_all = np.flatnonzero(self.active_mask)
+        parents_all = self.parent_indices[idx_all]
+        plain_member_parent = (
+            (parents_all != idx_all) & ~self.is_system[parents_all] & ~self.is_head[parents_all]
+            & (self.body_sys_map[idx_all] != parents_all) & self.is_system[self.body_sys_map[idx_all]]
+        )
+        self.body_sys_map[idx_all[plain_member_parent]] = parents_all[plain_member_parent]
+
         if local_session:   # Test case guard framework
             session.close()
 

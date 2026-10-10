@@ -47,7 +47,7 @@ import json
 import math
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -56,11 +56,78 @@ from .access import ContactSample
 from .geometry import segment_clearance
 from .isl import IslContact, IslSpec, IslWindow
 
-__all__ = ["IslContactTable", "isl_contact_table", "isl_contact_table_from_recording", "candidate_pairs"]
+__all__ = ["IslContactTable", "isl_contact_table", "isl_contact_table_from_recording", "candidate_pairs",
+           "Occulter", "LinkSpec", "link_contact_table", "link_contact_table_from_recording"]
 
 # Candidate pairs evaluated per block: a few (P, 3) float temporaries each, so ~1e6 keeps a block to
 # tens of MB however many pairs are in view.
 _PAIR_BLOCK = 1_000_000
+
+
+@dataclass(frozen=True)
+class Occulter:
+    """A sphere a link must clear: `body` by name, `radius_km`, and the grazing altitude `h_graze_km`
+    the segment must keep above it (`geometry.segment_clearance`)."""
+
+    body: str
+    radius_km: float
+    h_graze_km: float = 0.0
+
+
+@dataclass(frozen=True)
+class LinkSpec:
+    """
+    Link visibility between bodies anywhere - an Earth constellation and a lunar one, a probe drifting
+    through cislunar space - generalising `isl.IslSpec` in two ways:
+
+    - **Several occulters.** A link must clear *every* sphere in `occulters` (Earth *and* the Moon, each
+      with its own radius and grazing altitude): the margin is the minimum of the clearances and the
+      range margin. Positions are taken relative to `occulters[0]`, the frame origin, so with one
+      occulter this is `isl.IslSpec`'s geometry exactly.
+    - **Groups.** With `group_a` and `group_b` (disjoint, by name) only pairs `(a in A, b in B)` are
+      evaluated: Earth satellites to lunar satellites, or one probe to a whole constellation, without
+      the pairs inside each group. Without groups, every pair of the chosen bodies.
+
+    `max_range_km` closes the link beyond that range. Pruning (see the module docstring) uses
+    `min(max_range, L_los of each occulter)`; with no range limit and occulters far from the bodies,
+    that bound is loose and most pairs are candidates, which is fine for small groups.
+    """
+
+    occulters: Sequence[Occulter]
+    max_range_km: Optional[float] = None
+    group_a: Optional[Sequence[str]] = None
+    group_b: Optional[Sequence[str]] = None
+
+    def __post_init__(self) -> None:
+        if not self.occulters:
+            raise ValueError("LinkSpec needs at least one occulter (the first is the frame origin).")
+        if (self.group_a is None) != (self.group_b is None):
+            raise ValueError("LinkSpec groups come in pairs: give both group_a and group_b, or neither.")
+        if self.group_a is not None and self.group_b is not None:
+            both = set(self.group_a) & set(self.group_b)
+            if both:
+                raise ValueError(f"LinkSpec groups must be disjoint; {sorted(both)} are in both.")
+            occ = {o.body for o in self.occulters} & (set(self.group_a) | set(self.group_b))
+            if occ:
+                raise ValueError(f"{sorted(occ)} are occulters and cannot also be link ends.")
+
+
+@dataclass(frozen=True)
+class _Model:
+    """What the scan needs from either spec: occulter spheres (index 0 is the frame origin) and grazing
+    altitudes, the range limit, and the A/B split of the body list (`None`: all pairs)."""
+
+    radius: Tuple[float, ...]
+    graze: Tuple[float, ...]
+    max_range: Optional[float]
+    split: Optional[int]
+
+    @staticmethod
+    def of(spec: Union[IslSpec, LinkSpec], split: Optional[int] = None) -> "_Model":
+        if isinstance(spec, IslSpec):
+            return _Model((spec.body_radius_km,), (spec.h_graze_km,), spec.max_range_km, None)
+        return _Model(tuple(o.radius_km for o in spec.occulters), tuple(o.h_graze_km for o in spec.occulters),
+                      spec.max_range_km, split)
 
 
 @dataclass
@@ -103,7 +170,7 @@ class IslContactTable:
                 set=ContactSample(w.set_s, float(self.set_range_km[k]), float(self.set_rate_km_s[k]))))
         return out
 
-    def save(self, directory: Union[str, Path], spec: IslSpec) -> None:
+    def save(self, directory: Union[str, Path], spec: Union[IslSpec, LinkSpec]) -> None:
         """`<field>.npy` per column plus `manifest.json` (names, spec, units, conventions)."""
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -113,8 +180,14 @@ class IslContactTable:
         manifest = {
             "dataset": "isl_contacts", "format_version": 1, "rows": len(self), "names": self.names,
             "columns": columns,
-            "spec": {"central_body": spec.central_body, "body_radius_km": spec.body_radius_km,
-                     "h_graze_km": spec.h_graze_km, "max_range_km": spec.max_range_km},
+            "spec": ({"central_body": spec.central_body, "body_radius_km": spec.body_radius_km,
+                      "h_graze_km": spec.h_graze_km, "max_range_km": spec.max_range_km}
+                     if isinstance(spec, IslSpec) else
+                     {"occulters": [{"body": o.body, "radius_km": o.radius_km, "h_graze_km": o.h_graze_km}
+                                    for o in spec.occulters],
+                      "frame_origin": spec.occulters[0].body, "max_range_km": spec.max_range_km,
+                      "group_a": list(spec.group_a) if spec.group_a is not None else None,
+                      "group_b": list(spec.group_b) if spec.group_b is not None else None}),
             "units": {"time": "s (simulation time)", "range": "km", "range_rate": "km/s"},
             "conventions": {"pair": "body_a < body_b, indices into names", "range_rate": "positive = opening",
                             "edges": "linearly interpolated on the link margin; clipped = grid endpoint",
@@ -123,9 +196,13 @@ class IslContactTable:
         (directory / "manifest.json").write_text(json.dumps(manifest, indent=1))
 
 
-def candidate_pairs(pos: NDArray[np.float64], radius_km: float) -> Tuple[NDArray[np.int64], NDArray[np.int64]]:
-    """Every pair `(a < b)` of `(N, 3)` positions closer than `radius_km`, sorted by `a N + b`."""
+def candidate_pairs(pos: NDArray[np.float64], radius_km: float,
+                    split: Optional[int] = None) -> Tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """Every pair `(a < b)` of `(N, 3)` positions closer than `radius_km`, sorted by `a N + b`; with
+    `split`, only pairs with `a < split <= b` (group A is `[0, split)`, group B the rest)."""
     n = pos.shape[0]
+    if split is not None:
+        return _bipartite_pairs(pos, radius_km, split)
     try:
         from scipy.spatial import cKDTree
     except ImportError:                                             # exact, O(N^2), blocked
@@ -151,15 +228,47 @@ def candidate_pairs(pos: NDArray[np.float64], radius_km: float) -> Tuple[NDArray
     return out_a, out_b
 
 
+def _bipartite_pairs(pos: NDArray[np.float64], radius_km: float,
+                     split: int) -> Tuple[NDArray[np.int64], NDArray[np.int64]]:
+    n = pos.shape[0]
+    a_pos, b_pos = pos[:split], pos[split:]
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        d = np.linalg.norm(a_pos[:, None, :] - b_pos[None, :, :], axis=2)
+        ia, jb = np.nonzero(d < radius_km)
+    else:
+        if math.isinf(radius_km):
+            ia, jb = np.nonzero(np.ones((split, n - split), dtype=bool))
+        else:
+            m = cKDTree(a_pos).sparse_distance_matrix(cKDTree(b_pos), radius_km, output_type="ndarray")
+            keep = m["v"] < radius_km
+            ia, jb = m["i"][keep], m["j"][keep]
+    a = np.asarray(ia, dtype=np.int64)
+    b = np.asarray(jb, dtype=np.int64) + split
+    order = np.argsort(a * n + b, kind="stable")
+    out_a: NDArray[np.int64] = a[order]
+    out_b: NDArray[np.int64] = b[order]
+    return out_a, out_b
+
+
 def _geometry(pos: NDArray[np.float64], vel: NDArray[np.float64], ia: NDArray[np.int64], ib: NDArray[np.int64],
-              spec: IslSpec) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Margin, range and range rate for pairs at one sample - `isl._pair_block`'s arithmetic, per pair."""
+              model: _Model, occ: Optional[NDArray[np.float64]] = None,
+              ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Margin, range and range rate for pairs at one sample - `isl._pair_block`'s arithmetic, per pair.
+    Occulter 0 is the frame origin (its clearance is computed on the positions as given, exactly as
+    `isl.py` does); `occ` holds the centres of occulters 1.. in that frame, and each adds a clearance."""
     r_a, r_b = pos[ia], pos[ib]
     rel = r_b - r_a
     ranges: NDArray[np.float64] = np.sqrt(np.sum(rel * rel, axis=-1))
-    margin = segment_clearance(r_a, r_b, body_radius_km=spec.body_radius_km, h_graze_km=spec.h_graze_km)
-    if spec.max_range_km is not None:
-        margin = np.minimum(margin, float(spec.max_range_km) - ranges)
+    margin = segment_clearance(r_a, r_b, body_radius_km=model.radius[0], h_graze_km=model.graze[0])
+    for k in range(1, len(model.radius)):
+        assert occ is not None
+        c = occ[k - 1]
+        margin = np.minimum(margin, segment_clearance(r_a - c, r_b - c, body_radius_km=model.radius[k],
+                                                      h_graze_km=model.graze[k]))
+    if model.max_range is not None:
+        margin = np.minimum(margin, float(model.max_range) - ranges)
     rel_v = vel[ib] - vel[ia]
     rates: NDArray[np.float64] = np.sum(rel * rel_v, axis=-1) / np.where(ranges > 0.0, ranges, 1.0)
     return np.asarray(margin, dtype=np.float64), ranges, rates
@@ -170,44 +279,55 @@ class _Scanner:
 
     _OPEN = ("key", "rise", "rise_clipped", "rise_range", "rise_rate", "min_range", "peak_t", "peak_rate")
 
-    def __init__(self, n: int, spec: IslSpec) -> None:
+    def __init__(self, n: int, model: _Model) -> None:
         self.n = n
-        self.spec = spec
-        self.prev: Optional[Tuple[float, NDArray[np.float64], NDArray[np.float64]]] = None
+        self.model = model
+        self.prev: Optional[Tuple[float, NDArray[np.float64], NDArray[np.float64],
+                                  Optional[NDArray[np.float64]]]] = None
         self.open: Dict[str, NDArray[Any]] = {k: np.empty(0) for k in self._OPEN}
         self.open["key"] = np.empty(0, dtype=np.int64)
         self.closed: List[Dict[str, NDArray[Any]]] = []
         self.samples = 0
 
     def _radius(self, p0: NDArray[np.float64], v0: NDArray[np.float64], p1: NDArray[np.float64],
-                v1: NDArray[np.float64], dt: float) -> float:
-        rg = self.spec.body_radius_km + self.spec.h_graze_km
-        r_max = float(max(np.max(np.linalg.norm(p0, axis=1)), np.max(np.linalg.norm(p1, axis=1))))
-        reach = 2.0 * math.sqrt(max(r_max * r_max - rg * rg, 0.0))
-        if self.spec.max_range_km is not None:
-            reach = min(reach, float(self.spec.max_range_km))
+                v1: NDArray[np.float64], dt: float, o0: Optional[NDArray[np.float64]] = None,
+                o1: Optional[NDArray[np.float64]] = None) -> float:
+        # A visible link clears every occulter, so it is no longer than the longest segment that can clear
+        # each one: the bound is the minimum over occulters (occulter 0 sits at the origin).
+        reach = math.inf
+        for k, (radius, graze) in enumerate(zip(self.model.radius, self.model.graze)):
+            c0 = np.zeros(3) if k == 0 or o0 is None else o0[k - 1]
+            c1 = np.zeros(3) if k == 0 or o1 is None else o1[k - 1]
+            rg = radius + graze
+            r_max = float(max(np.max(np.linalg.norm(p0 - c0, axis=1)), np.max(np.linalg.norm(p1 - c1, axis=1))))
+            reach = min(reach, 2.0 * math.sqrt(max(r_max * r_max - rg * rg, 0.0)))
+        if self.model.max_range is not None:
+            reach = min(reach, float(self.model.max_range))
         v_max = float(max(np.max(np.linalg.norm(v0, axis=1)), np.max(np.linalg.norm(v1, axis=1))))
         return reach + 2.0 * v_max * dt + 1.0
 
-    def feed(self, t: float, pos: NDArray[np.float64], vel: NDArray[np.float64]) -> None:
+    def feed(self, t: float, pos: NDArray[np.float64], vel: NDArray[np.float64],
+             occ: Optional[NDArray[np.float64]] = None) -> None:
         if self.prev is None:
-            self.prev = (t, pos, vel)
+            self.prev = (t, pos, vel, occ)
             self.samples = 1
             return
-        t0, p0, v0 = self.prev
+        t0, p0, v0, o0 = self.prev
         if not t > t0:
             raise ValueError("ISL samples must be strictly increasing in time.")
-        ca, cb = candidate_pairs(p0, self._radius(p0, v0, pos, vel, t - t0))
+        ca, cb = candidate_pairs(p0, self._radius(p0, v0, pos, vel, t - t0, o0, occ), self.model.split)
         for s in range(0, ca.size, _PAIR_BLOCK):
-            self._interval(t0, p0, v0, t, pos, vel, ca[s:s + _PAIR_BLOCK], cb[s:s + _PAIR_BLOCK], first=self.samples == 1)
-        self.prev = (t, pos, vel)
+            self._interval(t0, p0, v0, o0, t, pos, vel, occ, ca[s:s + _PAIR_BLOCK], cb[s:s + _PAIR_BLOCK],
+                           first=self.samples == 1)
+        self.prev = (t, pos, vel, occ)
         self.samples += 1
 
-    def _interval(self, t0: float, p0: NDArray[np.float64], v0: NDArray[np.float64], t1: float,
-                  p1: NDArray[np.float64], v1: NDArray[np.float64], ia: NDArray[np.int64], ib: NDArray[np.int64],
+    def _interval(self, t0: float, p0: NDArray[np.float64], v0: NDArray[np.float64],
+                  o0: Optional[NDArray[np.float64]], t1: float, p1: NDArray[np.float64], v1: NDArray[np.float64],
+                  o1: Optional[NDArray[np.float64]], ia: NDArray[np.int64], ib: NDArray[np.int64],
                   first: bool) -> None:
-        m0, r0, q0 = _geometry(p0, v0, ia, ib, self.spec)
-        m1, r1, q1 = _geometry(p1, v1, ia, ib, self.spec)
+        m0, r0, q0 = _geometry(p0, v0, ia, ib, self.model, o0)
+        m1, r1, q1 = _geometry(p1, v1, ia, ib, self.model, o1)
         key = ia * self.n + ib
         in0, in1 = m0 > 0.0, m1 > 0.0
 
@@ -277,11 +397,11 @@ class _Scanner:
         if self.samples < 2:
             raise ValueError("ISL windows need at least two samples to bracket a crossing.")
         assert self.prev is not None
-        t_end, p_end, v_end = self.prev
+        t_end, p_end, v_end, o_end = self.prev
         if self.open["key"].size:                                     # still in view at the last sample
             keys: NDArray[np.int64] = self.open["key"].astype(np.int64)
             a, b = keys // self.n, keys % self.n
-            _, r_end, q_end = _geometry(p_end, v_end, a.astype(np.int64), b.astype(np.int64), self.spec)
+            _, r_end, q_end = _geometry(p_end, v_end, a.astype(np.int64), b.astype(np.int64), self.model, o_end)
             self._close(keys, np.full(keys.size, t_end), np.ones(keys.size, bool), r_end, q_end)
         rows: Dict[str, NDArray[Any]]
         if self.closed:
@@ -310,10 +430,84 @@ class _Scanner:
 
 def _scan(samples: Iterable[Tuple[float, NDArray[np.float64], NDArray[np.float64]]], n: int,
           names: Sequence[str], spec: IslSpec) -> IslContactTable:
-    scanner = _Scanner(n, spec)
+    scanner = _Scanner(n, _Model.of(spec))
     for t, pos, vel in samples:
         scanner.feed(float(t), pos, vel)
     return scanner.finish(names)
+
+
+def _link_scan(samples: Iterable[Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]]]],
+               names: Sequence[str], spec: LinkSpec) -> IslContactTable:
+    split = len(spec.group_a) if spec.group_a is not None else None
+    scanner = _Scanner(len(names), _Model.of(spec, split))
+    for t, pos, vel, occ in samples:
+        scanner.feed(float(t), pos, vel, occ)
+    return scanner.finish(names)
+
+
+def _link_names(spec: LinkSpec, available: Sequence[str], bodies: Optional[Sequence[str]]) -> List[str]:
+    if spec.group_a is not None and spec.group_b is not None:
+        names = list(spec.group_a) + list(spec.group_b)
+    else:
+        occulters = {o.body for o in spec.occulters}
+        names = list(bodies) if bodies is not None else [n for n in available if n not in occulters]
+    missing = [n for n in names + [o.body for o in spec.occulters] if n not in available]
+    if missing:
+        raise KeyError(f"no bodies named {missing}")
+    return names
+
+
+def link_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArray[np.float64],
+                       times_s: NDArray[np.float64], names: Sequence[str],
+                       occulter_positions_km: Mapping[str, NDArray[np.float64]], spec: LinkSpec) -> IslContactTable:
+    """
+    Link contacts for `(T, N, 3)` positions and velocities of the bodies `names` in any common inertial
+    frame, with each occulter's `(T, 3)` positions in the same frame (`occulter_positions_km` by name).
+    Positions are re-expressed relative to `spec.occulters[0]`. With groups, `names` must hold both
+    groups; the table's body list is `group_a + group_b`.
+    """
+    pos_all = np.asarray(positions_km, dtype=np.float64)
+    vel_all = np.asarray(velocities_km_s, dtype=np.float64)
+    order = _link_names(spec, list(names) + [o.body for o in spec.occulters], None)
+    if spec.group_a is None:
+        order = [n for n in names if n not in {o.body for o in spec.occulters}]
+    cols = np.asarray([list(names).index(n) for n in order], dtype=np.int64)
+    origin = np.asarray(occulter_positions_km[spec.occulters[0].body], dtype=np.float64)
+    others = [np.asarray(occulter_positions_km[o.body], dtype=np.float64) for o in spec.occulters[1:]]
+
+    def samples() -> Iterator[Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]]]]:
+        for k, t in enumerate(np.asarray(times_s, dtype=np.float64)):
+            occ = np.stack([o[k] - origin[k] for o in others]) if others else None
+            yield float(t), pos_all[k, cols] - origin[k], np.ascontiguousarray(vel_all[k, cols]), occ
+    return _link_scan(samples(), order, spec)
+
+
+def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpec,
+                                      bodies: Optional[Sequence[str]] = None) -> IslContactTable:
+    """
+    Link contacts from a `history.HistorySink` recording, streamed one chunk at a time. The recording
+    must include every occulter. Positions and velocities are taken relative to `spec.occulters[0]`.
+    Without groups, `bodies` (default: every recorded body that is not an occulter) are paired among
+    themselves.
+    """
+    directory = Path(directory)
+    manifest = json.loads((directory / "manifest.json").read_text())
+    recorded: List[str] = manifest["names"]
+    names = _link_names(spec, recorded, bodies)
+    origin = recorded.index(spec.occulters[0].body)
+    others = np.asarray([recorded.index(o.body) for o in spec.occulters[1:]], dtype=np.int64)
+    cols = np.asarray([recorded.index(n) for n in names], dtype=np.int64)
+
+    def samples() -> Iterator[Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]]]]:
+        for stem in manifest["chunks"]:
+            t = np.load(directory / f"{stem}_t.npy")
+            g = np.load(directory / f"{stem}_global.npy", mmap_mode="r")
+            for k in range(t.size):
+                snap = np.asarray(g[k], dtype=np.float64)
+                rel = snap[cols] - snap[origin]
+                occ = (snap[others, :3] - snap[origin, :3]) if others.size else None
+                yield float(t[k]), np.ascontiguousarray(rel[:, :3]), np.ascontiguousarray(rel[:, 3:]), occ
+    return _link_scan(samples(), names, spec)
 
 
 def isl_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArray[np.float64],

@@ -57,8 +57,8 @@ def test_too_small_a_pruning_radius_loses_edges(db_session: Session, monkeypatch
     dense = isl.isl_contacts(p, v, t, spec)
     real = isl_scale._Scanner._radius
 
-    def no_motion(self, p0, v0, p1, v1, dt):  # type: ignore[no-untyped-def]
-        return real(self, p0, v0 * 0.0, p1, v1 * 0.0, dt)          # drop the 2 v_max dt allowance
+    def no_motion(self, p0, v0, p1, v1, dt, *occ):  # type: ignore[no-untyped-def]
+        return real(self, p0, v0 * 0.0, p1, v1 * 0.0, dt, *occ)    # drop the 2 v_max dt allowance
     monkeypatch.setattr(isl_scale._Scanner, "_radius", no_motion)
     try:
         wrong = isl_contact_table(p, v, t, spec, names=names).to_contacts()

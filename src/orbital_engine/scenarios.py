@@ -48,6 +48,7 @@ __all__ = [
     "asteroid_encounter", "ASTEROID_A", "ASTEROID_B", "MU_CERES", "MU_VESTA", "AU_KM",
     "planet_flyby", "FLYBY_CRAFT", "FLYBY_PLANET", "binary_probe", "BINARY_PROBE",
     "walker_elements", "walker_constellation", "walker_satellite_name",
+    "earth_moon_constellations", "MOON_RADIUS",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -1571,3 +1572,69 @@ def binary_probe(
     session.commit()
     return Simulation(body_names=["Earth", "Moon", BINARY_PROBE], system_names=["Earth-Moon System"],
                       session=session, max_capacity=capacity)
+
+
+MOON_RADIUS = 1737.4
+
+
+def earth_moon_constellations(
+    session: Session,
+    *,
+    earth: Tuple[int, int, int, float, float] = (24, 3, 1, 56.0, 1200.0),
+    moon: Tuple[int, int, int, float, float] = (6, 2, 1, 60.0, 3000.0),
+    capacity: Optional[int] = None,
+) -> Simulation:
+    """
+    An Earth constellation and a lunar one in one arena, for cislunar visibility (`isl_scale.LinkSpec`):
+    `sun_earth_moon`'s Sun / Earth-Moon hierarchy, plus Walker `earth = (T, P, F, inclination_deg,
+    altitude_km)` massless satellites about Earth (`E-SAT-pp-sss`, inside the Earth-Moon bubble,
+    on the head's reflex path like `LEO-SAT`) and `moon = (...)` about the Moon (`L-SAT-pp-sss`, radius
+    from `MOON_RADIUS`). A satellite of the Moon is a satellite of a non-head member of the Earth-Moon
+    system; the build gives it the Moon as its bubble (see `Simulation._build_universe`), so it
+    follows its conic about the Moon (`tests/validation/test_lunar_satellites.py`). Inclinations are
+    to the arena's xy plane (the ecliptic of `sun_earth_moon`), not to either body's equator.
+    """
+    ssb = VirtualBodyORM(name="SSB")
+    emb = VirtualBodyORM(name="EMB")
+    session.add_all([ssb, emb])
+    session.flush()
+    solar = SystemORM(name="Solar System", barycenter_id=ssb.id)
+    earth_moon = SystemORM(name="Earth-Moon System", barycenter_id=emb.id)
+    session.add_all([solar, earth_moon])
+    session.flush()
+    sun = CelestialBodyORM(name="Sun", mu=MU_SUN, system_id=solar.id, radius=696340.0,
+                           p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0)
+    session.add(sun)
+    session.flush()
+    solar.head_body_id = sun.id
+    earth_orm = CelestialBodyORM(
+        name="Earth", mu=MU_EARTH, system_id=earth_moon.id, parent_id=sun.id, radius=EARTH_RADIUS,
+        p=EARTH_P, e=EARTH_E, i=0.0, raan=math.radians(-11.26), arg_pe=math.radians(114.2),
+        theta=math.radians(102.34))
+    session.add(earth_orm)
+    session.flush()
+    earth_moon.head_body_id = earth_orm.id
+    moon_orm = CelestialBodyORM(
+        name="Moon", mu=MU_MOON, system_id=earth_moon.id, parent_id=earth_orm.id, radius=MOON_RADIUS,
+        p=MOON_P, e=MOON_E, i=math.radians(5.145), raan=math.radians(125.08),
+        arg_pe=math.radians(318.15), theta=math.radians(115.0))
+    session.add(moon_orm)
+    session.flush()
+    names: List[str] = ["Sun", "Earth", "Moon"]
+    for prefix, parent, radius, spec in (("E", earth_orm, EARTH_RADIUS, earth), ("L", moon_orm, MOON_RADIUS, moon)):
+        total, planes, phasing, inclination, altitude = spec
+        raan, u, plane = walker_elements(int(total), int(planes), int(phasing))
+        per_plane = int(total) // int(planes)
+        for j in range(int(total)):
+            name = f"{prefix}-" + walker_satellite_name(int(plane[j]), j % per_plane)
+            session.add(VesselORM(
+                name=name, mu=0.0, system_id=earth_moon.id, parent_id=parent.id,
+                dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+                p=radius + float(altitude), e=0.0, i=math.radians(float(inclination)),
+                raan=float(raan[j]), arg_pe=0.0, theta=float(u[j])))
+            names.append(name)
+    emb.parent_id = sun.id
+    emb.system_id = solar.id
+    session.commit()
+    return Simulation(body_names=names, system_names=["Solar System", "Earth-Moon System"], session=session,
+                      max_capacity=capacity if capacity is not None else len(names) + 8)

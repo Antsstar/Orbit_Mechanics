@@ -1519,6 +1519,25 @@ The test grid now checks conservation, not a second solver: energy, angular mome
 `iod.kepler_universal` was deliberately left on plain Newton. It is the independent check elsewhere,
 and its users (Lambert, Gauss) are elliptic.
 
+## A satellite of the Moon moved a lunar distance per step (silent, since the start)
+
+Found while building cislunar visibility, because I checked an assumption rather than quoting a
+number. A satellite parented to the Moon inside the Earth-Moon system was placed correctly at build
+(3,000 km from the Moon) and was 390,415 km away after one 600 s step, with nothing raised.
+
+The cause was the dual graph. Its `parent_indices` was the Moon, and its `body_sys_map` was the
+Earth-Moon barycentre (the system it belongs to). The Keplerian kernel writes a body's local state as
+its conic about the *parent*, unless it is a sibling orbiting the *head* (the reflex-kick path).
+`calc_global` then adds that local state to the *bubble*. For a satellite of a non-head member, those
+two disagree by the member's offset from the barycentre: a lunar distance. Every shipped scenario
+parented satellites to heads (Earth), so no test ever built the case.
+
+The fix: a body parented to a plain member of a barycentric bubble gets that member as its bubble,
+at build. That is the rule `hierarchy._bubble_for_parent` had already used at runtime since phase 4,
+so the runtime path was right and the database path wrong. The lesson is the CLAUDE.md invariant
+again (`local_states[i]` is relative to `body_sys_map[i]`), and that a structural case no scenario
+builds is a case no test checks.
+
 ## A comparison's winner was an artefact of a sub-model (phase 5, regime switching)
 
 The first regime frontier said "switch the integration centre at the sphere of influence: 47-60x more

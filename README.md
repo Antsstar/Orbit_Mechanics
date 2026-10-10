@@ -902,7 +902,14 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        and saved as columns plus a manifest for a downstream link-budget or network project. A day
        of 1,000 satellites at 30 s takes 0.6-3 minutes; 10,000 satellites take 1.4 h at 2,000 km
        range
-   - **Next:** a compiled per-pair geometry twin, which is where the time goes at 10,000 satellites
+     - cislunar links: several occulters (Earth and the Moon) and cross-group pairs (an Earth
+       constellation to a lunar one, or one probe to a constellation). The Moon blocks 5.3% of
+       Earth-to-lunar link time. Building it surfaced and fixed a silent bug that moved Moon-orbiting
+       satellites a lunar distance per step
+   - **Next:**
+     - a compiled per-pair geometry twin, which is where the time goes at 10,000 satellites
+     - vessel-relative frames: LVLH, a chaser's state in a target's frame, Clohessy-Wiltshire rendezvous
+       targeting, attitude modes, and visibility cones per vessel
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

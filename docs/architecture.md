@@ -2641,6 +2641,32 @@ bound's own NumPy work cost as much. The lever is a compiled per-pair twin under
 two-implementation rule. A fixed link topology (a "+grid") would be cheaper still, but choosing one is
 a network-design decision and belongs downstream.
 
+**Cislunar links** (`isl_scale.LinkSpec`, `link_contact_table`, `link_contact_table_from_recording`).
+`LinkSpec` generalises `IslSpec` in two ways:
+- **Several occulters.** A link must clear every sphere in `occulters` (Earth with 100 km grazing *and*
+  the Moon, say). The margin is the minimum of their clearances and the range margin.
+- **Groups.** With `group_a` / `group_b`, only cross-group pairs are evaluated: Earth satellites to
+  lunar satellites, or one probe to a whole constellation, without each group's internal pairs.
+
+Positions are taken relative to the first occulter. With one occulter and no groups the records are
+bit-identical to the `IslSpec` path, and with groups and two occulters they match a dense all-pairs
+scan through `isl._extract` (`tests/validation/test_cislunar_links.py`). Each occulter adds its own
+line-of-sight bound to the pruning, and a visible link satisfies every one of them.
+
+On `scenarios.earth_moon_constellations` (Walker 24/3/1 at 1,200 km about Earth, 6/2/1 at 3,000 km
+about the Moon, 12 h), adding the Moon as an occulter removes 5.3% of the Earth-to-Moon link time
+(1,256 to 1,189 pair-hours) and splits windows (1,050 to 1,120). The geometric ceiling is 12%: the
+fraction of a lunar orbit at 4,737 km spent behind the Moon as seen from Earth, when the orbit plane
+contains the Earth direction.
+
+**A build bug this found.** A satellite of the Moon is a satellite of a *plain member* of the
+Earth-Moon bubble, not of its head. The build gave it the bubble (the barycentre) as its kinematic
+frame, while its Keplerian state is about the Moon. One step later it had moved a lunar distance
+(3,000 km from the Moon at build, 390,415 km after 600 s), and nothing raised. Every shipped scenario
+parented satellites to heads, which is why it went unseen. The build now gives such a body its
+parent as its bubble, the rule `hierarchy._bubble_for_parent` already applied at runtime. Regression:
+`tests/validation/test_lunar_satellites.py`, 6.9e-9 km against the lunar conic.
+
 ---
 
 ## Validation layers
