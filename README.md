@@ -898,8 +898,11 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - Walker `i: T/P/F` constellations, delta and star
      - streaming history to disk in constant memory: 10,000 satellites at 10 s cost 32 MB of memory
        and 4.2 GB of disk per day. The arena itself steps 10,000 satellites in 2.2 ms
-   - **Next:** ISL candidate pairs pruned by geometry, because all-pairs is N^2 (5e7 pairs per
-     sample at 10,000 satellites)
+     - ISL contacts at scale (`isl_scale.py`): pruned and streamed, bit-identical to the dense path,
+       and saved as columns plus a manifest for a downstream link-budget or network project. A day
+       of 1,000 satellites at 30 s takes 0.6-3 minutes; 10,000 satellites take 1.4 h at 2,000 km
+       range
+   - **Next:** a compiled per-pair geometry twin, which is where the time goes at 10,000 satellites
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

@@ -2605,11 +2605,41 @@ shell:
 - disk use is 4.2 GB per day at 10 s;
 - one satellite's hour reads back in 0.14 s.
 
-**Still to do: ISL pairs at scale.** `isl.py` evaluates all `N (N - 1) / 2` pairs, in memory-bounded
-chunks, so memory is fine but work grows as N^2: 5e7 pairs per sample at 10,000 satellites. What
-belongs here is candidate pruning by geometry (pairs that can come within `max_range_km` over a
-window). A fixed link topology such as a "+grid" is a network-design choice, and that belongs
-downstream.
+**ISL contacts at scale** (`isl_scale.py`). This is the visibility dataset a downstream link-budget and
+network project ingests. `isl.py` evaluates all `N (N - 1) / 2` pairs at every sample: 5e7 per
+sample at 10,000 satellites. `isl_scale` evaluates only candidates and streams over samples: from
+arrays, or from a `HistorySink` recording read chunk by chunk.
+
+- **Candidates.** For the interval from sample `k` to `k + 1`, the candidates are pairs closer than
+  `min(max_range, L_los) + 2 v_max dt + 1 km` at `k`, where `L_los = 2 sqrt(r_max^2 - (R + h_graze)^2)`
+  is the longest segment that can clear the grazing sphere. A pair in view at either end of the
+  interval is always a candidate, so no edge is missed. If that invariant were ever broken, the scan
+  raises rather than emitting wrong records; the negative-control test drops the motion allowance and
+  triggers it. Pairs come from scipy's `cKDTree`, or from an exact blocked fallback when scipy is
+  absent.
+- **Open windows** carry across intervals as arrays sorted by pair key.
+- **The same answer.** Edges, interpolated range and range rate, and the closest approach are computed
+  in `isl._extract`'s floating-point order. On a 40-satellite shell the records are **bit-identical**
+  to `isl.isl_contacts` at no range limit, 4,000 km and 2,500 km (816 / 384 / 186 windows).
+- **Output.** `IslContactTable`: columns, with `to_contacts()` for small cases and `save()` (`.npy`
+  columns plus a JSON manifest of names, spec, units and conventions). A downstream project needs only
+  numpy and the manifest.
+
+**Throughput**, Walker 53 deg shell at 550 km, 30 s samples, extrapolated to a day:
+
+| Satellites | Range | Per sample | Per day | Windows per half hour |
+|---|---|---|---|---|
+| 1,000 | 2,000 km | 0.013 s | 0.6 min | 47k |
+| 1,000 | 5,000 km | 0.067 s | 3.2 min | 143k |
+| 10,000 | 2,000 km | 1.8 s | 86 min | 4.7M |
+| 10,000 | 5,000 km | 10.4 s | 8.3 h | 14M |
+
+At 10,000 satellites and 5,000 km, about 13% of the shell is in range at once, so pruning saves
+little. The cost is the per-pair geometry, evaluated in NumPy at both ends of every interval (~60% of
+the time, profiled). A lower bound on the segment's clearance, used to skip it, saved nothing: the
+bound's own NumPy work cost as much. The lever is a compiled per-pair twin under the
+two-implementation rule. A fixed link topology (a "+grid") would be cheaper still, but choosing one is
+a network-design decision and belongs downstream.
 
 ---
 
