@@ -21,6 +21,13 @@ it (`dv ~ mu_sun r^2 / (R^3 v)`) at `r ~ R (m / M)^(1/3)`. That is the Hill scal
 should not depend on the mass. Laplace's sphere of influence, `R (m / M)^(2/5)`, would move the best
 radius as `s^0.4`, so the best `k` would drift as `s^0.067`, by 1.6x over these three decades. The
 script fits the exponent of the best radius against `s`.
+
+**Patched conics (phase 4), the third panel.** The same question for a massless probe handed to a
+planet: `scenarios.planet_flyby` (Earth's mass at 1 AU, 10,000 km periapsis at v_inf 3 km/s, a 109 deg
+turn, periapsis at day 30 of 60), with the planet's mass scaled by `s` and the periapsis by `s` too, so
+the hyperbola keeps its shape. One configuration per hand-over radius `k` Hill radii, handed back at
+`1.05 k` (a flyby crosses each radius once each way, so it cannot flicker; a symmetric boundary keeps
+"the radius" unambiguous). Keplerian at 600 s; the metric is the probe's error at day 60.
 """
 from __future__ import annotations
 
@@ -40,7 +47,7 @@ from sqlalchemy.pool import StaticPool
 from orbital_engine import grid, scenarios
 from orbital_engine.custom_types import PropagatorType
 from orbital_engine.database import Base
-from orbital_engine.hierarchy import EncounterPolicy, EncounterSpec, hill_radius_km
+from orbital_engine.hierarchy import EncounterPolicy, EncounterSpec, PatchSpec, hill_radius_km, sphere_radius_km
 from orbital_engine.simulator import Simulation
 from orbital_engine.sweep import ModelConfig
 
@@ -76,6 +83,35 @@ def configs_for(_s: float) -> List[ModelConfig]:
         policy = EncounterPolicy(form_km=k, dissolve_km=2.0 * k, unit="hill")
         out.append(ModelConfig(f"k={k:.4g}", PropagatorType.KEPLERIAN, DT, bodies=NAMES,
                                encounters=(EncounterSpec(*NAMES, policy),)))
+    return out
+
+
+FLYBY_DT = 600.0
+FLYBY_HORIZON = 60.0 * DAY
+FLYBY_KS = [float(k) for k in np.geomspace(0.3, 2.5, 21)]
+
+
+def build_flyby(s: float) -> Callable[[], Simulation]:
+    return lambda: scenarios.planet_flyby(session(), mu_planet=scenarios.MU_EARTH * s,
+                                          periapsis_km=10000.0 * s)
+
+
+def flyby_configs(_s: float) -> List[ModelConfig]:
+    names = [scenarios.FLYBY_CRAFT]
+    out = [ModelConfig("never", PropagatorType.KEPLERIAN, FLYBY_DT, bodies=names)]
+    for k in FLYBY_KS:
+        policy = EncounterPolicy(form_km=k, dissolve_km=1.05 * k, unit="hill")
+        out.append(ModelConfig(f"k={k:.4g}", PropagatorType.KEPLERIAN, FLYBY_DT, bodies=names,
+                               patches=(PatchSpec(scenarios.FLYBY_CRAFT, scenarios.FLYBY_PLANET, policy),)))
+    return out
+
+
+def fit_scaling(xs: np.ndarray, ys: np.ndarray) -> Dict[str, Tuple[float, float]]:
+    """Per prediction (slope held fixed): `(amplitude, rms log-misfit)`."""
+    out = {}
+    for name, p in (("Hill", 1.0 / 3.0), ("Laplace", 0.4)):
+        amp = float(np.exp(np.mean(np.log(ys) - p * np.log(xs))))
+        out[name] = (amp, float(np.sqrt(np.mean((np.log(ys) - np.log(amp * xs ** p)) ** 2))))
     return out
 
 
@@ -118,7 +154,28 @@ def main() -> int:
               f"(unpaired {unpaired[s]:.3e}, {unpaired[s] / e_best:.0f}x)")
     print(f"  r* ~ s^{slope:.3f}  (Hill 1/3 = 0.333, Laplace 2/5 = 0.400); k* ~ s^{k_slope:.3f}")
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.2))
+    frows = grid.run_grid("planet_mass_scale", SCALES, build_flyby, flyby_configs, FLYBY_HORIZON,
+                          timing_batches=1, timing_warmup=0)
+    f_hill = {s: sphere_radius_km(b, b.name_to_index[scenarios.FLYBY_PLANET], "hill")
+              for s, b in ((s, build_flyby(s)()) for s in SCALES)}
+    f_star: Dict[float, float] = {}
+    print("\nPatched conics: probe error at day 60 (km), by hand-over radius k (Hill radii):")
+    for s in SCALES:
+        mine = [r for r in frows if r.value == s]
+        never = next(r.result.error.max_km for r in mine if r.config_name == "never")
+        ks = np.array([float(r.config_name[2:]) for r in mine if r.config_name != "never"])
+        es = np.array([r.result.error.max_km for r in mine if r.config_name != "never"])
+        order = np.argsort(ks)
+        kb = best_k(ks[order], es[order])
+        f_star[s] = kb * f_hill[s]
+        print(f"  s={s:<5g} r_H={f_hill[s]:.3e} km  never {never:.3e}  best k={kb:.3f} r*={f_star[s]:.3e} "
+              f"km  error {float(np.min(es)):.3e} km ({never / float(np.min(es)):.0f}x)")
+    f_slope = float(np.polyfit(np.log(SCALES), np.log([f_star[s] for s in SCALES]), 1)[0])
+    f_fit = fit_scaling(np.array(SCALES), np.array([f_star[s] for s in SCALES]))
+    print(f"  r* ~ s^{f_slope:.3f}; fixed-slope rms misfit Hill {f_fit['Hill'][1]:.3f}, "
+          f"Laplace {f_fit['Laplace'][1]:.3f}")
+
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 5.4))
     for s, colour in zip(SCALES, SCALE_COLOURS):
         ks, es = curves[s]
         ax1.loglog(ks, es, "-", color=colour, lw=2, label=f"masses x{s:g}")
@@ -148,6 +205,17 @@ def main() -> int:
     ax2.set_title(f"Best radius scales as s^{slope:.2f}: Hill, not Laplace", fontsize=11, color=INK)
     ax2.grid(True, which="major", alpha=0.25)
     ax2.legend(fontsize=8, frameon=False, loc="upper left")
+
+    fys = np.array([f_star[s] for s in SCALES])
+    ax3.loglog(xs, fys, "o", color=MEASURED, ms=8, label="measured best hand-over radius", zorder=3)
+    for (name, (amp, rms)), colour, style in zip(f_fit.items(), (HILL, LAPLACE), ("-", "--")):
+        ax3.loglog(xs, amp * xs ** (1.0 / 3.0 if name == "Hill" else 0.4), style, color=colour, lw=2,
+                   label=f"{name} scaling: rms misfit {100 * rms:.0f}%")
+    ax3.set_xlabel("planet mass scale s (x Earth; periapsis scaled with it)")
+    ax3.set_ylabel("best hand-over radius r* (km)")
+    ax3.set_title(f"Patched conics: s^{f_slope:.2f}, between the two", fontsize=11, color=INK)
+    ax3.grid(True, which="major", alpha=0.25)
+    ax3.legend(fontsize=8, frameon=False, loc="upper left")
     fig.tight_layout()
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT, dpi=150)

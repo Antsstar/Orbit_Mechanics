@@ -78,7 +78,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cas
 import numpy as np
 from numpy.typing import NDArray
 
-from .hierarchy import EncounterSpec
+from .hierarchy import EncounterSpec, PatchSpec
 from .access import (
     AccessMetrics, AccessSpec, access_grid, compare_windows, windows_from_positions,
     windows_from_simulation, windows_from_truth,
@@ -147,7 +147,8 @@ class ModelConfig(object):
     `EncounterPolicy`), registered by `apply_config` after the propagator, so the formation radius is a
     sweep axis. A pair the configuration cannot pair (a non-Keplerian member, say) is not refused: the
     encounter is logged as a skip in `Simulation.hierarchy_changes`, which is the honest result for
-    that configuration.
+    that configuration. `patches` (`hierarchy.PatchSpec`) do the same for patched conics: a massless
+    body handed to a planet inside one radius and back beyond another.
     """
     name: str
     propagator: PropagatorType
@@ -160,6 +161,7 @@ class ModelConfig(object):
     compiled: Optional[bool] = None
     integrator: Optional[str] = None
     encounters: Sequence[EncounterSpec] = field(default_factory=tuple)
+    patches: Sequence[PatchSpec] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -305,6 +307,13 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
                 raise KeyError(f"config '{config.name}': encounter body {body_name!r} is not in this "
                                f"simulation; have {sorted(sim.name_to_index)}")
         sim.watch_encounter(sim.name_to_index[enc.a], sim.name_to_index[enc.b], enc.policy)
+    for patch in config.patches:
+        for body_name in (patch.body, patch.planet):
+            if body_name not in sim.name_to_index:
+                raise KeyError(f"config '{config.name}': patch body {body_name!r} is not in this "
+                               f"simulation; have {sorted(sim.name_to_index)}")
+        sim.watch_patch(sim.name_to_index[patch.body], sim.name_to_index[patch.planet], patch.policy,
+                        patch.target)
 
     return idx
 

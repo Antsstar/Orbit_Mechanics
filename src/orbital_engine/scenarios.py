@@ -45,6 +45,7 @@ __all__ = [
     "sun_synchronous_satellites", "sun_synchronous_inclination_deg", "sso_satellite_name",
     "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME", "artemis3_rendezvous", "LANDER_NAME",
     "asteroid_encounter", "ASTEROID_A", "ASTEROID_B", "MU_CERES", "MU_VESTA", "AU_KM",
+    "planet_flyby", "FLYBY_CRAFT", "FLYBY_PLANET",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -1364,4 +1365,77 @@ def asteroid_encounter(
         ))
     session.commit()
     return Simulation(body_names=["Sun", ASTEROID_A, ASTEROID_B], system_names=["Solar System"],
+                      session=session, max_capacity=capacity)
+
+
+FLYBY_CRAFT = "Probe"
+FLYBY_PLANET = "Earth"
+
+
+def planet_flyby(
+    session: Session,
+    *,
+    mu_planet: float = MU_EARTH,
+    orbit_radius_km: float = AU_KM,
+    periapsis_km: float = 10000.0,
+    v_inf_km_s: float = 3.0,
+    t_ca_s: float = 30.0 * 86400.0,
+    capacity: int = 16,
+) -> Simulation:
+    """
+    A massless probe flying past a planet `t_ca_s` after the start: the patched-conic case for
+    `hierarchy.reparent` / `watch_patch`. Sun and `FLYBY_PLANET` (default Earth's mass on a circular
+    1 AU orbit) and `FLYBY_CRAFT`.
+
+    The geometry is set **at periapsis**: the probe is `periapsis_km` from the planet on its sunward
+    side, moving out of the ecliptic at the hyperbolic periapsis speed `sqrt(v_inf^2 + 2 mu / r_p)`.
+    A flyby bends the probe far too much (109 degrees for the defaults) for a heliocentric conic to
+    carry it back to the start, so the start is found by **time reversal** instead: velocities
+    negated, the N-body system integrated forward `t_ca_s` with `reference.integrate_nbody` (DOP853),
+    velocities negated again. Newtonian gravity is time-reversible, so the N-body truth started from
+    that state passes periapsis as designed, to the integrator's tolerance. Needs scipy (the
+    `[reference]` extra), imported here only.
+    """
+    from .reference import integrate_nbody
+
+    v_planet = math.sqrt((MU_SUN + mu_planet) / orbit_radius_km)
+    v_p = math.sqrt(v_inf_km_s ** 2 + 2.0 * mu_planet / periapsis_km)
+    pos = np.array([[0.0, 0.0, 0.0],
+                    [orbit_radius_km, 0.0, 0.0],
+                    [orbit_radius_km - periapsis_km, 0.0, 0.0]])
+    vel = np.array([[0.0, 0.0, 0.0],
+                    [0.0, v_planet, 0.0],
+                    [0.0, v_planet, v_p]])
+    back = integrate_nbody(np.array([MU_SUN, mu_planet, 0.0]), pos, -vel, np.array([0.0, t_ca_s]))
+    r0 = back.positions[-1] - back.positions[-1][0]          # relative to the Sun
+    v0 = -(back.velocities[-1] - back.velocities[-1][0])
+    coes = []
+    for k, mu in ((1, MU_SUN + mu_planet), (2, MU_SUN)):
+        coe, ok = fr.ReferenceFrames.rv_to_coe(r0[k][None, :], v0[k][None, :], np.array([mu]))
+        if not bool(ok[0]):
+            raise ValueError("planet_flyby: degenerate initial orbit.")
+        coes.append(coe[0])
+
+    ssb = VirtualBodyORM(name="SSB")
+    session.add(ssb)
+    session.flush()
+    solar = SystemORM(name="Solar System", barycenter_id=ssb.id)
+    session.add(solar)
+    session.flush()
+    sun = CelestialBodyORM(name="Sun", mu=MU_SUN, system_id=solar.id, radius=696340.0,
+                           p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0)
+    session.add(sun)
+    session.flush()
+    solar.head_body_id = sun.id
+    session.add(CelestialBodyORM(
+        name=FLYBY_PLANET, mu=mu_planet, system_id=solar.id, parent_id=sun.id, radius=EARTH_RADIUS,
+        p=float(coes[0][0]), e=float(coes[0][1]), i=float(coes[0][2]), raan=float(coes[0][3]),
+        arg_pe=float(coes[0][4]), theta=float(coes[0][5])))
+    session.add(VesselORM(
+        name=FLYBY_CRAFT, mu=0.0, system_id=solar.id, parent_id=sun.id,
+        dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+        p=float(coes[1][0]), e=float(coes[1][1]), i=float(coes[1][2]), raan=float(coes[1][3]),
+        arg_pe=float(coes[1][4]), theta=float(coes[1][5])))
+    session.commit()
+    return Simulation(body_names=["Sun", FLYBY_PLANET, FLYBY_CRAFT], system_names=["Solar System"],
                       session=session, max_capacity=capacity)

@@ -229,7 +229,7 @@ def _release_slot(sim: "Simulation", s: int) -> None:
 # --- Encounters: forming and dissolving a pair by event ----------------------------------------------
 
 #: Units an `EncounterPolicy`'s radii can be given in.
-ENCOUNTER_UNITS = ("km", "hill")
+ENCOUNTER_UNITS = ("km", "hill", "laplace")
 
 
 @dataclass(frozen=True)
@@ -244,8 +244,13 @@ class EncounterPolicy:
     `unit="hill"` reads both radii as multiples of the pair's Hill radius (`hill_radius_km`),
     evaluated **at every event evaluation**, so the threshold follows the pair as its distance from
     the outer primary changes. That makes a policy dimensionless and transferable between scenarios;
-    whether one multiple is right across masses is what `benchmarks/encounter_sweep.py` measures. The
-    field names keep `_km` for the default unit.
+    whether one multiple is right across masses is what `benchmarks/encounter_sweep.py` measures.
+    `unit="laplace"` does the same with the Laplace sphere of influence `R (m / M)^(2/5)`, the
+    textbook patched-conic boundary, so the two can be compared as configurations. The field names
+    keep `_km` for the default unit.
+
+    The same policy drives patched conics (`patch_events`): there `form_km` is where a massless body
+    is handed to the planet and `dissolve_km` where it is handed back, and the radius is the planet's.
     """
 
     form_km: float
@@ -264,14 +269,54 @@ class EncounterPolicy:
             raise ValueError(f"EncounterPolicy unit={self.unit!r}: use one of {ENCOUNTER_UNITS}.")
 
     def radii_km(self, sim: "Simulation", a: int, b: int) -> Tuple[float, float]:
-        """`(form, dissolve)` in km for the pair now: the radii themselves, or times its Hill radius."""
-        scale = hill_radius_km(sim, a, b) if self.unit == "hill" else 1.0
+        """`(form, dissolve)` in km for the pair now: the radii themselves, or times its Hill or
+        Laplace radius."""
+        scale = 1.0 if self.unit == "km" else _pair_radius_km(sim, a, b, self.unit)
+        return self.form_km * scale, self.dissolve_km * scale
+
+    def entity_radii_km(self, sim: "Simulation", entity: int) -> Tuple[float, float]:
+        """`(form, dissolve)` in km about one body or system (`entity`): the radii, or times the
+        entity's Hill or Laplace radius about its own parent (`sphere_radius_km`)."""
+        scale = 1.0 if self.unit == "km" else sphere_radius_km(sim, entity, self.unit)
         return self.form_km * scale, self.dissolve_km * scale
 
 
 def separation_km(sim: "Simulation", a: int, b: int) -> float:
     """Distance between two bodies' global positions, km."""
     return float(np.linalg.norm(sim.global_states[a, :3] - sim.global_states[b, :3]))
+
+
+def _scaled_radius(r: float, m: float, big_m: float, unit: str) -> float:
+    if unit == "hill":
+        return r * float(np.cbrt(m / (3.0 * big_m)))
+    return r * float(np.exp(0.4 * np.log(m / big_m)))       # laplace: R (m / M)^(2/5)
+
+
+def sphere_radius_km(sim: "Simulation", entity: int, unit: str = "hill") -> float:
+    """
+    The Hill (`R (m / 3M)^(1/3)`) or Laplace (`R (m / M)^(2/5)`) radius of a body or system about its
+    own Keplerian parent, now: `m` the entity's `mu` (summed, for a system), `M` the parent's, `R`
+    their current separation. A head is measured as its whole system (Earth as the Earth-Moon
+    barycentre), since that is what orbits the outer parent.
+    """
+    e = int(sim.body_sys_map[entity]) if sim.is_head[entity] else int(entity)
+    parent = int(sim.parent_indices[e])
+    if parent == e:
+        raise ValueError("a root has no parent to measure a sphere of influence against.")
+    r = float(np.linalg.norm(sim.global_states[e, :3] - sim.global_states[parent, :3]))
+    return _scaled_radius(r, float(sim.mu_array[e]), float(sim.mu_array[parent]), unit)
+
+
+def _pair_radius_km(sim: "Simulation", a: int, b: int, unit: str) -> float:
+    if unit == "hill":
+        return hill_radius_km(sim, a, b)
+    m = float(sim.mu_array[a] + sim.mu_array[b])
+    s = int(sim.body_sys_map[a])
+    paired = s == int(sim.body_sys_map[b]) and bool(sim.is_head[a] or sim.is_head[b])
+    parent = int(sim.parent_indices[s]) if paired else int(sim.parent_indices[a])
+    cm = (sim.mu_array[a] * sim.global_states[a, :3] + sim.mu_array[b] * sim.global_states[b, :3]) / m
+    r = float(np.linalg.norm(cm - sim.global_states[parent, :3]))
+    return _scaled_radius(r, m, float(sim.mu_array[parent]), unit)
 
 
 def hill_radius_km(sim: "Simulation", a: int, b: int) -> float:
@@ -377,3 +422,161 @@ def watch_encounter(sim: "Simulation", a: int, b: int, policy: EncounterPolicy) 
     if separation_km(sim, a, b) < policy.radii_km(sim, a, b)[0]:
         _form_if_eligible(sim, a, b)
     return form_event, dissolve_event
+
+
+# --- Reparenting a massless body: patched conics -------------------------------------------------------
+
+def _bubble_for_parent(sim: "Simulation", parent: int) -> int:
+    """The kinematic bubble a body orbiting `parent` belongs to: the system itself when the parent is
+    a barycentre (the body sees the system as one point, its summed `mu`); the head's system when the
+    parent heads one (the body orbits it inside that bubble, like a satellite of Earth inside the
+    Earth-Moon system); otherwise the parent alone, a point-mass bubble."""
+    if sim.is_system[parent]:
+        return parent
+    if sim.is_head[parent]:
+        return int(sim.body_sys_map[parent])
+    return parent
+
+
+def reparent_refusal(sim: "Simulation", body: int, parent: int) -> Optional[str]:
+    """Why `reparent(body, parent)` would refuse, or `None` if it would not. A pure read."""
+    body, parent = int(body), int(parent)
+    names = {v: k for k, v in sim.name_to_index.items()}
+    for k in (body, parent):
+        if not (0 <= k < sim.max_capacity) or not sim.active_mask[k]:
+            return f"slot {k} is not active."
+    if body == parent:
+        return "a body cannot be its own parent."
+    if sim.is_system[body] or sim.is_head[body]:
+        return f"{names[body]!r} is a system or a head; only a plain body can be reparented."
+    if sim.mu_array[body] != 0.0:
+        return (f"{names[body]!r} has mass; reparenting a massive body changes reflex kicks and summed "
+                f"masses, which is form_system's job, not a patched conic's.")
+    kind = sim.propagator_type[body]
+    if kind not in (np.uint8(PropagatorType.KEPLERIAN), np.uint8(PropagatorType.COWELL)):
+        return (f"{names[body]!r} is {PropagatorType(int(kind)).name}; only Keplerian and Cowell bodies "
+                f"can be reparented (secular J2's rates belong to its parent).")
+    from .gravity import POINT_MASS_MODEL
+    from .registry import get_force_model
+    pm_bit = np.uint64(1) << np.uint64(get_force_model(POINT_MASS_MODEL).bit)
+    if int(sim.force_model_mask[body] & ~pm_bit) != 0:
+        return (f"{names[body]!r} carries force models beyond point_mass_gravity; their coefficients "
+                f"(J2, an atmosphere) belong to its current parent and would be applied to the new one.")
+    one = np.array([body], dtype=np.int64)
+    deps = _dependants(sim, one, one)
+    if deps.size:
+        return f"{[names[int(k)] for k in deps]} depend on {names[body]!r}; not supported yet."
+    return None
+
+
+def reparent(sim: "Simulation", body: int, parent: int) -> int:
+    """
+    Make massless `body` orbit `parent` from now on: a patched-conic switch, and a change of frame
+    only (its global state is kept; its local state and elements are re-derived against the new
+    parent). Returns the body's new kinematic bubble (`_bubble_for_parent`).
+
+    `parent` may be a barycentre: the body then orbits the system as one point mass, with the
+    system's summed `mu`. That is the monopole approximation of the system; its error is the system's
+    quadrupole, of relative size `(d / r)^2` for an inner separation `d`, so that switch has its own
+    radius, not the Hill radius. Refusals (`reparent_refusal`) are checked before anything changes.
+    """
+    refusal = reparent_refusal(sim, body, parent)
+    if refusal is not None:
+        raise ValueError(refusal)
+    body, parent = int(body), int(parent)
+    bubble = _bubble_for_parent(sim, parent)
+    sim.parent_indices[body] = parent
+    sim.body_sys_map[body] = bubble
+    _restructure(sim)
+    sim._rehydrate_coes(rows=np.array([body], dtype=np.int64))
+    names = {v: k for k, v in sim.name_to_index.items()}
+    sim._hierarchy_log.append(HierarchyChange(float(sim.t), "reparent", names[body], (body, parent), bubble))
+    return bubble
+
+
+@dataclass(frozen=True)
+class PatchSpec:
+    """A massless body, a planet (body or system) it may be handed to, and the radii: what
+    `sweep.ModelConfig.patches` holds. `target` is what the body orbits once inside: the planet itself
+    (`"body"`) or, when the planet heads a system, that system's barycentre (`"system"`)."""
+
+    body: str
+    planet: str
+    policy: EncounterPolicy
+    target: str = "body"
+
+
+def _patch_targets(sim: "Simulation", planet: int, target: str) -> Tuple[int, int, int]:
+    """`(entity, inside, outside)`: what the radius is measured about, what the body is handed to
+    inside, and what it is handed back to outside."""
+    entity = int(sim.body_sys_map[planet]) if sim.is_head[planet] else int(planet)
+    if target == "system":
+        if not sim.is_head[planet]:
+            raise ValueError("target='system' needs a planet that heads a system.")
+        inside = entity
+    elif target == "body":
+        inside = int(planet)
+    else:
+        raise ValueError(f"target={target!r}: use 'body' or 'system'.")
+    return entity, inside, int(sim.parent_indices[entity])
+
+
+def patch_events(sim: "Simulation", body: int, planet: int, policy: EncounterPolicy,
+                 target: str = "body") -> Tuple[events.Event, events.Event]:
+    """
+    Patched conics as events: `body`'s distance from `planet` falling through `form_km` hands it to
+    the planet (or its system, `target="system"`), rising through `dissolve_km` hands it back to the
+    parent the planet orbits. Radii in km, or in the planet's Hill or Laplace radius about its own
+    parent, evaluated live (`EncounterPolicy.entity_radii_km`). Stateless like `encounter_events`: the
+    actions read the body's current parent. Needs `sim` only to resolve the planet's system and
+    outer parent, which a restructure elsewhere does not change. An ineligible handover is logged as a
+    `"skip"`. Keep `dt` below `form_km / v_inf`, as for encounters.
+    """
+    body, planet = int(body), int(planet)
+    entity, inside, outside = _patch_targets(sim, planet, target)
+    bodies = np.array([body], dtype=np.int64)
+
+    def dist(s: "Simulation") -> float:
+        return float(np.linalg.norm(s.global_states[body, :3] - s.global_states[planet, :3]))
+
+    def g_in(s: "Simulation", _b: NDArray[np.int64]) -> NDArray[np.float64]:
+        return np.array([dist(s) - policy.entity_radii_km(s, entity)[0]], dtype=np.float64)
+
+    def g_out(s: "Simulation", _b: NDArray[np.int64]) -> NDArray[np.float64]:
+        return np.array([dist(s) - policy.entity_radii_km(s, entity)[1]], dtype=np.float64)
+
+    def hand(s: "Simulation", to: int) -> None:
+        if int(s.parent_indices[body]) == to:
+            return
+        refusal = reparent_refusal(s, body, to)
+        if refusal is None:
+            reparent(s, body, to)
+        else:
+            names = {v: k for k, v in s.name_to_index.items()}
+            s._hierarchy_log.append(HierarchyChange(
+                float(s.t), "skip", names[body], (body, to), -1, refusal))
+
+    def enter(s: "Simulation", fired: NDArray[np.int64], t: float) -> None:
+        hand(s, inside)
+
+    def leave(s: "Simulation", fired: NDArray[np.int64], t: float) -> None:
+        hand(s, outside)
+
+    return (events.Event(name="patch: enter", function=g_in, bodies=bodies, direction=-1,
+                         tol_s=policy.tol_s, action=enter),
+            events.Event(name="patch: leave", function=g_out, bodies=bodies, direction=1,
+                         tol_s=policy.tol_s, action=leave))
+
+
+def watch_patch(sim: "Simulation", body: int, planet: int, policy: EncounterPolicy,
+                target: str = "body") -> Tuple[events.Event, events.Event]:
+    """Register `patch_events` on `sim`, and hand the body over now if it already starts inside
+    `form_km`. Returns the two events."""
+    enter_event, leave_event = patch_events(sim, body, planet, policy, target)
+    sim.add_event(enter_event)
+    sim.add_event(leave_event)
+    entity, inside, _ = _patch_targets(sim, int(planet), target)
+    d = float(np.linalg.norm(sim.global_states[int(body), :3] - sim.global_states[int(planet), :3]))
+    if d < policy.entity_radii_km(sim, entity)[0] and int(sim.parent_indices[int(body)]) != inside:
+        reparent(sim, body, inside)
+    return enter_event, leave_event

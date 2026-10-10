@@ -1739,6 +1739,17 @@ class Simulation:
         `policy.dissolve_km`, at the located crossing epochs. See `hierarchy.encounter_events`."""
         return hierarchy.watch_encounter(self, a, b, policy)
 
+    def reparent(self, body: int, parent: int) -> int:
+        """Hand massless `body` to `parent` (a body or a barycentre): a patched-conic switch, a change
+        of frame only. Returns the body's new bubble. See `hierarchy.reparent`."""
+        return hierarchy.reparent(self, body, parent)
+
+    def watch_patch(self, body: int, planet: int, policy: hierarchy.EncounterPolicy,
+                    target: str = "body") -> Tuple[events.Event, events.Event]:
+        """Hand `body` to `planet` inside `policy.form_km` and back beyond `policy.dissolve_km`, at the
+        located crossing epochs. See `hierarchy.patch_events`."""
+        return hierarchy.watch_patch(self, body, planet, policy, target)
+
     @property
     def hierarchy_changes(self) -> tuple[hierarchy.HierarchyChange, ...]:
         """Every form, dissolve and skipped encounter so far, in order (`hierarchy.HierarchyChange`)."""

@@ -865,8 +865,12 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        Hill radius and scales as s^0.328. That is the Hill exponent (0.333), not the Laplace sphere of
        influence (0.400) first predicted. Pairing anywhere near it is ~200x closer to N-body truth
        than not pairing.
+     - temporary systems, phase 4: patched conics. A massless probe is handed to a planet, or to a
+       system barycentre as one point mass, and back by event. On a 109 deg Earth flyby this is 68x
+       closer to N-body truth than never handing over. Even so, it is still 2e5 km off after 30 days,
+       because a strong flyby amplifies any arrival error. The best hand-over radius does not
+       separate Hill from Laplace scaling
    - **Planned:**
-     - patched-conic reparenting, including a body orbiting a system barycentre as one point mass
      - regime-based propagator switching, judged on the cost-error frontier
      - a system's field beyond the monopole as a fidelity ladder for outside bodies: averaged
        quadrupole, then the periodic (Fourier) quadrupole at harmonics of the inner orbits

@@ -125,7 +125,9 @@ hierarchy becoming unresolvable.
 The consequence to be aware of: **`sim.parent_indices` is not what the database declared**, so the
 arena cannot be reconstructed from its own state alone. The intended eventual resolution is temporary
 system functionality — synthesising a transient system for a partially loaded hierarchy — which would
-let the declared graph survive intact. Until then this is documented behaviour, not an accident.
+let the declared graph survive intact. Until then this is documented behaviour, not an accident. The
+same step also rewrites a body declared to orbit a barycentre to orbit that system's head, so a
+monopole parent is available only at runtime (`hierarchy.reparent`).
 
 ---
 
@@ -2351,6 +2353,54 @@ size, not of its Hill radius. The arena can already represent a massless body or
 barycentre as a point mass with the summed `mu`: rewired at runtime with parent and bubble both set
 to the barycentre, a satellite follows that conic to 1e-7 km. The database build, however, rewrites
 a barycentre parent to the head. Phase 4's `reparent` makes the barycentre a supported parent.
+
+### Phase 4: reparenting a massless body, and patched conics
+
+`hierarchy.reparent(sim, body, parent)` (`Simulation.reparent`) hands a massless body to a new
+parent, as a change of frame like everything else in this section. The body's bubble follows from
+what the parent is (`_bubble_for_parent`):
+- **a barycentre:** the bubble is that system, and the body orbits it as one point with the summed
+  `mu`. This is the monopole;
+- **a head:** the bubble is the head's system, like a satellite of Earth inside the Earth-Moon bubble;
+- **anything else:** the bubble is the parent alone.
+
+The refusals:
+- **A massive body** is refused, because moving it would change reflex kicks and summed masses. That
+  is `form_system`'s job.
+- **Secular J2** is refused, because its rates belong to the old parent.
+- **Any force model but `point_mass_gravity`** is refused, because J2 or an atmosphere would be
+  silently applied to the new parent. `point_mass_gravity` reads the parent live, and the Cowell
+  plan's primaries are rebuilt by the restructure.
+
+**Patched conics.** `patch_events` / `Simulation.watch_patch` / `ModelConfig.patches`
+(`PatchSpec`) work as follows:
+- the body's distance from a planet falling through `form_km` hands it to the planet, or to the
+  planet's system with `target="system"`;
+- the distance rising through `dissolve_km` hands it back to the parent the planet orbits.
+
+The radii come from the same `EncounterPolicy`: in km, or in the planet's live Hill or Laplace radius
+about its own parent (`sphere_radius_km`, which measures a head as its whole system). `unit="laplace"`
+is the textbook patched-conic sphere of influence, so the two can be compared as configurations.
+
+**Measured** on `scenarios.planet_flyby` (`tests/validation/test_reparent.py`, third panel of
+`docs/figures/encounters.png`):
+- **The scenario.** The flyby is a strong one: 10,000 km periapsis at v_inf 3 km/s, a 109 deg turn. No
+  heliocentric conic can carry the probe back to its start, so the scenario is built by time reversal:
+  velocities negated, N-body integrated forward, velocities negated again. The truth then passes
+  periapsis at 10,000.0 km at day 30.0, as designed.
+- **Never handed over:** 1.38e7 km at day 60.
+- **Handed over inside 0.76 Hill radii** (handed back at 1.05x): 2.0e5 km. That is 68x better but
+  still large, because a 109 deg bend amplifies any error in where the probe arrives. Patched conics
+  are a design tool on a flyby like this, not a propagator. Hold the probe on Cowell near the planet
+  instead: that is the regime switch of phase 5.
+- **Best hand-over radius against planet mass** (0.01-10x, periapsis scaled with mass): 0.71-0.86 Hill
+  radii, scaling as `s^0.36`. With fixed slopes, Hill misfits by 8% and Laplace by 10%. **Unlike the
+  asteroid pair, this does not separate the two.** The 10x case starts only 2.6 Hill radii out, which
+  confounds the top point. Reporting it as undecided is the honest reading.
+
+The same velocity argument predicts Hill scaling here as well. That this flyby does not show it
+cleanly may be because the error is dominated by arrival-geometry amplification rather than by the
+integrated velocity error. It is unmeasured which.
 
 Beyond the monopole, the fidelity ladder continues. An inner pair's quadrupole rotates with its
 orbit, so the field outside is periodic at harmonics of the inner mean motion (`2n` for a circular
