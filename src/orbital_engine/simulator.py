@@ -1359,6 +1359,8 @@ class Simulation:
         bias, and it is asserted against that derived bound in the same test file rather than assumed
         negligible.
         """
+        for tracker in self._attitude_trackers:
+            tracker.write_thrust_direction(self)
         if not self._manoeuvres and not self._events:
             self._advance(dt)
             for tracker in self._attitude_trackers:

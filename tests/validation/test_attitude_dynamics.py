@@ -12,7 +12,7 @@ Expected, derived before measuring:
   the spin when `I3 > I`; the first version of this docstring had the sign backwards).
 - **A small-angle step is a second-order system.** Each axis has `omega_n = sqrt(k_p / 2I)` and
   `zeta = k_d / (2 sqrt(k_p I / 2))`, because the quaternion error's vector part is half the angle. At
-  `zeta = 0.5` the overshoot is `exp(-pi zeta / sqrt(1 - zeta^2)) = 16.30 %`. *Measured* 16.29 %.
+  `zeta = 0.5` the overshoot is `exp(-pi zeta / sqrt(1 - zeta^2)) = 16.30 %`. *Measured* 16.297 % (16.29 % before the inertial law held its roll, when its target turned slowly).
 - **A rotating target is tracked without steady error.** Nadir pointing turns at the orbital rate, and
   with the target's rate fed forward the loop is type 2: after the transient the error falls to the
   slerp-interpolation level within a step. Without feed-forward it settles at `2 k_d n / k_p` (6.6e-3
@@ -89,8 +89,8 @@ def test_small_angle_step_overshoot(db_session: Session) -> None:
     sim, name = _sim(db_session)
     inertia, kp, zeta = 10.0, 0.2, 0.5
     kd = 2.0 * zeta * math.sqrt(kp * inertia / 2.0)
-    # The inertial law's target is not the identity: its +x follows the orbit's velocity, so it turns
-    # slowly. The error is measured against the tracker's own target, as the controller sees it.
+    # The inertial law's target is not the identity (its roll is a fixed axis made perpendicular to the
+    # boresight). The error is measured against the tracker's own target, as the controller sees it.
     start = AttitudeTracker(sim, [name], INERTIAL, RigidBody((inertia,) * 3), None).q
     tr = AttitudeTracker(sim, [name], INERTIAL, RigidBody((inertia,) * 3), PointingController(kp, kd),
                          q0=quat_mul(start, _rotation_x(0.01)), max_substep_s=0.1)

@@ -43,6 +43,23 @@ during event trial propagations). Within the step it takes RK4 sub-steps of at m
 with the target slerped between its start-of-step and end-of-step values and `omega_target` constant
 across the step. The pointing law's target at each end is exact; between them the slerp is the
 interpolation error (the target turns at most `n dt` in a step).
+
+Body-fixed thrust
+-----------------
+`AttitudeTracker.steer_thrust(sim, axis_body)` fixes the tracked vessels' `"thrust"` direction to a body
+axis. At the start of every real step the simulation writes `R(q) axis_body`, re-expressed in each
+vessel's RSW frame about its Keplerian parent, into the thrust model's direction columns, scaled by
+the norm the columns already held: **the configured direction's norm stays the throttle, the attitude
+supplies the direction**, so a coast (`(0, 0, 0)`) stays a coast and an event that sets a throttle is
+not overwritten.
+
+The direction is then held fixed *in RSW* for the step, exactly as the thrust model holds any
+direction, so a vessel that tracks an RSW-fixed law (`velocity` on a circular orbit) reproduces the
+ideal-direction burn. It is the start-of-step attitude, because the attitude is advanced after the
+orbits (it needs their end-of-step state for its target): the direction lags by half a step on
+average, which is **first order in `dt`** while the body turns relative to RSW - during a slew, an
+error of ~`omega_slew dt / 2` rad in the direction. Like the frozen mass, halve `dt` to halve it.
+`body_dv_rsw` gives the same re-expression for an impulse along a body axis.
 """
 from __future__ import annotations
 
@@ -54,6 +71,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .attitude import Attitude, attitude_matrix
+from .frames import ReferenceFrames
 
 if TYPE_CHECKING:
     from .simulator import Simulation
@@ -156,8 +174,9 @@ class AttitudeTracker:
     """
     Rigid-body attitude for `vessels` (names) of a `Simulation`, each driven toward its pointing `law`
     by `controller`. Attach with `Simulation.attach_attitude_tracker(tracker)`; each real step then
-    advances it (see the module docstring). Starts aligned with the law and at its rate unless `q0` /
-    `omega0` are given. `record=True` keeps every step's boresights for the link scan
+    advances it (see the module docstring). Starts aligned with the law and **at rest** unless `q0` /
+    `omega0` are given, so a law that turns (nadir, velocity: at the orbit rate `n`) begins with a
+    transient of ~`n / omega_n` rad; pass the law's rate as `omega0` to start on it. `record=True` keeps every step's boresights for the link scan
     (`isl_scale.link_contact_table(..., boresights=...)`).
     """
 
@@ -182,6 +201,7 @@ class AttitudeTracker:
         self.omega: NDArray[np.float64] = (np.zeros((len(vessels), 3)) if omega0 is None
                                            else np.asarray(omega0, dtype=np.float64).copy())
         self.record = record
+        self.thrust_axis: Optional[NDArray[np.float64]] = None
         self.times: List[float] = []
         self.history: List[NDArray[np.float64]] = []
         if record:
@@ -242,6 +262,53 @@ class AttitudeTracker:
         self.q, self.omega, self._target = q, w, q_t1
         if self.record:
             self._record(float(sim.t))
+
+    # -- body-fixed thrust and impulses --------------------------------------------------------------
+    def steer_thrust(self, sim: "Simulation", axis_body: Sequence[float] = (0.0, 0.0, 1.0)) -> None:
+        """Point the tracked vessels' `"thrust"` force model along the body axis `axis_body` (normalised)
+        from now on; see "Body-fixed thrust" in the module docstring. Every vessel must already carry
+        `"thrust"`, and the tracker must be attached (`Simulation.attach_attitude_tracker`)."""
+        from .registry import get_force_model
+        from .thrust import THRUST_MODEL
+        axis = np.asarray(axis_body, dtype=np.float64)
+        norm = float(np.linalg.norm(axis))
+        if axis.shape != (3,) or not norm > 0.0:
+            raise ValueError(f"thrust axis {axis_body!r} must be a non-zero 3-vector")
+        bit = np.uint64(1) << np.uint64(get_force_model(THRUST_MODEL).bit)
+        bare = [n for n, k in zip(self.names, self.slots.tolist()) if not sim.force_model_mask[k] & bit]
+        if bare:
+            raise ValueError(f"vessels {bare} do not carry the {THRUST_MODEL!r} force model; enable it "
+                             f"first (its direction norm is the throttle)")
+        if self not in sim._attitude_trackers:
+            raise ValueError("attach the tracker (Simulation.attach_attitude_tracker) before steering thrust")
+        self.thrust_axis = axis / norm
+
+    def _rsw(self, sim: "Simulation") -> NDArray[np.float64]:
+        parents = sim.parent_indices[self.slots]
+        rel = sim.global_states[self.slots] - sim.global_states[parents]
+        basis, ok = ReferenceFrames.RSW_basis(rel[:, :3], rel[:, 3:])
+        if not bool(np.all(ok)):
+            raise ValueError("a tracked vessel's RSW frame about its parent is undefined")
+        out: NDArray[np.float64] = np.asarray(basis, dtype=np.float64).reshape(-1, 3, 3)
+        return out
+
+    def body_dv_rsw(self, sim: "Simulation", dv_body: Sequence[float] | NDArray[np.float64]) -> NDArray[np.float64]:
+        """An impulse fixed in the body frame (km/s) re-expressed, per tracked vessel, in its RSW axes about
+        its Keplerian parent, at the vessel's *current* attitude - what `Simulation.apply_delta_v` takes."""
+        inertial = matrix_from_quat(self.q) @ np.asarray(dv_body, dtype=np.float64)
+        out: NDArray[np.float64] = np.einsum("nij,nj->ni", self._rsw(sim), inertial)
+        return out
+
+    def write_thrust_direction(self, sim: "Simulation") -> None:
+        """Write the body-fixed thrust axis, in RSW and at the current throttle, into the thrust model's
+        direction columns. Called by `Simulation.step` at the start of each real step."""
+        if self.thrust_axis is None:
+            return
+        from .thrust import THRUST_MODEL, THRUST_PARAM_NAMES
+        params = sim.force_model_params[THRUST_MODEL]
+        c = THRUST_PARAM_NAMES.index("dir_r")
+        throttle = np.linalg.norm(params[self.slots, c:c + 3], axis=1)
+        params[self.slots, c:c + 3] = throttle[:, None] * self.body_dv_rsw(sim, self.thrust_axis)
 
     # -- what it decides ------------------------------------------------------------------------------
     def boresights(self) -> NDArray[np.float64]:

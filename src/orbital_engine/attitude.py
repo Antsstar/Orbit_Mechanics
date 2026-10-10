@@ -9,8 +9,15 @@ named rule - a configuration, like everything else in the engine - rather than a
 state. Attitude *dynamics* (torques, rates, slews) are not modelled: a vessel is assumed to hold its
 pointing law exactly.
 
-**Body frame.** `+z` is the boresight; `+x` is the vessel's velocity relative to the reference made
-perpendicular to `+z` (or, if they are parallel, any perpendicular); `+y = z x x`. Modes:
+**Body frame.** `+z` is the boresight; `+x` is a secondary direction made perpendicular to `+z`;
+`+y = z x x`. The secondary is the vessel's velocity relative to the reference for `nadir`, `zenith`
+and `target`; the direction *to* the reference for `velocity` (whose boresight already is the
+velocity); and a fixed inertial axis for `inertial`, so an inertial law holds its roll too, not only
+its boresight. Only if the secondary is parallel to `+z` does a fixed fallback axis stand in, and that
+fallback switches axes discontinuously - a roll jump a tracking controller would chase. (Until
+2026-10-10 the secondary was always the velocity: under `velocity` that is the boresight itself, so
+every target came from the switching fallback and rolled abruptly twice an orbit, and under
+`inertial` the roll followed the orbit.) Modes:
 
 - `nadir` / `zenith`: boresight toward / away from the `reference` body's centre (an Earth-observing
   payload; an antenna looking up at relays).
@@ -99,9 +106,15 @@ def attitude_matrix(attitude: Attitude, r: Vec, v: Vec, ref_pos: Optional[Vec] =
     """The 3x3 rotation taking body components to inertial ones (columns are the body x, y, z axes) for
     one vessel at `r`, `v`."""
     z = boresights(attitude, r, v, ref_pos, ref_vel)[0]
-    rel_v = np.asarray(v, dtype=np.float64) - (np.zeros(3) if ref_vel is None else np.asarray(ref_vel, dtype=np.float64))
-    x = rel_v - (rel_v @ z) * z
-    if float(np.linalg.norm(x)) < 1e-12 * max(float(np.linalg.norm(rel_v)), 1.0):
+    if attitude.mode == "velocity":
+        assert ref_pos is not None
+        second = np.asarray(ref_pos, dtype=np.float64) - np.asarray(r, dtype=np.float64)
+    elif attitude.mode == "inertial":
+        second = np.array([1.0, 0.0, 0.0]) if abs(z[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    else:
+        second = np.asarray(v, dtype=np.float64) - (np.zeros(3) if ref_vel is None else np.asarray(ref_vel, dtype=np.float64))
+    x = second - (second @ z) * z
+    if float(np.linalg.norm(x)) < 1e-12 * max(float(np.linalg.norm(second)), 1.0):
         trial = np.array([1.0, 0.0, 0.0]) if abs(z[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
         x = trial - (trial @ z) * z
     x = x / np.linalg.norm(x)

@@ -1557,6 +1557,29 @@ each configuration dominates its error before attributing the win to the axis be
 first-order convergence of *both* frozen Cowells was the clue I had and read past: when two methods
 share an unexpected convergence order, the shared ingredient is the suspect.
 
+## A pointing law whose roll jumped, invisible to everything that only used its boresight
+
+`attitude.attitude_matrix` built the body's +x by making the relative velocity perpendicular to the
+boresight, with a fixed fallback axis when they are parallel. Under the `velocity` law they are
+*always* parallel, so every target came from the fallback. That fallback is `(1,0,0)` unless the
+boresight's x component exceeds 0.9, then `(0,1,0)`: a discontinuous switch, so the target's roll
+jumped twice an orbit.
+
+Nothing that used only the boresight could see it. Cones, link scans and `boresights()` are all roll-free.
+It surfaced when a tracked thruster on the velocity law was compared against the ideal along-track burn.
+The written thrust direction peaked at 0.018 rad off, where the spiral's flight-path angle allows 1.6e-3.
+The controller was chasing the roll jump, and the transient coupled into the boresight.
+
+How it was isolated: the per-step angle series showed the 0.018 rad at a single step in mid-orbit,
+not as a gradual growth. A spike at one step points at a discontinuity in the target, not at the
+dynamics.
+
+Fixed: each mode now has a secondary axis that is never parallel to its boresight in normal use. For
+`velocity` it is the direction to the reference; for `inertial` it is a fixed axis, so that law no
+longer rolls with the orbit. The lesson: **a frame built from "A, made perpendicular to B" needs a test
+where A is near B**. Check every mode's secondary against its own boresight, not just the mode the
+frame was first written for.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

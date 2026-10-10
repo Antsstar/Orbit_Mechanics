@@ -2734,7 +2734,7 @@ measuring:
 - **Precession.** Axisymmetric free precession matches its closed form to 1e-9 rad/s. My first docstring
   had the precession sense backwards; the equations, and the code, have it turning with the spin when
   `I3 > I`.
-- **Step response.** The small-angle overshoot at `zeta = 0.5` is 16.29% (theory 16.30%).
+- **Step response.** The small-angle overshoot at `zeta = 0.5` is 16.297% (theory 16.303%).
 - **Nadir tracking.** The error settles to < 1e-5 rad with feed-forward, and to `2 k_d n / k_p` within
   2% without it.
 - **Slew.** A torque-limited 90 deg slew settles in 325 s, against the bang-bang lower bound of 177 s.
@@ -2759,7 +2759,31 @@ Two first claims in the test were wrong, and both are recorded there. A slew tak
 guess; it was ready at 300 s. "A tracked cone only removes visibility" is false: overshooting, the axis
 swings past Earth and briefly sees satellites the ideal cone does not.
 
-Not yet: body-fixed thrust driven by the tracked attitude.
+**Body-fixed thrust from the tracked attitude** (`tracker.steer_thrust(sim, axis_body)`). At the start of
+each real step the simulation writes `R(q) axis_body`, in the vessel's RSW frame, into the `"thrust"`
+direction columns. The columns' existing norm is kept as the throttle, so a coast stays a coast and a
+throttle an event sets is not overwritten. The direction is then held in RSW for the step, as the thrust
+model holds any direction. It is the *start-of-step* attitude, because the attitude advances after the
+orbits (its target needs their end-of-step state), so the direction lags by half a step: first order in
+`dt`, like the frozen mass. `tracker.body_dv_rsw(sim, dv_body)` is the same re-expression for an impulse.
+
+Measured on a one-orbit, 1 N burn at 550 km (`tests/validation/test_tracked_thrust.py`), against an
+ideal along-track twin:
+- **Holding the velocity law reproduces the ideal burn.** Delta a agrees to 3e-9. The written direction
+  departs from S by exactly the spiral's flight-path angle: 1.6e-3 rad peak and 8.1e-4 mean, against a
+  derived `2 v_eq / v` and `v_eq / v`. The position gap is 0.043 km, 4x my 1e-2 km estimate, because
+  the radial forcing is resonant at the orbital frequency.
+- **A 90 deg slew costs 3.19% of the orbit raising.** That matches the thrust the recorded directions
+  point away (`sum c_k / m_k`, Gauss) to 0.36% of itself.
+- **The lag is first order.** Successive halvings change the ratio by 2.0x, and the Richardson lag at
+  10 s is 8.72e-4, against the derived `dt / (2 T_burn) = 8.71e-4`.
+
+**A pointing-law defect found by it.** Under `velocity`, `attitude_matrix` took the body's +x from the
+velocity, which *is* the boresight, so every target came from the fallback axis. That fallback switches
+when the velocity's x component crosses 0.9, so the target roll jumped twice an orbit, and the
+controller chasing it wobbled the boresight by 0.018 rad. The ideal-law cones never saw it, because a
+roll does not move a boresight. `velocity` now takes its roll from the direction to the reference, and
+`inertial` holds a fixed roll; before, its roll followed the orbit, so it was not inertial.
 
 ---
 
