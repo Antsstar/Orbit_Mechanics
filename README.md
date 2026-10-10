@@ -924,9 +924,10 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        (18 against 54 km at 30 d) instead of after a month
      - a JSON layer (`orbital_engine.api`): a catalog generated from the code (JSON Schema per
        scenario), strict sweep and simulate documents with every error reported against its path, and
-       results bit-identical to the direct calls
+       results bit-identical to the direct calls; served over HTTP (`python -m orbital_engine.api.http`,
+       the `[api]` extra) with sweeps as background jobs
    - **Next:**
-     - an HTTP service and an MCP server over the JSON layer, then visualisation and a general-user UI
+     - an MCP server over the JSON layer, then visualisation and a general-user UI
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

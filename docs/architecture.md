@@ -2823,6 +2823,14 @@ are shells over it with no engine logic of their own.
 - **No physics of its own.** A sweep or a simulation through a document is bit-identical to the
   direct call (`tests/unit/test_api.py`).
 
+**HTTP** (`api/http.py`, FastAPI, the `[api]` extra) is a shell: each route calls one `api` function,
+and an `ApiError` is a 422 with the same document. Sweeps run as jobs, because truth plus every
+configuration can take minutes. The worker pool defaults to one thread, because wall times in a sweep
+are only comparable when sweeps are not competing for the CPU. The queue is bounded and answers 429
+rather than accept work it will not reach. A running sweep cannot be cancelled, because `run_sweep`
+has no interruption point; a queued one can. It binds to localhost with no authentication: a local
+tool for a UI or an agent on the same machine, not a public service.
+
 Not in version 1: encounters, patches, regimes and station keeping in configs (refused by
 `config_to_json`, not dropped), access / ISL metrics, tesseral truth, and `ephemeris_third_body`.
 

@@ -41,6 +41,12 @@ sgp4 = [
 msis = [
     "pymsis>=0.10"
 ]
+# The HTTP service over the JSON layer (orbital_engine/api/http.py). The JSON layer itself
+# (orbital_engine.api) needs nothing beyond the base install; only the HTTP shell does.
+api = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29"
+]
 test = [
     "pytest",
     "pytest-cov",  # Helpful for seeing which lines of code aren't tested yet
@@ -49,7 +55,9 @@ test = [
     "numba>=0.60",  # Included so CI gates the compiled path, not only the fallback.
     "scipy>=1.10",  # Needed by tests/validation/test_reference_agreement.py.
     "sgp4>=2.20",   # Needed by tests/validation/test_sgp4_bridge.py (Vallado's published vectors).
-    "pymsis>=0.10"  # Needed by tests/validation/test_msis*.py (NRLMSIS 2.0 density).
+    "pymsis>=0.10",  # Needed by tests/validation/test_msis*.py (NRLMSIS 2.0 density).
+    "fastapi>=0.110",  # Needed by tests/unit/test_api_http.py (skipped without it).
+    "httpx>=0.27"   # FastAPI's TestClient.
 ]
 dev = [
     "ipykernel",
