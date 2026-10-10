@@ -42,7 +42,7 @@ __all__ = [
     "coe_to_rv_scalar", "solve_kepler_scalar", "secular_j2_propagate", "cowell_rk4_step",
     "rebase_relative_states", "DRAG_LAW_EXPONENTIAL", "DRAG_LAW_LAYERED", "DRAG_LAW_MSIS",
     "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL", "TESSERAL_VW_SIZE",
-    "COWELL_POINT_MASS", "COWELL_J2", "COWELL_ZONAL", "COWELL_DRAG", "COWELL_TESSERAL",
+    "COWELL_POINT_MASS", "COWELL_J2", "COWELL_ZONAL", "COWELL_DRAG", "COWELL_TESSERAL", "COWELL_THIRD_BODY",
     "cowell_leapfrog_step", "cowell_yoshida4_step", "cowell_encke_step",
 ]
 
@@ -781,6 +781,74 @@ def _tesseral_term(
     return ax, ay, az
 
 
+# Columns of `force_model_params["third_body"]` (`thirdbody.THIRD_BODY_PARAM_NAMES`); `kernels` cannot
+# import `thirdbody` (it sits above), and a test asserts these equal its own constants.
+_THIRD_PERTURBER_COL = 0
+_THIRD_STAGED_COL = 1
+_THIRD_T0_COL = 2
+
+
+@njit
+def _third_body_rel(
+    state: NDArray[np.float64], mu_array: NDArray[np.float64], third_params: NDArray[np.float64],
+    row: int, px: float, py: float, pz: float, pvx: float, pvy: float, pvz: float,
+    mu_par: float, t: float,
+) -> tuple[float, float, float, float]:
+    """
+    `(mu_s, r_s)` for body `row` at stage time `t`: the perturber's gravitational parameter and its
+    position relative to the parent (at `(px, py, pz)`, velocity `(pvx, pvy, pvz)`) - the first half of
+    `thirdbody.third_body_kernel`.
+
+    **Why reading `state` here is the reference's behaviour.** A perturber is massive, so it is never a
+    Cowell body (Cowell refuses `mu != 0`), and a Cowell body's parent is never Cowell either (the
+    plan's `parent_is_cowell` test). Neither row is written by any kernel in this file, so they hold
+    their start-of-step values throughout, exactly the frozen rows the NumPy path hands
+    `third_body_kernel` through `state` at every stage.
+
+    `staged == 0`: the start-of-step relative position as is. `staged == 1`: carried along the two-body
+    conic (`mu_s + mu_par`) by `elapsed = t - t0` with `t0` the engine-owned column 2 - **not** this
+    kernel's own step-start argument, which under adaptive sub-stepping is a later sub-step's start
+    while `t0` stays the arena step's. As the reference does, no advance happens at `elapsed == 0.0`.
+    """
+    s = int(third_params[row, _THIRD_PERTURBER_COL])
+    mu_s = mu_array[s]
+    rsx = state[s, 0] - px
+    rsy = state[s, 1] - py
+    rsz = state[s, 2] - pz
+    if third_params[row, _THIRD_STAGED_COL] == 1.0:
+        elapsed = t - third_params[row, _THIRD_T0_COL]
+        if elapsed != 0.0:
+            rsx, rsy, rsz, _vx, _vy, _vz = _kepler_advance_scalar(
+                rsx, rsy, rsz, state[s, 3] - pvx, state[s, 4] - pvy, state[s, 5] - pvz,
+                elapsed, mu_s + mu_par)
+    return mu_s, rsx, rsy, rsz
+
+
+@njit
+def _third_body_term(
+    ax: float, ay: float, az: float,
+    px: float, py: float, pz: float, cx: float, cy: float, cz: float,
+    mu_s: float, rsx: float, rsy: float, rsz: float,
+) -> tuple[float, float, float]:
+    """Add `mu_s [ (r_s - r)/|r_s - r|^3 - r_s/|r_s|^3 ]` to `(ax, ay, az)`, `r` the body relative to its
+    parent: the second half of `thirdbody.third_body_kernel`, in its operation order. A zero separation
+    contributes exactly 0.0 to its term, as the reference's `where=` does."""
+    dx = rsx - (cx - px)
+    dy = rsy - (cy - py)
+    dz = rsz - (cz - pz)
+    d2 = dx * dx + dy * dy + dz * dz
+    s2 = rsx * rsx + rsy * rsy + rsz * rsz
+    inv_d3 = 0.0
+    inv_s3 = 0.0
+    if d2 > 0.0:
+        inv_d3 = 1.0 / (d2 * math.sqrt(d2))
+    if s2 > 0.0:
+        inv_s3 = 1.0 / (s2 * math.sqrt(s2))
+    return (ax + mu_s * (dx * inv_d3 - rsx * inv_s3),
+            ay + mu_s * (dy * inv_d3 - rsy * inv_s3),
+            az + mu_s * (dz * inv_d3 - rsz * inv_s3))
+
+
 @njit
 def _cowell_accel(
     px: float, py: float, pz: float,
@@ -794,6 +862,8 @@ def _cowell_accel(
     tables: NDArray[np.float64], n_nodes: int,
     has_zonal: bool, zonal_params: NDArray[np.float64], row: int,
     has_tesseral: bool, tesseral_params: NDArray[np.float64], t: float, vw: NDArray[np.float64],
+    has_third: bool, third_params: NDArray[np.float64], state: NDArray[np.float64],
+    mu_array: NDArray[np.float64],
 ) -> tuple[float, float, float]:
     """
     Acceleration on one body at candidate state `(cx, cy, cz, cvx, cvy, cvz)` and time `t` with its
@@ -836,6 +906,10 @@ def _cowell_accel(
         cos_t, sin_t = _tesseral_angle(tesseral_params, row, t)
         ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par, tesseral_params, row,
                                     cos_t, sin_t, vw)
+    if has_third:
+        mu_s, rsx, rsy, rsz = _third_body_rel(state, mu_array, third_params, row, px, py, pz,
+                                              pvx, pvy, pvz, mu_par, t)
+        ax, ay, az = _third_body_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_s, rsx, rsy, rsz)
     return ax, ay, az
 
 
@@ -849,6 +923,7 @@ COWELL_J2 = 2
 COWELL_ZONAL = 4
 COWELL_DRAG = 8
 COWELL_TESSERAL = 16
+COWELL_THIRD_BODY = 32
 
 
 @njit
@@ -868,6 +943,7 @@ def cowell_rk4_step(
     density_meta: NDArray[np.float64],
     tesseral_params: NDArray[np.float64],
     tesseral_vw: NDArray[np.float64],
+    third_params: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> int:
     """
@@ -925,6 +1001,12 @@ def cowell_rk4_step(
     unlike `RK4Integrator` this needs no stage scratch; the one array scratch is `tesseral_vw`, the
     caller-owned `(2, TESSERAL_VW_SIZE, TESSERAL_VW_SIZE)` V/W table the tesseral recursion fills per
     evaluation (arena-owned, `Simulation._cowell_tesseral_vw`), so the kernel allocates nothing.
+
+    **Third body.** `third_params` is `force_model_params["third_body"]` (a one-row dummy when no
+    body has the bit); a row is read only behind `COWELL_THIRD_BODY`. The perturber and parent rows of
+    `state` are frozen at their start-of-step values across the stages (see `_third_body_rel`); a
+    `staged == 1` row advances the perturber along its conic by `stage time - third_params[s, 2]`.
+    It is added last, after the tesseral term, as `third_body` is registered after it.
 
     **Time.** `t` is the absolute simulation time at the start of this step - `Simulation.t` at the
     call, which after a manoeuvre or event split is the sub-step's own start, exactly the `t` the
@@ -989,6 +1071,7 @@ def cowell_rk4_step(
         n_nodes = int(density_meta[table, TABLE_N_NODES_COL])
         # The tesseral field's orientation at the three distinct stage times, read once per body.
         tt = (fl & COWELL_TESSERAL) != 0
+        th = (fl & COWELL_THIRD_BODY) != 0
         cos1 = 1.0
         sin1 = 0.0
         cos2 = 1.0
@@ -1006,6 +1089,26 @@ def cowell_rk4_step(
         pvx = state[par, 3]
         pvy = state[par, 4]
         pvz = state[par, 5]
+
+        # The perturber relative to the parent at the three distinct stage times, read once per body
+        # (stages 2 and 3 share one). Frozen rows return the same start-of-step value at all three.
+        mus = 0.0
+        q1x = 0.0
+        q1y = 0.0
+        q1z = 0.0
+        q2x = 0.0
+        q2y = 0.0
+        q2z = 0.0
+        q4x = 0.0
+        q4y = 0.0
+        q4z = 0.0
+        if th:
+            mus, q1x, q1y, q1z = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                                 pvx, pvy, pvz, mu_par, t1)
+            mus, q2x, q2y, q2z = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                                 pvx, pvy, pvz, mu_par, t2)
+            mus, q4x, q4y, q4z = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                                 pvx, pvy, pvz, mu_par, t4)
 
         # Initial relative state y0 = state[s] - state[par]; stage 1 is evaluated on the committed row,
         # velocity included (drag reads it).
@@ -1035,6 +1138,8 @@ def cowell_rk4_step(
         if tt:
             a1x, a1y, a1z = _tesseral_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, mu_par,
                                            tesseral_params, s, cos1, sin1, tesseral_vw)
+        if th:
+            a1x, a1y, a1z = _third_body_term(a1x, a1y, a1z, px, py, pz, cx, cy, cz, mus, q1x, q1y, q1z)
         v1x = v0x + half_dt * a1x
         v1y = v0y + half_dt * a1y
         v1z = v0z + half_dt * a1z
@@ -1058,6 +1163,8 @@ def cowell_rk4_step(
         if tt:
             a2x, a2y, a2z = _tesseral_term(a2x, a2y, a2z, px, py, pz, cx, cy, cz, mu_par,
                                            tesseral_params, s, cos2, sin2, tesseral_vw)
+        if th:
+            a2x, a2y, a2z = _third_body_term(a2x, a2y, a2z, px, py, pz, cx, cy, cz, mus, q2x, q2y, q2z)
         v2x = v0x + half_dt * a2x
         v2y = v0y + half_dt * a2y
         v2z = v0z + half_dt * a2z
@@ -1079,6 +1186,8 @@ def cowell_rk4_step(
         if tt:
             a3x, a3y, a3z = _tesseral_term(a3x, a3y, a3z, px, py, pz, cx, cy, cz, mu_par,
                                            tesseral_params, s, cos2, sin2, tesseral_vw)
+        if th:
+            a3x, a3y, a3z = _third_body_term(a3x, a3y, a3z, px, py, pz, cx, cy, cz, mus, q2x, q2y, q2z)
         v3x = v0x + dt * a3x
         v3y = v0y + dt * a3y
         v3z = v0z + dt * a3z
@@ -1100,6 +1209,8 @@ def cowell_rk4_step(
         if tt:
             a4x, a4y, a4z = _tesseral_term(a4x, a4y, a4z, px, py, pz, cx, cy, cz, mu_par,
                                            tesseral_params, s, cos4, sin4, tesseral_vw)
+        if th:
+            a4x, a4y, a4z = _third_body_term(a4x, a4y, a4z, px, py, pz, cx, cy, cz, mus, q4x, q4y, q4z)
 
         # Weighted combination on the relative state, then back onto the parent's start-of-step row.
         rnx = r0x + sixth_dt * (v0x + 2.0 * v1x + 2.0 * v2x + v3x)
@@ -1187,6 +1298,7 @@ def cowell_leapfrog_step(
     density_meta: NDArray[np.float64],
     tesseral_params: NDArray[np.float64],
     tesseral_vw: NDArray[np.float64],
+    third_params: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> int:
     """
@@ -1210,6 +1322,7 @@ def cowell_leapfrog_step(
         zz = (fl & COWELL_ZONAL) != 0
         dd = (fl & COWELL_DRAG) != 0
         tt = (fl & COWELL_TESSERAL) != 0
+        th = (fl & COWELL_THIRD_BODY) != 0
         mu_par = mu_array[par]
         mu_total = mu_array[s] + mu_par
         j2 = 0.0
@@ -1267,6 +1380,10 @@ def cowell_leapfrog_step(
             cos_t, sin_t = _tesseral_angle(tesseral_params, s, t)
             ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
                                         tesseral_params, s, cos_t, sin_t, tesseral_vw)
+        if th:
+            mus, qx, qy, qz = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                              pvx, pvy, pvz, mu_par, t)
+            ax, ay, az = _third_body_term(ax, ay, az, px, py, pz, cx, cy, cz, mus, qx, qy, qz)
 
         # The one substep, weight 1.0.
         tau = t
@@ -1295,6 +1412,10 @@ def cowell_leapfrog_step(
             cos_t, sin_t = _tesseral_angle(tesseral_params, s, tau)
             ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
                                         tesseral_params, s, cos_t, sin_t, tesseral_vw)
+        if th:
+            mus, qx, qy, qz = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                              pvx, pvy, pvz, mu_par, tau)
+            ax, ay, az = _third_body_term(ax, ay, az, px, py, pz, cx, cy, cz, mus, qx, qy, qz)
         vx = vhx + hh * ax
         vy = vhy + hh * ay
         vz = vhz + hh * az
@@ -1337,6 +1458,7 @@ def cowell_yoshida4_step(
     density_meta: NDArray[np.float64],
     tesseral_params: NDArray[np.float64],
     tesseral_vw: NDArray[np.float64],
+    third_params: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> int:
     """
@@ -1358,6 +1480,7 @@ def cowell_yoshida4_step(
         zz = (fl & COWELL_ZONAL) != 0
         dd = (fl & COWELL_DRAG) != 0
         tt = (fl & COWELL_TESSERAL) != 0
+        th = (fl & COWELL_THIRD_BODY) != 0
         mu_par = mu_array[par]
         mu_total = mu_array[s] + mu_par
         j2 = 0.0
@@ -1414,6 +1537,10 @@ def cowell_yoshida4_step(
             cos_t, sin_t = _tesseral_angle(tesseral_params, s, t)
             ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
                                         tesseral_params, s, cos_t, sin_t, tesseral_vw)
+        if th:
+            mus, qx, qy, qz = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                              pvx, pvy, pvz, mu_par, t)
+            ax, ay, az = _third_body_term(ax, ay, az, px, py, pz, cx, cy, cz, mus, qx, qy, qz)
 
         tau = t
         for sub in range(3):
@@ -1445,6 +1572,10 @@ def cowell_yoshida4_step(
                 cos_t, sin_t = _tesseral_angle(tesseral_params, s, tau)
                 ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
                                             tesseral_params, s, cos_t, sin_t, tesseral_vw)
+            if th:
+                mus, qx, qy, qz = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                                  pvx, pvy, pvz, mu_par, tau)
+                ax, ay, az = _third_body_term(ax, ay, az, px, py, pz, cx, cy, cz, mus, qx, qy, qz)
             vx = vhx + hh * ax
             vy = vhy + hh * ay
             vz = vhz + hh * az
@@ -1603,6 +1734,7 @@ def cowell_encke_step(
     density_meta: NDArray[np.float64],
     tesseral_params: NDArray[np.float64],
     tesseral_vw: NDArray[np.float64],
+    third_params: NDArray[np.float64],
     rel_out: NDArray[np.float64],
 ) -> int:
     """
@@ -1632,6 +1764,7 @@ def cowell_encke_step(
         zz = (fl & COWELL_ZONAL) != 0
         dd = (fl & COWELL_DRAG) != 0
         tt = (fl & COWELL_TESSERAL) != 0
+        th = (fl & COWELL_THIRD_BODY) != 0
         mu_par = mu_array[par]
         mu_total = mu_array[s] + mu_par
         j2 = 0.0
@@ -1750,6 +1883,10 @@ def cowell_encke_step(
                 cos_t, sin_t = _tesseral_angle(tesseral_params, s, tau)
                 ax, ay, az = _tesseral_term(ax, ay, az, px, py, pz, cx, cy, cz, mu_par,
                                             tesseral_params, s, cos_t, sin_t, tesseral_vw)
+            if th:
+                mus, qx, qy, qz = _third_body_rel(state, mu_array, third_params, s, px, py, pz,
+                                                  pvx, pvy, pvz, mu_par, tau)
+                ax, ay, az = _third_body_term(ax, ay, az, px, py, pz, cx, cy, cz, mus, qx, qy, qz)
             r2 = rx * rx + ry * ry + rz * rz
             rn = math.sqrt(r2)
             kc = mu_total / (r2 * rn)
