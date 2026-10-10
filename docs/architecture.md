@@ -2704,6 +2704,38 @@ On the cislunar shells, an Earth-pointing cone on each lunar satellite keeps 4.3
 Window edges are interpolated on the minimum margin, so even a cone that never binds could shift an
 edge where it is the smallest positive term. With a 180 deg cone the measured shift here is 0 s.
 
+### Attitude dynamics: pointing that lags
+
+`attitude_dynamics.py` adds the second rung below an ideal pointing law: a rigid body under a
+controller.
+- **State.** Per tracked vessel, a quaternion (body to inertial) and a body angular velocity, with
+  `q_dot = 1/2 q (x) [0, omega]` and Euler's equations with no external torque.
+- **Control.** A quaternion PD law toward the attitude the vessel's `Attitude` law demands, saturated
+  per axis.
+- **Feed-forward** of the target's own rate, optional (`PointingController.feed_forward`). With it the
+  loop is type 2 and a target turning at a constant rate is tracked with zero steady-state error.
+  Without it the error settles at `2 k_d n / k_p`; the factor 2 is because the quaternion error is half
+  the angle, which I had first left out.
+- **Stepping.** `AttitudeTracker` advances once per real `Simulation.step`, after the orbits and never
+  inside event trial propagations, since attitude does not feed back into the orbits here. Within the
+  step it takes RK4 sub-steps, with the target slerped between its start-of-step and end-of-step
+  values.
+
+**Measured** (`tests/validation/test_attitude_dynamics.py`), each against a value derived before
+measuring:
+- **Torque-free.** Angular momentum and energy drift at fourth order in the sub-step (2.0e-7 to 1.3e-8,
+  x16.0, for a halving).
+- **Precession.** Axisymmetric free precession matches its closed form to 1e-9 rad/s. My first docstring
+  had the precession sense backwards; the equations, and the code, have it turning with the spin when
+  `I3 > I`.
+- **Step response.** The small-angle overshoot at `zeta = 0.5` is 16.29% (theory 16.30%).
+- **Nadir tracking.** The error settles to < 1e-5 rad with feed-forward, and to `2 k_d n / k_p` within
+  2% without it.
+- **Slew.** A torque-limited 90 deg slew settles in 325 s, against the bang-bang lower bound of 177 s.
+
+Not yet: the link scan reading a tracker's recorded boresights instead of an ideal law's, which waits
+on the compiled-geometry merge; and body-fixed thrust driven by the tracked attitude.
+
 ---
 
 ## Validation layers

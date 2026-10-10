@@ -35,6 +35,7 @@ from . import quadrupole  # registers "system_quadrupole"; live rows need their 
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
 if TYPE_CHECKING:
+    from .attitude_dynamics import AttitudeTracker
     from .history import HistorySink
     from .regimes import RegimeSwitch
 from . import hierarchy  # temporary systems: form_system / dissolve_system, used by the API below
@@ -105,6 +106,9 @@ class Simulation:
         self._hist_names: List[List[str]] = []
         # A streaming sink (`attach_history_sink`), when attached, replaces the in-memory buffers.
         self._history_sink: Optional["HistorySink"] = None
+        # Attitude trackers (`attitude_dynamics.AttitudeTracker`), advanced once per real step after the
+        # orbits, never during event trial propagations.
+        self._attitude_trackers: List["AttitudeTracker"] = []
         self._history_sink_count: int = 0
         self._recorded_names: List[str] = []
         self._recorded_slots: NDArray[np.int64] = np.empty(0, dtype=np.int64)
@@ -1357,6 +1361,8 @@ class Simulation:
         """
         if not self._manoeuvres and not self._events:
             self._advance(dt)
+            for tracker in self._attitude_trackers:
+                tracker.advance(self, float(dt))
             if self.record_history:
                 self._record_state()
             return
@@ -1377,6 +1383,8 @@ class Simulation:
         # The sub-intervals sum to `dt` only up to rounding; pin the clock so a long run with many
         # split steps stays on the same time grid an unsplit run would.
         self.t = t_end
+        for tracker in self._attitude_trackers:
+            tracker.advance(self, float(dt))
         if self.record_history:
             self._record_state()
 
@@ -2172,6 +2180,10 @@ class Simulation:
         self._history_sink_count = 0
         self.record_history = True
         sink.record(float(self.t), self.global_states)
+
+    def attach_attitude_tracker(self, tracker: "AttitudeTracker") -> None:
+        """Advance `tracker` (`attitude_dynamics.AttitudeTracker`) once per `step`, after the orbits."""
+        self._attitude_trackers.append(tracker)
 
     def detach_history_sink(self) -> Optional["HistorySink"]:
         """Stop streaming and return the sink (not closed); history goes back to memory."""

@@ -911,9 +911,13 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        1e-10 km
      - attitude as data (nadir, zenith, target, inertial and velocity pointing), thruster-fixed impulses,
        and visibility cones per link end
+     - attitude dynamics: rigid bodies tracking their pointing law under a torque-limited PD controller.
+       The step response matches second-order theory (16.29% overshoot vs 16.30%); a 90 deg slew takes
+       1.8x the bang-bang minimum
    - **Next:**
      - a compiled per-pair geometry twin, which is where the time goes at 10,000 satellites
-     - attitude dynamics (torques, slews), so a cone or a thruster can lag its pointing law
+     - link cones driven by a tracked attitude (`attitude_dynamics.py`) rather than an ideal law, and
+       body-fixed thrust that follows it
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,
