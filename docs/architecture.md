@@ -2507,12 +2507,54 @@ This is the load management the regime work was after, and the answer was not pe
 fine steps are needed for hours around periapsis, inside a sphere-of-influence region 8 days wide.
 Error control finds those hours itself; a regime boundary could not.
 
-Beyond the monopole, the fidelity ladder continues. An inner pair's quadrupole rotates with its
-orbit, so the field outside is periodic at harmonics of the inner mean motion (`2n` for a circular
-pair), and averaging it gives a ring-like secular term. The full ladder is: monopole, averaged
-quadrupole, periodic (Fourier) quadrupole, resolved members. None of this is new physics
-(disturbing-function and Hansen expansions; the doubly averaged quadrupole of hierarchical triples).
-What fits this engine is making each rung a configuration with a measured cost and error.
+### The system's field seen from outside: a fidelity ladder
+
+`quadrupole.py` registers `"system_quadrupole"`, for a body whose parent is a two-member
+barycentre. Composed with `point_mass_gravity` (the monopole, the summed `mu`), it completes a ladder:
+
+    monopole  ->  + averaged quadrupole (mode 0)  ->  + instantaneous quadrupole (mode 1)  ->  resolved
+
+**The derivation.** About the barycentre the dipole vanishes. The second moment is `mu_r d d^T`, with
+`G mu_r = mu_a mu_b / (mu_a + mu_b)`. The acceleration is
+`(G mu_r / 2r^5)[6 M r - 15 (r^T M r) r / r^2 + 3 tr(M) r]`, with `M = d d^T`.
+- **Instantaneous (mode 1)** uses the live separation, carried along the pair's conic to each stage
+  time (the staged scheme, engine-owned `t0`). Every harmonic of the inner orbit is in it, because it
+  is evaluated, not expanded. That is the user's "Fourier series" idea taken to completion: the series
+  is summed exactly.
+- **Averaged (mode 0)** uses `<d d^T> = (a^2/2)[(1 + 4e^2) e_hat e_hat^T + (1 - e^2) q_hat q_hat^T]`,
+  verified against a mean-anomaly average to six digits for e = 0 to 0.7. For a circular pair this is
+  an oblate body with `J2 R^2 = mu_r d^2 / 2M` about the inner normal, the "ring" of secular theory.
+  The kernel equals the live field time-averaged over an inner orbit, to 3.6e-15.
+
+**Measured** on `scenarios.binary_probe` (an isolated Earth-Moon system; `benchmarks/multipole_ladder.py`,
+`docs/figures/multipole.png`):
+- **The field.** It matches the exact two-point field minus the monopole, up to a residual linear in
+  `d / r` (0.26 at 0.196, 0.52 at 0.392): the octupole, the next term.
+- **The ladder at r = 2e6 km** (d/r = 0.19), probe error against N-body:
+
+  | Horizon | Monopole | Averaged | Instantaneous | Resolved |
+  |---|---:|---:|---:|---:|
+  | 30 d | 54 km | 76 km | 13 km | 3.5e-7 km |
+  | 180 d | 3,690 km | 952 km | 190 km | 1.4e-5 km |
+  | 360 d | 5,750 km | 835 km | 117 km | 3.4e-5 km |
+
+- **Resolved is exact**, a verification.
+- **Instantaneous** improves on the monopole by 4x at 30 d and 49x at 360 d. Its residual is the
+  octupole.
+- **Averaged** is *worse* than the monopole for the first ~month, and 7x better by a year. That is the
+  classic catch of an averaged theory seeded with **osculating** rather than mean initial conditions.
+  The short-period terms the average dropped leave a velocity offset that drifts linearly; the secular
+  term the average keeps grows as t^2 and overtakes it. Seeding it with mean conditions (a near-identity
+  transformation of the start state) is the fix, and it is not built.
+- **It is a far-field ladder.** At 180 d it holds for d/r <= 0.26. At d/r = 0.38 (r = 2.6 d), both
+  quadrupole rungs are worse than the monopole (2.4e4 and 1.6e4 km against 2.4e3 km). There the
+  expansion converges slowly (the octupole is half the quadrupole), and the probe sits near the limit
+  of stable orbits around a binary, where trajectories diverge quickly and amplify any model
+  difference.
+
+None of this is new physics: it is the multipole expansion and the disturbing function of hierarchical
+systems. What fits this engine is that each rung is a configuration with a measured error against
+truth, including the range where the expansion should not be trusted.
 
 ---
 

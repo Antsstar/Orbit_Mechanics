@@ -1,6 +1,6 @@
 from .registry import register_force_model, get_force_model, all_force_models, mask_for
 # Importing a force-model module registers it. Anything that imports this package can then enable
-# "point_mass_gravity", "j2", "drag", "third_body", "thrust", "srp", "zonal", "tesseral" and "ephemeris_third_body" by name without importing their modules itself.
+# "point_mass_gravity", "j2", "drag", "third_body", "thrust", "srp", "zonal", "tesseral", "ephemeris_third_body" and "system_quadrupole" by name without importing their modules itself.
 from . import gravity
 from . import geopotential
 from . import drag
@@ -10,3 +10,4 @@ from . import srp
 from . import zonal
 from . import tesseral
 from . import ephemeris
+from . import quadrupole

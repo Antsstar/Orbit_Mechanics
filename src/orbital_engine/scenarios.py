@@ -45,7 +45,7 @@ __all__ = [
     "sun_synchronous_satellites", "sun_synchronous_inclination_deg", "sso_satellite_name",
     "TROPICAL_YEAR_DAYS", "artemis2", "ORION_NAME", "artemis3_rendezvous", "LANDER_NAME",
     "asteroid_encounter", "ASTEROID_A", "ASTEROID_B", "MU_CERES", "MU_VESTA", "AU_KM",
-    "planet_flyby", "FLYBY_CRAFT", "FLYBY_PLANET",
+    "planet_flyby", "FLYBY_CRAFT", "FLYBY_PLANET", "binary_probe", "BINARY_PROBE",
 ]
 
 # --------------------------------------------------------------------------------------------------
@@ -1438,4 +1438,50 @@ def planet_flyby(
         arg_pe=float(coes[1][4]), theta=float(coes[1][5])))
     session.commit()
     return Simulation(body_names=["Sun", FLYBY_PLANET, FLYBY_CRAFT], system_names=["Solar System"],
+                      session=session, max_capacity=capacity)
+
+
+BINARY_PROBE = "Probe"
+
+
+def binary_probe(
+    session: Session,
+    *,
+    probe_radius_km: float = 1.0e6,
+    probe_inclination_deg: float = 30.0,
+    moon_mu: float = MU_MOON,
+    capacity: int = 16,
+) -> Simulation:
+    """
+    An **isolated** Earth-Moon system (no Sun) and a massless probe far outside it: the case for a
+    system's field seen from outside (`quadrupole.py`). The barycentre is the root, Earth heads it,
+    the Moon has its J2000-like elements, and `BINARY_PROBE` starts on a circular orbit of
+    `probe_radius_km` about Earth, inclined `probe_inclination_deg` to the Moon's frame.
+
+    The database build parents the probe to Earth. To have it see the system as one point - the
+    monopole, the summed `mu` - hand it to the barycentre at runtime with `sim.reparent(probe, emb)`.
+    The Sun is left out on purpose: at a million km its tide dwarfs the Earth-Moon quadrupole, and the
+    point here is to measure the system's own field.
+    """
+    emb = VirtualBodyORM(name="EMB")
+    session.add(emb)
+    session.flush()
+    system = SystemORM(name="Earth-Moon System", barycenter_id=emb.id)
+    session.add(system)
+    session.flush()
+    earth = CelestialBodyORM(name="Earth", mu=MU_EARTH, system_id=system.id, radius=EARTH_RADIUS,
+                             p=0.0, e=0.0, i=0.0, raan=0.0, arg_pe=0.0, theta=0.0)
+    session.add(earth)
+    session.flush()
+    system.head_body_id = earth.id
+    session.add(CelestialBodyORM(
+        name="Moon", mu=moon_mu, system_id=system.id, parent_id=earth.id, radius=1737.4,
+        p=MOON_P, e=MOON_E, i=0.0, raan=0.0, arg_pe=math.radians(318.15), theta=math.radians(115.0)))
+    session.add(VesselORM(
+        name=BINARY_PROBE, mu=0.0, system_id=system.id, parent_id=earth.id,
+        dry_mass=VESSEL_DRY_MASS, fuel_mass=0.0, drag_area=4.0,
+        p=float(probe_radius_km), e=0.0, i=math.radians(probe_inclination_deg),
+        raan=math.radians(40.0), arg_pe=0.0, theta=math.radians(10.0)))
+    session.commit()
+    return Simulation(body_names=["Earth", "Moon", BINARY_PROBE], system_names=["Earth-Moon System"],
                       session=session, max_capacity=capacity)

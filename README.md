@@ -882,9 +882,12 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - adaptive Cowell sub-stepping as a sweep axis (`cowell_tolerance_km`): one clock kept, with
        the Cowell integration subdivided where the error is. On the flyby, a 3,600 s step at 1e-5 km
        tolerance lands 4.2 m from truth in 5 s, against 18.6 m in ~80 s at a fixed 30 s step
+     - a system's field seen from outside, as a fidelity ladder (`docs/figures/multipole.png`):
+       monopole, averaged quadrupole, instantaneous quadrupole (every periodic harmonic of the inner
+       orbit), and resolved members. For a probe 2e6 km from the Earth-Moon barycentre over a year:
+       5,750 / 835 / 117 km / exact. The averaged rung starts out worse than the monopole, the known
+       price of seeding an averaged theory with osculating elements
    - **Planned:**
-     - a system's field beyond the monopole as a fidelity ladder for outside bodies: averaged
-       quadrupole, then the periodic (Fourier) quadrupole at harmonics of the inner orbits
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
    that consumes this engine's two contact datasets, ground and inter-satellite (see
    [Scope](#scope-where-this-project-stops)). Walker generation, TLE ingest and link visibility stay
