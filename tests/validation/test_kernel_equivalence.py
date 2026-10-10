@@ -495,7 +495,7 @@ def _fused_plan_args(sim: Simulation) -> tuple[object, ...]:
         sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
         sim._cowell_drag_params, sim._cowell_drag_table_of,
         tables.tables, tables.meta,
-        sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
+        sim._cowell_tesseral_params, sim._cowell_tesseral_vw, sim._cowell_third_params,
     )
 
 
@@ -851,6 +851,10 @@ def test_cowell_comparison_would_detect_a_perturbed_kernel(
 # `test_zonal_term_is_visible_to_the_state_comparison` guards that the state tests are not vacuous.
 
 _NO_TABLES = drag.density_tables(np.empty((0, 3)))[0]
+# Dummies for `_cowell_accel`'s third-body arguments, which are read only behind `has_third`.
+_NO_THIRD = np.zeros((1, 3))
+_NO_STATE = np.zeros((1, 6))
+_NO_MU = np.zeros(1)
 
 
 def _fused_accel(
@@ -876,7 +880,8 @@ def _fused_accel(
         has_drag, law, float(d[0]), float(d[1]), float(d[2]), float(d[3]), float(d[4]), float(d[5]),
         table, tables.tables, int(tables.n_nodes[table]),
         has_zonal, zp, row,
-        False, tp, 0.0, vw)
+        False, tp, 0.0, vw,
+        False, _NO_THIRD, _NO_STATE, _NO_MU)
 
 
 def _zonal_field_points() -> np.ndarray:
@@ -1537,7 +1542,8 @@ def _tesseral_fields(
             False, kernels.DRAG_LAW_EXPONENTIAL, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             kernels.LAYERED_TABLE_ROW, _NO_TABLES.tables, int(_NO_TABLES.n_nodes[0]),
             False, zp, 0,
-            True, twin_params[k + 1:k + 2], float(t), vw)
+            True, twin_params[k + 1:k + 2], float(t), vw,
+            False, _NO_THIRD, _NO_STATE, _NO_MU)
 
     r = np.linalg.norm(rel, axis=1)
     natural = sum(

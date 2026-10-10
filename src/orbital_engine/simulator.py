@@ -13,7 +13,7 @@ from .propagators import (
     Propagator, KeplerianPropagator, SecularJ2Propagator, secular_j2_rates, mean_seeded_p,
 )
 from .kernels import (
-    COWELL_DRAG, COWELL_J2, COWELL_POINT_MASS, COWELL_TESSERAL, COWELL_ZONAL,
+    COWELL_DRAG, COWELL_J2, COWELL_POINT_MASS, COWELL_TESSERAL, COWELL_THIRD_BODY, COWELL_ZONAL,
     NUMBA_AVAILABLE, TESSERAL_VW_SIZE, calc_global_states, cowell_encke_step, cowell_leapfrog_step,
     cowell_rk4_step, cowell_yoshida4_step, kepler_propagate, rebase_relative_states,
     secular_j2_propagate,
@@ -303,6 +303,9 @@ class Simulation:
         # The tesseral term's V/W recursion table, filled per evaluation by the kernel: fixed-size
         # scratch, arena-owned so the compiled step allocates nothing.
         self._cowell_tesseral_vw = np.zeros((2, TESSERAL_VW_SIZE, TESSERAL_VW_SIZE), dtype=np.float64)
+        # `"third_body"`'s parameter array for the fused kernels (a one-row dummy until it exists).
+        self._no_third_params = np.zeros((1, len(thirdbody.THIRD_BODY_PARAM_NAMES)), dtype=np.float64)
+        self._cowell_third_params: NDArray[np.float64] = self._no_third_params
         self._cowell_fused_ok: bool = False
 
         self._build_universe(body_names, system_names, session=session)     # Initialize the simulation by building the universe from the database.
@@ -518,8 +521,8 @@ class Simulation:
         `forces.compose_accelerations` walks - with per-body flags so a mixed arena - some Cowell
         bodies with J2, some with J2..J6 or drag, some with neither - still qualifies. Three conditions
         disqualify the whole set, and the fallback is then the NumPy path for every Cowell body, not a
-        per-body split: any Cowell body carrying a bit outside those five models (`srp`,
-        `third_body`, `thrust`, the test fixtures); any Cowell body whose parent is itself Cowell (the
+        per-body split: any Cowell body carrying a bit outside those five models plus `third_body`
+        (`srp`, `thrust`, the test fixtures); any Cowell body whose parent is itself Cowell (the
         kernel reads a parent's row as fixed across the four stages; `RK4Integrator` would see the
         parent's stage candidates instead); and an MSIS drag row whose `(f107, f107a, ap)` profile was
         never evaluated, which the reference path then reports as `LookupError` at step time, exactly
@@ -547,15 +550,17 @@ class Simulation:
         zonal_bit = np.uint64(1) << np.uint64(get_force_model(zonal.ZONAL_MODEL).bit)
         drag_bit = np.uint64(1) << np.uint64(get_force_model(drag.DRAG_MODEL).bit)
         tesseral_bit = np.uint64(1) << np.uint64(get_force_model(tesseral.TESSERAL_MODEL).bit)
+        third_bit = np.uint64(1) << np.uint64(get_force_model(thirdbody.THIRD_BODY_MODEL).bit)
         # One packed per-body bitfield for the kernel (see `kernels.COWELL_*`); built here, once.
         self._cowell_flags.fill(0)
         for model_bit, flag in (
             (pm_bit, COWELL_POINT_MASS), (j2_bit, COWELL_J2), (zonal_bit, COWELL_ZONAL),
             (drag_bit, COWELL_DRAG), (tesseral_bit, COWELL_TESSERAL),
+            (third_bit, COWELL_THIRD_BODY),
         ):
             self._cowell_flags[(self.force_model_mask & model_bit) != np.uint64(0)] |= flag
 
-        fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit | tesseral_bit
+        fused_bits = pm_bit | j2_bit | drag_bit | zonal_bit | tesseral_bit | third_bit
         foreign = (self.force_model_mask[idx] & ~fused_bits) != np.uint64(0)
         parent_is_cowell = np.isin(self._cowell_primaries, idx)
         self._cowell_fused_ok = bool(idx.size > 0 and not foreign.any() and not parent_is_cowell.any())
@@ -568,6 +573,8 @@ class Simulation:
         self._cowell_drag_params = self._no_drag_params if drag_params is None else drag_params
         tesseral_params = self.force_model_params.get(tesseral.TESSERAL_MODEL)
         self._cowell_tesseral_params = self._no_tesseral_params if tesseral_params is None else tesseral_params
+        third_params = self.force_model_params.get(thirdbody.THIRD_BODY_MODEL)
+        self._cowell_third_params = self._no_third_params if third_params is None else third_params
 
         # The MSIS rows among the Cowell drag bodies, by `drag_kernel`'s own thresholds (`>= 1.5`,
         # below `drag.DIURNAL_THRESHOLD`). A diurnal-MSIS row (`>= 2.5`) is foreign: the fused twin
@@ -2035,7 +2042,7 @@ class Simulation:
             self._cowell_flags, self._cowell_j2_params, self._cowell_zonal_params,
             self._cowell_drag_params, self._cowell_drag_table_of,
             tables.tables, tables.meta,
-            self._cowell_tesseral_params, self._cowell_tesseral_vw,
+            self._cowell_tesseral_params, self._cowell_tesseral_vw, self._cowell_third_params,
             self._cowell_rel,
         ))
 

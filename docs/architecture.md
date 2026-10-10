@@ -755,8 +755,21 @@ perturber, next section. A LEO
 satellite perturbed by the Moon sees a perturber turning 13 times faster, and its coefficient is
 unmeasured.
 
-**Composition.** Its bit is foreign to `_refresh_cowell_plan`, so any Cowell set that includes a
-`third_body` body runs on the NumPy path. There is no compiled twin.
+**Composition.** It is fused (`kernels.COWELL_THIRD_BODY`, all four integrators' kernels, frozen and
+staged). The perturber and parent rows are read from `state`, which matches the NumPy behaviour
+because neither is ever a Cowell body. Staged rows advance the perturber by `stage time - t0` from
+the engine-owned `t0` column, because under adaptive sub-stepping the kernel's own start time is a
+later sub-step's. Held to the reference by `tests/validation/test_kernel_equivalence_third_body.py`:
+<= 6e-17 relative over 300 steps; a 30-day staged run differs by 8.6e-7 km at 3,600 s, which is
+rounding growth. On the regime flyby with adaptive sub-stepping, compiled and NumPy runs are
+bit-identical; the compiled run takes 0.08 s against 5.4 s. The probe lands 3.6 m from truth, where
+the first fixed-step staged run needed 81 s for 18.6 m. (Built by an agent, then reviewed and probed
+independently; *Composition* rewritten 2026-10-10.)
+
+**Frozen + adaptive is worse than frozen alone.** A frozen perturber stays frozen for the whole
+*arena* step, however finely the Cowell integration inside it is sub-stepped. Adaptive sub-stepping
+at a 3,600 s arena step therefore makes the freeze error larger: 9.6e4 km on the flyby, against 1.75e4
+km at a fixed 600 s step. Adaptive stepping needs `staged=1`.
 
 ---
 
@@ -1916,7 +1929,7 @@ against 6.8 us at 12 satellites (1.16x), 18.4 against 12.8 at 60 (1.44x). In the
 
 J3..J6 now cost **1.10-1.17x** the `j2`-only tier at the same step, down from ~120x (130x as first
 recorded) - the remaining difference is physics, not implementation. A zonal body that also carries
-a model outside the fused set (`srp`, `third_body`, `thrust`) still sends the whole Cowell set down
+a model outside the fused set (`srp`, `thrust`, `ephemeris_third_body`) still sends the whole Cowell set down
 the NumPy path; drag has since been fused as well ("Drag in the fused Cowell twin").
 
 ---
@@ -2645,7 +2658,7 @@ optionally record.
 ## Deliberately not built
 
 - **A compiled force-composition layer.** Cowell's compiled twin is fused for `point_mass_gravity`,
-  `j2`, `drag` and `zonal` only (see the Cowell section); `forces.compose_accelerations` and any other model
+  `j2`, `drag`, `zonal`, `tesseral` and `third_body` only (see the Cowell section); `forces.compose_accelerations` and any other model
   stay NumPy, and a Cowell body carrying one falls back to `RK4Integrator`. A general compiled dispatcher would
   need force models to be registered as compiled callables, which no model yet asks for.
 - **Massive Cowell bodies, N-body forces, and perturbers advanced per stage.** Massive Cowell bodies

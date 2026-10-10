@@ -882,6 +882,8 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - adaptive Cowell sub-stepping as a sweep axis (`cowell_tolerance_km`): one clock kept, with
        the Cowell integration subdivided where the error is. On the flyby, a 3,600 s step at 1e-5 km
        tolerance lands 4.2 m from truth in 5 s, against 18.6 m in ~80 s at a fixed 30 s step
+     - `third_body` fused into the compiled Cowell kernels, frozen and staged: the adaptive flyby
+       now runs in 0.08 s, bit-identical to the NumPy path
      - a system's field seen from outside, as a fidelity ladder (`docs/figures/multipole.png`):
        monopole, averaged quadrupole, instantaneous quadrupole (every periodic harmonic of the inner
        orbit), and resolved members. For a probe 2e6 km from the Earth-Moon barycentre over a year:

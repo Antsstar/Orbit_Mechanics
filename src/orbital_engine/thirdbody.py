@@ -134,8 +134,14 @@ The freeze scales with the perturber's angular rate *as seen from the parent*. A
 the Moon sees `n_Moon = 2.66e-6 rad/s`, 13 times the Sun's rate for the Moon, so expect a
 correspondingly larger first-order coefficient there. It is unmeasured.
 
-Reference tier only, with no compiled twin. `Simulation._refresh_cowell_plan` treats this model's bit as
-foreign, so any Cowell set that includes a `"third_body"` body runs on the NumPy `RK4Integrator` path.
+**Compiled twin.** `kernels._third_body_rel` / `_third_body_term` are fused into every `cowell_*_step`
+(`kernels.COWELL_THIRD_BODY`), so a Cowell set carrying `"third_body"` stays on the compiled path, in both
+modes, for all four integrators. Frozen rows read the perturber and parent from `state`, which is
+exactly the NumPy behaviour because neither is ever a Cowell body. Staged rows take the elapsed time as
+`stage time - t0` with `t0` this model's engine-owned column 2, never the kernel's own step-start
+argument: under adaptive sub-stepping the kernel is called several times per arena step with later start
+times while `t0` stays the arena step's. Held to the reference at 1e-12 relative by
+`tests/validation/test_kernel_equivalence_third_body.py`.
 """
 from __future__ import annotations
 

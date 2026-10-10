@@ -187,7 +187,7 @@ def bench_cowell() -> None:
                     sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
                     sim._cowell_drag_params, sim._cowell_drag_table_of,
                     tables.tables, tables.meta,
-                    sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
+                    sim._cowell_tesseral_params, sim._cowell_tesseral_vw, sim._cowell_third_params,
                     sim._cowell_rel,
                 )
 
@@ -225,7 +225,7 @@ def bench_cowell_integrators() -> None:
                         sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
                         sim._cowell_drag_params, sim._cowell_drag_table_of,
                         tables.tables, tables.meta,
-                        sim._cowell_tesseral_params, sim._cowell_tesseral_vw,
+                        sim._cowell_tesseral_params, sim._cowell_tesseral_vw, sim._cowell_third_params,
                         sim._cowell_rel,
                     )
 
@@ -235,6 +235,56 @@ def bench_cowell_integrators() -> None:
                     rk4_kernel = ker
                 print(f"{label:<16}{n_sats:>6}{name:>12}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x"
                       f"{ker / n_sats:>10.3f}{ker / rk4_kernel:>8.2f}x")
+
+
+def build_moon_third_body(staged: bool) -> tuple[Simulation, np.ndarray]:
+    """The Moon on Cowell + point mass + `third_body`(Sun), `staged` or frozen: sun_earth_moon with a
+    massless Moon (the verification case of `tests/validation/test_third_body.py`)."""
+    sim = build(lambda s: scenarios.sun_earth_moon(s, moon_mu=0.0))
+    moon = np.asarray([sim.name_to_index["Moon"]], dtype=np.int64)
+    sim.set_propagator(moon, PropagatorType.COWELL)
+    sim.enable_force_model("point_mass_gravity", moon.tolist())
+    sim.enable_force_model("third_body", moon.tolist(), perturber=float(sim.name_to_index["Sun"]),
+                           staged=1.0 if staged else 0.0)
+    return sim, moon
+
+
+def bench_third_body() -> None:
+    """`pm+third_body` (frozen and staged), every integrator: NumPy reference against the fused kernel."""
+    rule("Cowell pm+third_body (Moon under the Sun): NumPy reference against fused kernel")
+    print(f"{'mode':<10}{'integrator':>12}{'reference':>12}{'kernel':>10}{'speedup':>10}{'full step':>11}")
+    kernel_of = {"rk4": kernels.cowell_rk4_step, "leapfrog": kernels.cowell_leapfrog_step,
+                 "yoshida4": kernels.cowell_yoshida4_step, "encke": kernels.cowell_encke_step}
+    for mode, staged in (("frozen", False), ("staged", True)):
+        for name in ("rk4", "leapfrog", "yoshida4", "encke"):
+            sim, moon = build_moon_third_body(staged)
+            sim.set_cowell_integrator(name)
+            assert sim._cowell_fused_ok, "pm+third_body must qualify for the fused kernel"
+            primaries = sim.parent_indices[moon]
+            integrator = make_integrator(name, sim.max_capacity, sim.mu_array)
+            kernel_fn = kernel_of[name]
+            tables = sim._cowell_drag_tables
+            # `_advance` writes the staged rows' t0 at the start of each step; the bare kernels here never
+            # run through it, so set it as `_advance` would (to the step start, 0.0).
+            sim._cowell_third_params[moon, 2] = float(sim.t)
+
+            def reference() -> None:
+                integrator.step(sim.accelerations, sim.t, sim.global_states, DT, moon, primaries)
+
+            def kernel() -> None:
+                kernel_fn(
+                    DT, sim.t, sim.global_states, sim.mu_array, sim.parent_indices, moon,
+                    sim._cowell_flags, sim._cowell_j2_params, sim._cowell_zonal_params,
+                    sim._cowell_drag_params, sim._cowell_drag_table_of,
+                    tables.tables, tables.meta,
+                    sim._cowell_tesseral_params, sim._cowell_tesseral_vw, sim._cowell_third_params,
+                    sim._cowell_rel,
+                )
+
+            ref = measure(reference, inner=50).best
+            ker = measure(kernel, inner=200).best
+            full = measure(lambda: sim.step(DT), inner=50).best
+            print(f"{mode:<10}{name:>12}{ref:>11.1f}u{ker:>9.2f}u{ref / ker:>9.1f}x{full:>10.1f}u")
 
 
 def bench_scenarios() -> None:
@@ -288,6 +338,7 @@ def main() -> int:
     bench_propagators()
     bench_cowell()
     bench_cowell_integrators()
+    bench_third_body()
     bench_scenarios()
     bench_scaling()
     bench_components()

@@ -269,7 +269,7 @@ def test_moon_with_third_body_converges_to_truth_at_the_derived_first_order(
     mismatch = {}
     for dt in (3600.0, 1800.0):
         sim = _moon_on_cowell()
-        assert not sim._cowell_fused_ok, "guard: third_body must take the NumPy RK4Integrator path"
+        assert sim._cowell_fused_ok, "guard: third_body is fused (the compiled path where numba is present)"
         err = _run(sim, dt) - truth["rel"]
         pred = 0.5 * dt * truth["dr_dtau"]
         errors[dt] = float(np.linalg.norm(err))
@@ -314,6 +314,7 @@ def _oracle_error(dt: float, rel_truth: ArrF) -> float:
         table[k] = kepler.global_states[sun, :3] - kepler.global_states[earth, :3]
 
     sim = _moon_on_cowell()
+    sim.use_compiled_kernel = False   # the oracle wraps `sim.accelerations`, which the fused kernel bypasses
     real = sim.accelerations
 
     def staged(t: float, state: ArrF) -> ArrF:
@@ -386,6 +387,7 @@ def test_moon_without_third_body_is_comparison_sized(truth: Dict[str, ArrF]) -> 
 # fail too (about 1.0). The mismatch check is the one that also bounds errors too small to move that ratio.
 def test_two_percent_error_in_the_perturbation_is_caught(truth: Dict[str, ArrF]) -> None:
     sim = _moon_on_cowell()
+    sim.use_compiled_kernel = False   # the patched Python kernel only exists on the NumPy path
 
     def inflated(indices: NDArray[np.int64], t: float, state: ArrF, mu_array: ArrF,
                  parent_indices: NDArray[np.int32], params: ArrF, out: ArrF) -> None:
@@ -457,7 +459,7 @@ def test_sweep_resolves_the_perturber_by_name() -> None:
     applied = sweep.apply_config(sim, config)
     assert applied.tolist() == [idx["Moon"]]
     assert sim.force_model_params[THIRD_BODY_MODEL][idx["Moon"], 0] == float(idx["Sun"])
-    assert not sim._cowell_fused_ok
+    assert sim._cowell_fused_ok   # third_body has a fused twin
 
     bad = dataclasses.replace(config, force_models=(
         sweep.ForceModelSpec(THIRD_BODY_MODEL, body_coefficients={"perturber": "Jupiter"}),))

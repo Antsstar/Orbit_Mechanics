@@ -156,7 +156,7 @@ module's row there before changing that module or writing a test against it.
 | `tesseral.py` | `"tesseral"`: orders m >= 1 to degree 4, additive to j2 + zonal. **Reads `t`** (`theta = theta0 + omega t`, absolute sim time); refuses `omega == 0` on a live row. Fused |
 | `drag.py` / `atmosphere.py` | `"drag"`, density law chosen per body by the `density_model` coefficient (0 exponential = the all-zero default, 1 Vallado table, 2 averaged NRLMSIS, 3 diurnal NRLMSIS). `pymsis` runs only at configuration time (`msis_bridge.py`, `msis_diurnal.py`), never in a step. Laws 0-2 fused; a law-3 row sends Cowell to NumPy. Table transcribed from memory |
 | `srp.py` | `"srp"`, cannonball, anti-sunward; `source` and `p_srp` mandatory. **Prefer the conical shadow**: the cylindrical terminator costs RK4 its order unless `sim.add_event(events.shadow_event(sim))`. Column 7 is engine-owned. Not fused |
-| `thirdbody.py` | `"third_body"`: one arena perturber, direct minus indirect; **first order** by default (perturber frozen within the step). `staged=1` carries the perturber along its two-body conic to each stage time: fourth order (exact for an isolated pair). Column `t0` is engine-owned. Not fused |
+| `thirdbody.py` | `"third_body"`: one arena perturber, direct minus indirect; **first order** by default (perturber frozen within the step). `staged=1` carries the perturber along its two-body conic to each stage time: fourth order (exact for an isolated pair). Column `t0` is engine-owned, and it is what the fused kernel measures elapsed time from, never its own step-start argument (adaptive sub-steps start later). **Frozen + adaptive is worse than frozen alone**: the freeze lasts the whole arena step. Fused |
 | `ephemeris.py` | `"ephemeris_third_body"`: tabulated perturbers (Hermite) at every RK4 stage time — fourth order. Tables are centred on the parent; out-of-range queries raise. Not fused |
 | `thrust.py` | `"thrust"`, Cowell-only, RSW direction (norm throttles). **Mass is state**: re-seed `mass_kg` to re-run. Not fused |
 | `manoeuvres.py` | Impulsive Δv in RSW under every propagator; `schedule_delta_v` splits the step at the epoch. Keplerian/secular-J2 re-derive elements (and rates). Not a registry entry |
@@ -180,8 +180,8 @@ module's row there before changing that module or writing a test against it.
 | `benchmark.py` | `measure(fn)`: min-of-batches timing |
 | `Simulation` model API | `enable_force_model(name, bodies, **coefficients)`, `set_propagator(bodies, PropagatorType.COWELL \| SECULAR_J2, ...)`, `resolve_force_models()`, `accelerations(t, state=None)`. Cowell is refused on heads, barycentres, roots, inactive slots and **any body with `mu != 0`** |
 
-**Fused compiled Cowell set:** `point_mass_gravity`, `j2`, `drag` (laws 0-2), `zonal`, `tesseral`. Any
-other bit on any Cowell body, or a Cowell body parenting another, sends the whole Cowell set down the
+**Fused compiled Cowell set:** `point_mass_gravity`, `j2`, `drag` (laws 0-2), `zonal`, `tesseral`,
+`third_body` (frozen and staged). Any other bit on any Cowell body, or a Cowell body parenting another, sends the whole Cowell set down the
 NumPy path.
 
 ---
@@ -223,7 +223,7 @@ Both halves of `registry.py` are now wired. `step()` dispatches Cowell bodies th
 (`body.py`) is still never instantiated and `sim.bodies` is always empty.
 
 Cowell's compiled twin is **fused**: `kernels.cowell_rk4_step` (and its `cowell_leapfrog_step` / `cowell_yoshida4_step` / `cowell_encke_step` siblings, one kernel per integrator, `simulator._COWELL_KERNELS`) hard-codes its integrator with `point_mass_gravity`,
-`j2`, `drag` (all three density laws), `zonal` and `tesseral` (per-body flags; `t` is an argument), because numba cannot dispatch over the Python kernel list
+`j2`, `drag` (all three density laws), `zonal`, `tesseral` (per-body flags; `t` is an argument) and `third_body` (frozen and staged; `t0` read from the engine-owned column), because numba cannot dispatch over the Python kernel list
 `forces.compose_accelerations` walks. A Cowell body carrying any other model, or parented by another
 Cowell body, sends the whole Cowell set down the NumPy `RK4Integrator` path (`_cowell_fused_ok`). The
 composition layer itself, and every other force model, remain NumPy only; a new force model that
@@ -259,7 +259,7 @@ Hot paths exist twice: a readable NumPy version and a compiled scalar version.
 |---|---|---|
 | Propagation | `propagators.KeplerianPropagator` | `kernels.kepler_propagate` |
 | Secular-J2 propagation | `propagators.SecularJ2Propagator` | `kernels.secular_j2_propagate` |
-| Cowell step (RK4 + `point_mass_gravity` + `j2` + `drag` + `zonal` + `tesseral`) | `integrators.RK4Integrator` / `LeapfrogIntegrator` / `Yoshida4Integrator` / `EnckeIntegrator` over `forces.compose_accelerations` | `kernels.cowell_{rk4,leapfrog,yoshida4,encke}_step` (fused; other masks fall back to the reference) |
+| Cowell step (RK4 + `point_mass_gravity` + `j2` + `drag` + `zonal` + `tesseral` + `third_body`) | `integrators.RK4Integrator` / `LeapfrogIntegrator` / `Yoshida4Integrator` / `EnckeIntegrator` over `forces.compose_accelerations` | `kernels.cowell_{rk4,leapfrog,yoshida4,encke}_step` (fused; other masks fall back to the reference) |
 | Global states | `Simulation.calc_global` (else branch) | `kernels.calc_global_states` |
 | Re-base of Cowell / secular-J2 rows after `calc_global` | `Simulation._rebase` (else branch) | `kernels.rebase_relative_states` (bit-identical; NumPy path if a body's parent is in its own re-base set) |
 

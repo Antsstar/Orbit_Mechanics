@@ -590,7 +590,10 @@ def _moon_run(dt: float, model: str, sun_table: EphemerisTable, frozen: bool = F
         sim.enable_force_model(EPHEMERIS_MODEL, moon, **ephemeris_coefficients([(sun_table, MU_S)]))
     else:
         sim.enable_force_model(THIRD_BODY_MODEL, moon, perturber=float(sim.name_to_index["Sun"]))
-    assert not sim._cowell_fused_ok, "guard: both models must take the NumPy RK4Integrator path"
+    # `third_body` has a fused twin now (`kernels._third_body_rel`); this comparison measures the NumPy
+    # `RK4Integrator` path (and `_FrozenTimeIntegrator` wraps it), so pin that path explicitly.
+    sim.use_compiled_kernel = False
+    assert not (sim.use_compiled_kernel and sim._cowell_fused_ok), "guard: both models must run the NumPy path"
     if frozen:
         sim._cowell_integrator = _FrozenTimeIntegrator(sim._cowell_integrator)  # type: ignore[assignment]
     for _ in range(int(round(HORIZON / dt))):
