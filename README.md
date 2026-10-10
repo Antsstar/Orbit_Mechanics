@@ -906,10 +906,14 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        constellation to a lunar one, or one probe to a constellation). The Moon blocks 5.3% of
        Earth-to-lunar link time. Building it surfaced and fixed a silent bug that moved Moon-orbiting
        satellites a lunar distance per step
+     - vessel-relative frames and Clohessy-Wiltshire rendezvous targeting. Flown in the engine, CW
+       misses by its linearisation (~rho^2: 10 m from 4 km out, 6 km from 100 km out), against Lambert's
+       1e-10 km
+     - attitude as data (nadir, zenith, target, inertial and velocity pointing), thruster-fixed impulses,
+       and visibility cones per link end
    - **Next:**
      - a compiled per-pair geometry twin, which is where the time goes at 10,000 satellites
-     - vessel-relative frames: LVLH, a chaser's state in a target's frame, Clohessy-Wiltshire rendezvous
-       targeting, attitude modes, and visibility cones per vessel
+     - attitude dynamics (torques, slews), so a cone or a thruster can lag its pointing law
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

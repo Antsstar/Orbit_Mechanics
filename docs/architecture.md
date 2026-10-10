@@ -2669,6 +2669,43 @@ parent as its bubble, the rule `hierarchy._bubble_for_parent` already applied at
 
 ---
 
+## Vessel-relative frames, attitude and visibility cones
+
+**Relative motion** (`relative.py`). This is a chaser seen from a target: its state in the target's
+rotating RSW (Hill/LVLH) frame, `rho = Q (r_c - r_t)`, `rho_dot = Q (v_c - v_t) - omega x rho`, with an
+exact inverse.
+- **Clohessy-Wiltshire.** `cw_stm` is the linearised relative motion about a circular target, and
+  `cw_rendezvous` gives the two impulses that take the chaser to the target's origin in a given time.
+  `lvlh_dv_to_rsw` / `inertial_dv_to_rsw` express an impulse in the chaser's own RSW axes for
+  `apply_delta_v`. The CW matrix was written from memory, so the test checks it against exact two-body
+  propagation: the error is second order in separation (3.6e-4 km at 1 km, 3.6e-2 km at 10 km, a
+  quarter orbit at 7,000 km).
+- **Rendezvous.** Flown in the engine (`artemis3_rendezvous`, 0.4-orbit transfer), CW misses by its
+  linearisation, ~rho^2: 1.0e-2 / 0.26 / 6.4 km at 4 / 21 / 103 km initial separation. A Lambert plan
+  for the same transfer misses by 1e-10 km at all three, which verifies the frames and the impulses.
+
+**Attitude as data** (`attitude.py`). `Attitude(mode, reference, vector)` is a pointing law, not an
+integrated rotational state:
+- the modes are nadir, zenith, target, inertial and velocity;
+- the body frame has `+z` on the boresight and `+x` along the velocity made perpendicular to it;
+- `attitude_matrix` gives body to inertial, and `body_dv_to_rsw` turns a thruster-fixed impulse into the
+  RSW components `apply_delta_v` takes. On a circular orbit a nadir vessel's body `+x` burn is exactly
+  `(0, dv, 0)` RSW.
+
+Attitude dynamics (torques, slews) are not modelled: a vessel holds its law exactly.
+
+**Visibility cones** (`attitude.Cone`, `isl_scale.LinkSpec.cones`). This is a field of view about a link
+end's boresight. The link then also needs each coned end to see the other inside its cone. The margin
+is `range * sin(half_angle - off_axis)`: zero on the edge, positive inside, in km like the occultation
+and range margins it is `min`-combined with. Cones only remove visibility, so pruning stays exact.
+
+On the cislunar shells, an Earth-pointing cone on each lunar satellite keeps 4.3% of the link time at
+0.5 deg and 49.7% at 1.0 deg; the Earth constellation's orbits span ~1.13 deg seen from the Moon.
+Window edges are interpolated on the minimum margin, so even a cone that never binds could shift an
+edge where it is the smallest positive term. With a 180 deg cone the measured shift here is 0 s.
+
+---
+
 ## Validation layers
 
 Four distinct kinds of check, each catching what the others cannot.

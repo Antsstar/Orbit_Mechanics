@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -53,6 +53,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .access import ContactSample
+from .attitude import Cone, boresights, cone_margin_km
 from .geometry import segment_clearance
 from .isl import IslContact, IslSpec, IslWindow
 
@@ -91,12 +92,18 @@ class LinkSpec:
     `max_range_km` closes the link beyond that range. Pruning (see the module docstring) uses
     `min(max_range, L_los of each occulter)`; with no range limit and occulters far from the bodies,
     that bound is loose and most pairs are candidates, which is fine for small groups.
+
+    `cones` gives a link end a field of view (`attitude.Cone`, by body name): the link then also needs
+    each coned end to see the other inside its cone. Cones only remove visibility, so pruning stays
+    exact. The reference bodies the attitudes name must be in the recording (or in the arrays API's
+    `reference_states_km`).
     """
 
     occulters: Sequence[Occulter]
     max_range_km: Optional[float] = None
     group_a: Optional[Sequence[str]] = None
     group_b: Optional[Sequence[str]] = None
+    cones: Mapping[str, Cone] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.occulters:
@@ -254,6 +261,7 @@ def _bipartite_pairs(pos: NDArray[np.float64], radius_km: float,
 
 def _geometry(pos: NDArray[np.float64], vel: NDArray[np.float64], ia: NDArray[np.int64], ib: NDArray[np.int64],
               model: _Model, occ: Optional[NDArray[np.float64]] = None,
+              bore: Optional[NDArray[np.float64]] = None, half: Optional[NDArray[np.float64]] = None,
               ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Margin, range and range rate for pairs at one sample - `isl._pair_block`'s arithmetic, per pair.
     Occulter 0 is the frame origin (its clearance is computed on the positions as given, exactly as
@@ -269,6 +277,14 @@ def _geometry(pos: NDArray[np.float64], vel: NDArray[np.float64], ia: NDArray[np
                                                       h_graze_km=model.graze[k]))
     if model.max_range is not None:
         margin = np.minimum(margin, float(model.max_range) - ranges)
+    if bore is not None and half is not None:                         # fields of view, either end
+        unit = rel / np.where(ranges > 0.0, ranges, 1.0)[:, None]
+        for end, sign in ((ia, 1.0), (ib, -1.0)):
+            coned = ~np.isnan(half[end])
+            if coned.any():
+                margin = margin.copy()
+                margin[coned] = np.minimum(margin[coned], cone_margin_km(
+                    bore[end[coned]], sign * unit[coned], ranges[coned], half[end[coned]]))
     rel_v = vel[ib] - vel[ia]
     rates: NDArray[np.float64] = np.sum(rel * rel_v, axis=-1) / np.where(ranges > 0.0, ranges, 1.0)
     return np.asarray(margin, dtype=np.float64), ranges, rates
@@ -283,7 +299,8 @@ class _Scanner:
         self.n = n
         self.model = model
         self.prev: Optional[Tuple[float, NDArray[np.float64], NDArray[np.float64],
-                                  Optional[NDArray[np.float64]]]] = None
+                                  Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]] = None
+        self.half: Optional[NDArray[np.float64]] = None              # cone half-angles per body, NaN = none
         self.open: Dict[str, NDArray[Any]] = {k: np.empty(0) for k in self._OPEN}
         self.open["key"] = np.empty(0, dtype=np.int64)
         self.closed: List[Dict[str, NDArray[Any]]] = []
@@ -307,27 +324,28 @@ class _Scanner:
         return reach + 2.0 * v_max * dt + 1.0
 
     def feed(self, t: float, pos: NDArray[np.float64], vel: NDArray[np.float64],
-             occ: Optional[NDArray[np.float64]] = None) -> None:
+             occ: Optional[NDArray[np.float64]] = None, bore: Optional[NDArray[np.float64]] = None) -> None:
         if self.prev is None:
-            self.prev = (t, pos, vel, occ)
+            self.prev = (t, pos, vel, occ, bore)
             self.samples = 1
             return
-        t0, p0, v0, o0 = self.prev
+        t0, p0, v0, o0, b0 = self.prev
         if not t > t0:
             raise ValueError("ISL samples must be strictly increasing in time.")
         ca, cb = candidate_pairs(p0, self._radius(p0, v0, pos, vel, t - t0, o0, occ), self.model.split)
         for s in range(0, ca.size, _PAIR_BLOCK):
-            self._interval(t0, p0, v0, o0, t, pos, vel, occ, ca[s:s + _PAIR_BLOCK], cb[s:s + _PAIR_BLOCK],
-                           first=self.samples == 1)
-        self.prev = (t, pos, vel, occ)
+            self._interval(t0, p0, v0, o0, b0, t, pos, vel, occ, bore, ca[s:s + _PAIR_BLOCK],
+                           cb[s:s + _PAIR_BLOCK], first=self.samples == 1)
+        self.prev = (t, pos, vel, occ, bore)
         self.samples += 1
 
     def _interval(self, t0: float, p0: NDArray[np.float64], v0: NDArray[np.float64],
-                  o0: Optional[NDArray[np.float64]], t1: float, p1: NDArray[np.float64], v1: NDArray[np.float64],
-                  o1: Optional[NDArray[np.float64]], ia: NDArray[np.int64], ib: NDArray[np.int64],
+                  o0: Optional[NDArray[np.float64]], b0: Optional[NDArray[np.float64]], t1: float,
+                  p1: NDArray[np.float64], v1: NDArray[np.float64], o1: Optional[NDArray[np.float64]],
+                  b1: Optional[NDArray[np.float64]], ia: NDArray[np.int64], ib: NDArray[np.int64],
                   first: bool) -> None:
-        m0, r0, q0 = _geometry(p0, v0, ia, ib, self.model, o0)
-        m1, r1, q1 = _geometry(p1, v1, ia, ib, self.model, o1)
+        m0, r0, q0 = _geometry(p0, v0, ia, ib, self.model, o0, b0, self.half)
+        m1, r1, q1 = _geometry(p1, v1, ia, ib, self.model, o1, b1, self.half)
         key = ia * self.n + ib
         in0, in1 = m0 > 0.0, m1 > 0.0
 
@@ -397,11 +415,12 @@ class _Scanner:
         if self.samples < 2:
             raise ValueError("ISL windows need at least two samples to bracket a crossing.")
         assert self.prev is not None
-        t_end, p_end, v_end, o_end = self.prev
+        t_end, p_end, v_end, o_end, b_end = self.prev
         if self.open["key"].size:                                     # still in view at the last sample
             keys: NDArray[np.int64] = self.open["key"].astype(np.int64)
             a, b = keys // self.n, keys % self.n
-            _, r_end, q_end = _geometry(p_end, v_end, a.astype(np.int64), b.astype(np.int64), self.model, o_end)
+            _, r_end, q_end = _geometry(p_end, v_end, a.astype(np.int64), b.astype(np.int64), self.model, o_end,
+                                        b_end, self.half)
             self._close(keys, np.full(keys.size, t_end), np.ones(keys.size, bool), r_end, q_end)
         rows: Dict[str, NDArray[Any]]
         if self.closed:
@@ -436,13 +455,37 @@ def _scan(samples: Iterable[Tuple[float, NDArray[np.float64], NDArray[np.float64
     return scanner.finish(names)
 
 
-def _link_scan(samples: Iterable[Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]]]],
-               names: Sequence[str], spec: LinkSpec) -> IslContactTable:
+_Sample = Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]],
+                Mapping[str, NDArray[np.float64]]]
+
+
+def _link_scan(samples: Iterable[_Sample], names: Sequence[str], spec: LinkSpec) -> IslContactTable:
+    """Each sample: `(t, pos, vel, occulter centres 1.., {reference body: (6,) state})`, all relative to
+    `spec.occulters[0]`."""
     split = len(spec.group_a) if spec.group_a is not None else None
     scanner = _Scanner(len(names), _Model.of(spec, split))
-    for t, pos, vel, occ in samples:
-        scanner.feed(float(t), pos, vel, occ)
+    unknown = sorted(set(spec.cones) - set(names))
+    if unknown:
+        raise KeyError(f"cones given for {unknown}, which are not link ends")
+    if spec.cones:
+        scanner.half = np.full(len(names), np.nan)
+        for name, cone in spec.cones.items():
+            scanner.half[list(names).index(name)] = math.radians(cone.half_angle_deg)
+    coned = [(list(names).index(n), c.attitude) for n, c in spec.cones.items()]
+    for t, pos, vel, occ, refs in samples:
+        bore: Optional[NDArray[np.float64]] = None
+        if coned:
+            bore = np.full((len(names), 3), np.nan)
+            for k, att in coned:
+                ref = refs.get(att.reference) if att.reference is not None else None
+                bore[k] = boresights(att, pos[k], vel[k], None if ref is None else ref[:3],
+                                     None if ref is None else ref[3:])[0]
+        scanner.feed(float(t), pos, vel, occ, bore)
     return scanner.finish(names)
+
+
+def _references(spec: LinkSpec) -> List[str]:
+    return sorted({c.attitude.reference for c in spec.cones.values() if c.attitude.reference is not None})
 
 
 def _link_names(spec: LinkSpec, available: Sequence[str], bodies: Optional[Sequence[str]]) -> List[str]:
@@ -459,12 +502,14 @@ def _link_names(spec: LinkSpec, available: Sequence[str], bodies: Optional[Seque
 
 def link_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArray[np.float64],
                        times_s: NDArray[np.float64], names: Sequence[str],
-                       occulter_positions_km: Mapping[str, NDArray[np.float64]], spec: LinkSpec) -> IslContactTable:
+                       occulter_positions_km: Mapping[str, NDArray[np.float64]], spec: LinkSpec,
+                       reference_states_km: Optional[Mapping[str, NDArray[np.float64]]] = None) -> IslContactTable:
     """
     Link contacts for `(T, N, 3)` positions and velocities of the bodies `names` in any common inertial
     frame, with each occulter's `(T, 3)` positions in the same frame (`occulter_positions_km` by name).
     Positions are re-expressed relative to `spec.occulters[0]`. With groups, `names` must hold both
-    groups; the table's body list is `group_a + group_b`.
+    groups; the table's body list is `group_a + group_b`. `reference_states_km` gives the `(T, 6)` states
+    of the bodies the cones' attitudes name, in the same frame.
     """
     pos_all = np.asarray(positions_km, dtype=np.float64)
     vel_all = np.asarray(velocities_km_s, dtype=np.float64)
@@ -475,10 +520,16 @@ def link_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArr
     origin = np.asarray(occulter_positions_km[spec.occulters[0].body], dtype=np.float64)
     others = [np.asarray(occulter_positions_km[o.body], dtype=np.float64) for o in spec.occulters[1:]]
 
-    def samples() -> Iterator[Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]]]]:
+    refs_in = {n: np.asarray(v, dtype=np.float64) for n, v in (reference_states_km or {}).items()}
+    missing = [n for n in _references(spec) if n not in refs_in]
+    if missing:
+        raise KeyError(f"the cones' attitudes name {missing}; give their states in reference_states_km")
+
+    def samples() -> Iterator[_Sample]:
         for k, t in enumerate(np.asarray(times_s, dtype=np.float64)):
             occ = np.stack([o[k] - origin[k] for o in others]) if others else None
-            yield float(t), pos_all[k, cols] - origin[k], np.ascontiguousarray(vel_all[k, cols]), occ
+            refs = {n: np.concatenate([v[k, :3] - origin[k], v[k, 3:]]) for n, v in refs_in.items()}
+            yield float(t), pos_all[k, cols] - origin[k], np.ascontiguousarray(vel_all[k, cols]), occ, refs
     return _link_scan(samples(), order, spec)
 
 
@@ -497,8 +548,12 @@ def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpe
     origin = recorded.index(spec.occulters[0].body)
     others = np.asarray([recorded.index(o.body) for o in spec.occulters[1:]], dtype=np.int64)
     cols = np.asarray([recorded.index(n) for n in names], dtype=np.int64)
+    missing = [n for n in _references(spec) if n not in recorded]
+    if missing:
+        raise KeyError(f"the cones' attitudes name {missing}, which the recording does not include")
+    ref_cols = {n: recorded.index(n) for n in _references(spec)}
 
-    def samples() -> Iterator[Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArray[np.float64]]]]:
+    def samples() -> Iterator[_Sample]:
         for stem in manifest["chunks"]:
             t = np.load(directory / f"{stem}_t.npy")
             g = np.load(directory / f"{stem}_global.npy", mmap_mode="r")
@@ -506,7 +561,8 @@ def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpe
                 snap = np.asarray(g[k], dtype=np.float64)
                 rel = snap[cols] - snap[origin]
                 occ = (snap[others, :3] - snap[origin, :3]) if others.size else None
-                yield float(t[k]), np.ascontiguousarray(rel[:, :3]), np.ascontiguousarray(rel[:, 3:]), occ
+                refs = {n: snap[j] - snap[origin] for n, j in ref_cols.items()}
+                yield float(t[k]), np.ascontiguousarray(rel[:, :3]), np.ascontiguousarray(rel[:, 3:]), occ, refs
     return _link_scan(samples(), names, spec)
 
 
