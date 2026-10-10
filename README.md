@@ -872,9 +872,13 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        separate Hill from Laplace scaling
      - temporary systems, phase 5: regime switching. A probe's centre, propagator and force models
        are switched by event, and each combination is a sweep configuration
-       (`docs/figures/regimes.png`). On an Earth flyby, Cowell with the integration centre switched at
-       the sphere of influence is 47-60x more accurate than the same physics about the Sun alone, at
-       every step size
+       (`docs/figures/regimes.png`). The first result was that switching the integration centre at the
+       sphere of influence made Cowell 47-60x more accurate on an Earth flyby. The comparison itself
+       then showed this to be an artefact of the third-body model freezing its perturber within each
+       step.
+     - a staged third-body perturber, carried to each RK4 stage time: fourth order again, and the probe
+       lands 18.6 m from N-body truth after a 109-degree Earth flyby (814 km frozen). With it, the
+       choice of integration centre stops mattering
    - **Planned:**
      - per-regime or adaptive stepping (one clock is what currently limits regime-based load management)
      - a system's field beyond the monopole as a fidelity ladder for outside bodies: averaged

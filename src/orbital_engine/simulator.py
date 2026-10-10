@@ -30,6 +30,7 @@ from . import zonal  # registers "zonal"; ZONAL_MODEL is in the fused Cowell pla
 from . import drag  # registers "drag"; DRAG_MODEL and its density tables are in the fused plan below
 from . import tesseral  # registers "tesseral"; TESSERAL_MODEL is in the fused Cowell plan below
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
+from . import thirdbody  # registers "third_body"; staged rows need their step start time, see _advance
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
 if TYPE_CHECKING:
@@ -200,6 +201,10 @@ class Simulation:
         # model is resolved for the first time; `_thrust_idx` is empty until then, so it is never read.
         # See thrust.py's module docstring for why the mass lives in the parameter array at all.
         self._thrust_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        # Staged `"third_body"` rows and that model's parameter array (`resolve_force_models`): `_advance`
+        # writes each step's start time into their engine-owned `t0` column. Empty until resolved.
+        self._third_body_staged_idx: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._third_body_params: NDArray[np.float64] = np.zeros((1, 3), dtype=np.float64)
         self._thrust_params: NDArray[np.float64] = np.zeros(
             (1, len(thrust.THRUST_PARAM_NAMES)), dtype=np.float64)
 
@@ -470,9 +475,15 @@ class Simulation:
         # models (tens at most, see forces.py), runs only on a configuration change, and leaves
         # `_thrust_idx` empty - so `step()` skips the depletion entirely - when nothing thrusts.
         self._thrust_idx = np.empty(0, dtype=np.int64)
+        self._third_body_staged_idx = np.empty(0, dtype=np.int64)
         for rm in self._resolved_force_models:
             if rm.name == thrust.THRUST_MODEL:
                 self._thrust_idx, self._thrust_params = rm.indices, rm.params
+            elif rm.name == thirdbody.THIRD_BODY_MODEL:
+                # Staged third-body rows read the step's start time from the engine-owned `t0` column,
+                # which `_advance` writes; cached here like the thrust set (see thirdbody.py).
+                self._third_body_staged_idx = rm.indices[rm.params[rm.indices, 1] == 1.0]
+                self._third_body_params = rm.params
 
         self._refresh_cowell_plan()
 
@@ -1195,6 +1206,8 @@ class Simulation:
         array and what freezing it across a step costs.
         """
         cowell_idx = self._cowell_idx
+        if self._third_body_staged_idx.size > 0:
+            self._third_body_params[self._third_body_staged_idx, 2] = float(self.t)   # thirdbody "t0"
         if cowell_idx.size > 0:
             # Fused twin: leaves global_states[cowell_idx] exactly as RK4Integrator would and writes
             # the parent-relative result straight into _cowell_rel. See `_refresh_cowell_plan` for when

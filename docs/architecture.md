@@ -745,8 +745,13 @@ Sun-Earth is an exact two-body pair, which makes the error predictable as a vect
 2.6 % and 1.3 % of that prediction. Without `third_body` the error is 2.5e4 km. A test-only oracle
 that supplies the Sun at each stage's true time brings back fourth order (ratios 17.9, 17.0, 16.5,
 down to 2.1e-4 km at 2700 s). So the freeze is the only residual, and it dominates RK4's own
-error below a step of about a day. Removing it for *arena* perturbers means advancing them per stage,
-which is not built; the fourth-order alternative is a *tabulated* perturber, next section. A LEO
+error below a step of about a day. **Removing it for arena perturbers is now built, opt-in:**
+`staged=1` carries the perturber, relative to the parent, along its two-body conic to each stage time,
+from a step-start time the engine writes into the engine-owned `t0` column at each `_advance`. That conic
+is exact for an isolated pair (Sun-Earth with a massless Moon), and there it reproduces the oracle to
+three digits (1.04, 5.84e-2, 3.43e-3, 2.08e-4 km). Elsewhere it is exact to the pair's own perturbations
+over one step. The default stays frozen, bit for bit. The other fourth-order route is a *tabulated*
+perturber, next section. A LEO
 satellite perturbed by the Moon sees a perturber turning 13 times faster, and its coefficient is
 unmeasured.
 
@@ -2433,16 +2438,27 @@ at steps from 1,200 s to 30 s (`docs/figures/regimes.png`):
 | Kepler far, Cowell near (Earth + Sun third body) | 1.1e5 km | 1.0e5 km | 1.0e5 km |
 | Cowell both sides, centre switched | 1.8e4 km | 3.3e3 km | 814 km |
 | Cowell about the Sun throughout (Earth third body) | 1.1e6 km | 1.6e5 km | 3.8e4 km |
+| Cowell, staged perturber (either centre) | 7.4e3 km | 5.8 km | 0.019 km |
 
-What it shows:
-- **Switching the centre is what matters.** The same physics integrated about one centre is 47-60x
-  worse at every step. About the Sun, Earth is a stiff third body that `third_body` freezes within
-  each step.
+What it first appeared to show, and what it actually shows:
+- **First reading: switching the centre is what matters.** With the frozen perturber, the same physics
+  integrated about the Sun is 47-60x worse at every step. **That was an artefact of the freeze, not a
+  property of the frame.** Staging the perturber (`third_body`'s `staged=1`, sixth row below) makes
+  the two centres agree to four digits at every step. The reason is that Earth's pull is the same stiff
+  term in either frame, and the frames differ only by Earth's smooth conic. What differed was what got
+  frozen. Freezing Earth (4 m/s^2 at periapsis, moving fast relative to the Sun) is catastrophic;
+  freezing the Sun's tide near Earth is harmless. The centre switch looked decisive only because it
+  moved the freeze onto the harmless term.
 - **"Kepler far" is not enough.** The Earth pull neglected on the approach puts a floor of ~1e5 km
   under it. The flyby amplifies that arrival error, as it does for patched conics.
-- **Both Cowell configurations converge at first order**, not RK4's fourth: the error halves with
-  the step. The order is set by `third_body`'s perturber frozen within the step. The next lever is a
-  fourth-order perturber (`ephemeris_third_body`'s per-stage evaluation), not the switch.
+- **Both frozen Cowells converge at first order**, set by the freeze. The staged one converges at
+  fourth order, through the four steps below: 7.36e3, 320, 5.77, 0.315, 0.0186 km at 600 to 30 s
+  (ratios 18.3 and 16.9 over the last two halvings). At 30 s the probe lands **18.6 m** from N-body
+  truth after a 109 deg flyby; the frozen switched-centre Cowell is 814 km. Traced day by day, the
+  staged error stays ~1e-4 km until periapsis and then grows linearly. The remainder is RK4's
+  truncation on the 10,000 km pass, so the next lever is a smaller step *there*.
+- **Staging costs ~2.7x per step**: a `kepler_advance` per stage. It is still cheaper at every accuracy
+  below ~1e4 km: 0.3 km in 39 s, where the frozen version reaches 814 km in 28 s.
 - **Python events cost per step.** Patched conics costs ~15x plain Kepler at the same step (0.18 s vs
   0.012 s at 600 s), because the two event functions are evaluated every step. Load management has
   an overhead, and here it is larger than the Keplerian physics it manages.

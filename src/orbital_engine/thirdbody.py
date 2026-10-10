@@ -117,8 +117,18 @@ RK4's own error on the same run is 1.04 km at h = 21600 s, falling at fourth ord
 2700 s. Against the freeze's 7.5e-4 h, the crossover is near h ~ 1 day. **At every practical step size
 the freeze dominates, and convergence is first order.** Reaching even 1e-3 km would take h ~ 1.3 s.
 The measurements, and a test-only oracle that restores fourth order by supplying the perturber at each
-stage, are in `tests/validation/test_third_body.py`. Fixing the freeze in the engine means advancing
-perturbers per stage. It is out of scope here and is the remaining limitation.
+stage, are in `tests/validation/test_third_body.py`.
+
+**The staged perturber (`staged=1`), opt-in.** The kernel is given each stage's time `t`, and the step
+began at `t0`, which the engine writes into the engine-owned `t0` column at the start of every
+`_advance` (the same pattern as `srp.py`'s `shadow_latch`). With `staged=1` the perturber, relative to
+the parent, is carried from its start-of-step state along its two-body conic (`mu_s + mu_P`, by
+`integrators.kepler_advance`) to `t`, so every stage sees it where it is at that stage. That conic is
+the *exact* relative motion when perturber and parent form an isolated pair: Sun-Earth with a massless
+Moon, as in the validation, and the engine itself propagates that pair on that conic. Otherwise it is
+exact to the pair's own perturbations over one step. Where it is exact, convergence returns to RK4's
+fourth order (measured in `tests/validation/test_third_body.py`, matching the oracle). The default
+stays `staged=0`, the frozen perturber, so every existing result is bit-identical.
 
 The freeze scales with the perturber's angular rate *as seen from the parent*. A LEO satellite under
 the Moon sees `n_Moon = 2.66e-6 rad/s`, 13 times the Sun's rate for the Moon, so expect a
@@ -135,6 +145,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .custom_types import ScalarSeconds
+from .integrators import kepler_advance
 from .registry import register_force_model
 
 if TYPE_CHECKING:
@@ -143,14 +154,24 @@ if TYPE_CHECKING:
 __all__ = ["THIRD_BODY_MODEL", "THIRD_BODY_PARAM_NAMES", "third_body_kernel"]
 
 THIRD_BODY_MODEL: Final[str] = "third_body"
-THIRD_BODY_PARAM_NAMES: Final = ("perturber",)
+THIRD_BODY_PARAM_NAMES: Final = ("perturber", "staged", "t0")
 _PERTURBER_COL: Final[int] = 0
+_STAGED_COL: Final[int] = 1
+_T0_COL: Final[int] = 2
 
 
 def _validate_perturber(
     sim: "Simulation", bodies: NDArray[np.int64], coefficients: Mapping[str, float],
 ) -> None:
     """`validate_coefficients` hook for `"third_body"`. See the module docstring for each rule."""
+    if "t0" in coefficients:
+        raise ValueError(
+            f"force model '{THIRD_BODY_MODEL}': 't0' is engine-owned state, not a coefficient. "
+            f"Simulation._advance writes each step's start time there for staged=1 rows.")
+    if "staged" in coefficients and float(coefficients["staged"]) not in (0.0, 1.0):
+        raise ValueError(
+            f"force model '{THIRD_BODY_MODEL}': staged={coefficients['staged']!r} must be 0 (frozen "
+            f"perturber, the default) or 1 (perturber advanced to each stage time).")
     if "perturber" not in coefficients:
         raise ValueError(
             f"force model '{THIRD_BODY_MODEL}' needs a 'perturber' coefficient (the perturbing body's "
@@ -220,14 +241,24 @@ def third_body_kernel(
         a   = mu_array[s] * [ (r_s - r)/|r_s - r|^3 - r_s/|r_s|^3 ]
 
     See the module docstring for the derivation, citation, validation rules, and the frozen-perturber
-    approximation under `RK4Integrator`. `t` is unused. The perturber's position comes from `state`,
-    like every other row.
+    approximation under `RK4Integrator`. With `staged == 0` (the default) `t` is unused and the
+    perturber's position comes from `state`, like every other row. With `staged == 1` it is carried
+    from that start-of-step state along its two-body conic about the parent to the stage time `t`
+    (the step began at the engine-owned `t0`); see the module docstring.
     """
     perturbers = params[indices, _PERTURBER_COL].astype(np.int64)
     parents = parent_indices[indices]
     mu_s = mu_array[perturbers]
 
     r_s = state[perturbers, :3] - state[parents, :3]    # perturber relative to the parent
+    # A caller passing only the perturber column (the layout before staging existed) gets the frozen form.
+    staged = params[indices, _STAGED_COL] == 1.0 if params.shape[1] > _T0_COL else np.zeros(indices.size, bool)
+    if staged.any():
+        rows = np.flatnonzero(staged)
+        elapsed = float(t) - float(params[indices[rows[0]], _T0_COL])   # one t0 per step, for all rows
+        if elapsed != 0.0:
+            v_s = state[perturbers[rows], 3:] - state[parents[rows], 3:]
+            r_s[rows], _ = kepler_advance(r_s[rows], v_s, elapsed, mu_s[rows] + mu_array[parents[rows]])
     d = r_s - (state[indices, :3] - state[parents, :3])  # perturber relative to the body: r_s - r
 
     d2 = np.einsum("ij,ij->i", d, d)

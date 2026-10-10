@@ -18,7 +18,14 @@ Expected, derived before measuring:
   switched 1.8e4 km (3.3e3). The switch of *centre* is what matters: the same physics about one centre
   is 47-60x worse at every step from 30 s to 600 s. Both Cowell configurations converge at *first*
   order (error halves with the step), set by `third_body`'s perturber frozen within each step, not by
-  RK4; a fourth-order perturber (`ephemeris_third_body`) is the next lever.
+  RK4.
+- **Staging the perturber** (`third_body`'s `staged=1`, carried to each RK4 stage time) removes the
+  freeze, and with it the reason the centre mattered: Earth's pull is the same stiff term in either
+  frame, and the two frames differ by Earth's smooth conic. *Measured* at 600 / 300 / 120 s: 7.36e3 /
+  320 / 5.77 km, the same to four digits about either centre; 300 -> 120 s is a ratio of 55,
+  fourth order. Traced against truth day by day, the error stays ~1e-4 km until periapsis and then
+  grows linearly: it is RK4's truncation on the 10,000 km pass, which a smaller step there (adaptive
+  stepping) would address, not a frame.
 """
 from __future__ import annotations
 
@@ -119,3 +126,22 @@ def test_switching_the_centre_is_what_wins(db_session_factory: Callable[[], Sess
     assert 1.5e5 < res["patched"] < 2.5e5
     assert res["switched"] < res["kepler far"] / 3.0 < res["patched"] / 3.0
     assert res["switched"] < res["sun only"] / 30.0
+
+
+STAGED_SUN = Regime(S, PT.COWELL, (F("point_mass_gravity"),
+                                   F("third_body", {"staged": 1.0}, body_coefficients={"perturber": E})))
+STAGED_EARTH = Regime(E, PT.COWELL, (F("point_mass_gravity"),
+                                     F("third_body", {"staged": 1.0}, body_coefficients={"perturber": S})))
+
+
+def test_a_staged_perturber_makes_the_centre_irrelevant(db_session_factory: Callable[[], Session]) -> None:
+    def cfg(name: str, inside: Regime, outside: Regime) -> ModelConfig:
+        return ModelConfig(name, PT.KEPLERIAN, 300.0, bodies=[P],
+                           regimes=(RegimeSwitch(P, E, POLICY, inside, outside),))
+    res = {r.config_name: r.error.max_km for r in run_sweep(
+        lambda: scenarios.planet_flyby(db_session_factory(), t_ca_s=10 * DAY),
+        [cfg("frozen", COW_EARTH, COW_SUN), cfg("staged", STAGED_EARTH, STAGED_SUN),
+         cfg("staged, sun only", STAGED_SUN, STAGED_SUN)],
+        20 * DAY, timing_batches=1, timing_warmup=0)}
+    assert res["staged"] < res["frozen"] / 10.0
+    assert abs(res["staged"] / res["staged, sun only"] - 1.0) < 1e-2

@@ -1519,6 +1519,25 @@ The test grid now checks conservation, not a second solver: energy, angular mome
 `iod.kepler_universal` was deliberately left on plain Newton. It is the independent check elsewhere,
 and its users (Lambert, Gauss) are elliptic.
 
+## A comparison's winner was an artefact of a sub-model (phase 5, regime switching)
+
+The first regime frontier said "switch the integration centre at the sphere of influence: 47-60x more
+accurate at every step". The numbers were right and the conclusion was wrong. Both Cowell configurations
+used `third_body`, which freezes its perturber within each step, a documented first-order
+approximation. Integrated about the Sun, the frozen perturber is Earth: 4 m/s^2 at periapsis, and
+moving. Integrated about Earth, the frozen perturber is the Sun's tide, which is tiny. So the centre
+switch looked decisive only because it moved the freeze onto the harmless term.
+
+How it surfaced: after staging the perturber (fourth order), the two centres gave the **same error to
+four digits** at three step sizes. Identical numbers from supposedly different methods are a signal,
+not a coincidence. Tracing the probe against truth day by day showed the remaining error appears at
+periapsis and is common to both frames (RK4 truncation on the pass).
+
+The lesson for this engine: **when a configuration wins a comparison, check which approximation inside
+each configuration dominates its error before attributing the win to the axis being swept.** The
+first-order convergence of *both* frozen Cowells was the clue I had and read past: when two methods
+share an unexpected convergence order, the shared ingredient is the suspect.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

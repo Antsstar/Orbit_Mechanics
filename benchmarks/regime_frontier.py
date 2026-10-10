@@ -17,6 +17,10 @@ Earth Hill radii (the best patched-conic radius, phase 4), at steps from 30 s to
 - `Cowell, centre switched` - Cowell on both sides: about the Sun with Earth as third body far, about
   Earth with the Sun as third body near.
 - `Cowell about the Sun` - the same physics, never switching centre.
+- `Cowell, staged perturber` - Cowell on both sides with the third body **staged** (`third_body`'s
+  `staged=1`: carried to each RK4 stage time), centre switched. The same configuration about the Sun
+  alone gives the same error to four digits, so it is not plotted separately: once the perturber is
+  staged the centre stops mattering here, and the gap between the two frozen Cowells was the freeze.
 
 Error is the probe's position error at day 20; cost is the wall time of the propagation
 (`run_sweep`, one batch). The engine has one clock, so every configuration takes the same steps;
@@ -52,7 +56,11 @@ POLICY = EncounterPolicy(0.76, 0.80, unit="hill")
 KEP_SUN, KEP_EARTH = Regime(S), Regime(E)
 COW_SUN = Regime(S, PT.COWELL, (F("point_mass_gravity"), F("third_body", body_coefficients={"perturber": E})))
 COW_EARTH = Regime(E, PT.COWELL, (F("point_mass_gravity"), F("third_body", body_coefficients={"perturber": S})))
-# Categorical slots 1-5 in fixed order (validated; three below 3:1 on the surface, so every series also
+STAGED_SUN = Regime(S, PT.COWELL, (F("point_mass_gravity"),
+                                   F("third_body", {"staged": 1.0}, body_coefficients={"perturber": E})))
+STAGED_EARTH = Regime(E, PT.COWELL, (F("point_mass_gravity"),
+                                     F("third_body", {"staged": 1.0}, body_coefficients={"perturber": S})))
+# Categorical slots 1-6 in fixed order (validated; three below 3:1 on the surface, so every series also
 # has its own marker and a direct label).
 SERIES = [
     ("Kepler, never handed over", None, "#2a78d6", "o"),
@@ -60,6 +68,7 @@ SERIES = [
     ("Kepler far, Cowell near", (COW_EARTH, KEP_SUN), "#1baf7a", "^"),
     ("Cowell, centre switched", (COW_EARTH, COW_SUN), "#eda100", "D"),
     ("Cowell about the Sun", (COW_SUN, COW_SUN), "#e87ba4", "v"),
+    ("Cowell, staged perturber", (STAGED_EARTH, STAGED_SUN), "#008300", "P"),
 ]
 INK = "#2b2b2a"
 
@@ -104,8 +113,8 @@ def main() -> int:
     ax1.grid(True, which="major", alpha=0.25)
     ax2.set_xlabel("step (s)")
     ax2.set_ylabel("probe error at day 20 vs N-body (km)")
-    ax2.set_title("Both Cowells converge at first order (third_body's frozen perturber);\n"
-                  "switching the centre is ~50x better at every step", fontsize=11, color=INK)
+    ax2.set_title("Frozen perturber: first order. Staged perturber: fourth order,\n"
+                  "and the integration centre stops mattering", fontsize=11, color=INK)
     ax2.grid(True, which="major", alpha=0.25)
     ax2.invert_xaxis()
     ax2.legend(fontsize=8, frameon=False, loc="lower left")

@@ -139,14 +139,15 @@ def _new_session() -> Session:
     return sessionmaker(bind=engine)()
 
 
-def _moon_on_cowell(third_body: bool = True) -> Simulation:
+def _moon_on_cowell(third_body: bool = True, staged: bool = False) -> Simulation:
     sim = scenarios.sun_earth_moon(_new_session(), moon_mu=0.0)
     sim.record_history = False
     moon = sim.name_to_index["Moon"]
     sim.set_propagator(moon, PropagatorType.COWELL)
     sim.enable_force_model("point_mass_gravity", moon)
     if third_body:
-        sim.enable_force_model(THIRD_BODY_MODEL, moon, perturber=float(sim.name_to_index["Sun"]))
+        sim.enable_force_model(THIRD_BODY_MODEL, moon, perturber=float(sim.name_to_index["Sun"]),
+                               staged=1.0 if staged else 0.0)
     return sim
 
 
@@ -331,6 +332,34 @@ def test_perturber_oracle_restores_fourth_order(truth: Dict[str, ArrF]) -> None:
     ratios = [errors[i] / errors[i + 1] for i in range(len(errors) - 1)]
     assert ORACLE_ERR_AT_21600_KM[0] < errors[0] < ORACLE_ERR_AT_21600_KM[1], errors
     assert all(ORACLE_RATIO[0] < q < ORACLE_RATIO[1] for q in ratios), (errors, ratios)
+
+
+# The engine's own fix, `staged=1`: the Sun, relative to Earth, carried along its two-body conic to each
+# stage time (see thirdbody.py). With the Moon massless, Sun-Earth is an isolated pair that the engine
+# propagates on exactly that conic, so staging is the oracle above computed inside the kernel, and the
+# same band applies: errors near 1.04 km at 21600 s and ratios near 16. Measured: the oracle's values to
+# three digits (1.04, 5.84e-2, 3.43e-3, 2.08e-4 km; the oracle 2.07e-4 at 2700 s).
+def test_staged_perturber_restores_fourth_order_in_the_engine(truth: Dict[str, ArrF]) -> None:
+    errors = []
+    for dt in ORACLE_STEPS:
+        sim = _moon_on_cowell(staged=True)
+        errors.append(float(np.linalg.norm(_run(sim, dt) - truth["rel"])))
+    ratios = [errors[i] / errors[i + 1] for i in range(len(errors) - 1)]
+    assert ORACLE_ERR_AT_21600_KM[0] < errors[0] < ORACLE_ERR_AT_21600_KM[1], errors
+    assert all(ORACLE_RATIO[0] < q < ORACLE_RATIO[1] for q in ratios), (errors, ratios)
+
+
+def test_staging_is_opt_in_and_t0_is_engine_owned() -> None:
+    frozen, default = _moon_on_cowell(), _moon_on_cowell()
+    moon, sun = default.name_to_index["Moon"], default.name_to_index["Sun"]
+    default.enable_force_model(THIRD_BODY_MODEL, moon, perturber=float(sun))   # no staged keyword
+    for sim in (frozen, default):
+        _run(sim, 21600.0)
+    assert np.array_equal(frozen.global_states, default.global_states)
+    with pytest.raises(ValueError, match="engine-owned"):
+        default.enable_force_model(THIRD_BODY_MODEL, moon, perturber=float(sun), t0=5.0)
+    with pytest.raises(ValueError, match="staged"):
+        default.enable_force_model(THIRD_BODY_MODEL, moon, perturber=float(sun), staged=0.5)
 
 
 # ==================================================================================================
