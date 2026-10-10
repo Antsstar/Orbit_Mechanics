@@ -1595,6 +1595,18 @@ The check that found it is cheap and worth reusing: **scale a computed correctio
 confirm 1.0 is the minimum.** A correction with the right magnitude but a biased direction or phase
 passes a magnitude check and fails this one.
 
+## An optional dependency missing from the test extra failed mypy on CI only
+
+`api/http.py` imports `uvicorn` inside `main()`. Locally it was installed, so `mypy --strict` passed.
+The CI compiled-kernel jobs install `.[test]`, which had `fastapi` and `httpx` but not `uvicorn`, so
+mypy failed with `import-not-found` on all three Python versions. A lazy import inside a function does
+not exempt it: mypy resolves every import in `src/`.
+
+The rule: **every package `src/` imports, even lazily or behind an extra, must be in the `[test]`
+extra** (or carry a `[[tool.mypy.overrides]]` `ignore_missing_imports` entry, as scipy, sgp4 and pymsis do,
+when it ships no types). The no-numba job installs no `[test]` extra and runs no mypy, so tests that
+need such a package skip with `pytest.importorskip`.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order
