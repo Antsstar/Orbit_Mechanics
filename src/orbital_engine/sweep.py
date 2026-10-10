@@ -73,7 +73,7 @@ does that.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -95,6 +95,9 @@ from .reference import TRUTH_ATOL, TRUTH_RTOL, ReferenceTrajectory, TesseralTrut
 from .benchmark import measure
 from .kernels import NUMBA_AVAILABLE
 from .simulator import Simulation
+
+if TYPE_CHECKING:
+    from .regimes import RegimeSwitch
 
 __all__ = [
     "ForceModelSpec", "ModelConfig", "ExternalTier", "ErrorStats", "SweepResult",
@@ -148,7 +151,10 @@ class ModelConfig(object):
     sweep axis. A pair the configuration cannot pair (a non-Keplerian member, say) is not refused: the
     encounter is logged as a skip in `Simulation.hierarchy_changes`, which is the honest result for
     that configuration. `patches` (`hierarchy.PatchSpec`) do the same for patched conics: a massless
-    body handed to a planet inside one radius and back beyond another.
+    body handed to a planet inside one radius and back beyond another. `regimes`
+    (`regimes.RegimeSwitch`) switch a massless body's whole model - centre, propagator and force
+    models - by the same events; a regime switch overrides the config's own propagator and force
+    models for that body, which is the point.
     """
     name: str
     propagator: PropagatorType
@@ -162,6 +168,7 @@ class ModelConfig(object):
     integrator: Optional[str] = None
     encounters: Sequence[EncounterSpec] = field(default_factory=tuple)
     patches: Sequence[PatchSpec] = field(default_factory=tuple)
+    regimes: Sequence["RegimeSwitch"] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -314,6 +321,13 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
                                f"simulation; have {sorted(sim.name_to_index)}")
         sim.watch_patch(sim.name_to_index[patch.body], sim.name_to_index[patch.planet], patch.policy,
                         patch.target)
+    for switch in config.regimes:
+        for body_name in (switch.body, switch.planet):
+            if body_name not in sim.name_to_index:
+                raise KeyError(f"config '{config.name}': regime body {body_name!r} is not in this "
+                               f"simulation; have {sorted(sim.name_to_index)}")
+        from .regimes import watch_regimes
+        watch_regimes(sim, switch)
 
     return idx
 

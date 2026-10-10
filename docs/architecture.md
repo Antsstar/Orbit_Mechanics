@@ -2402,6 +2402,56 @@ The same velocity argument predicts Hill scaling here as well. That this flyby d
 cleanly may be because the error is dominated by arrival-geometry amplification rather than by the
 integrated velocity error. It is unmeasured which.
 
+### Phase 5: regime switching, on the cost-error frontier
+
+Phase 4 changes a probe's *frame* at the boundary and keeps it Keplerian on both sides, so each side
+neglects the other primary. `regimes.py` changes the *model*. A `Regime(parent, propagator,
+force_models)` says what the body orbits, whether it is `KEPLERIAN` or `COWELL`, and which forces act.
+A `RegimeSwitch(body, planet, policy, inside, outside)` applies `inside` within the policy's form
+radius and `outside` beyond its dissolve radius, by the same events as phase 4. It is a sweep
+configuration (`ModelConfig.regimes`).
+
+`apply_regime` works in a fixed order:
+1. **Clear the body's force models.** Their coefficients belong to the old centre: J2 of the wrong
+   planet, or a third-body perturber that is about to become the parent.
+2. **Reparent.** This is a frame change; nothing moves.
+3. **Set the propagator.**
+4. **Enable the new models.**
+5. **Re-derive the elements.**
+
+Step 5 is not optional. A Cowell body's elements are stale by design, so on a Cowell -> Kepler switch
+the next Keplerian step would put the body wherever its pre-Cowell elements say. The test has a
+negative control that skips step 5 and catches the jump.
+
+`benchmarks/regime_frontier.py` runs five configurations over the 20-day flyby (periapsis at day 10)
+at steps from 1,200 s to 30 s (`docs/figures/regimes.png`):
+
+| Configuration | dt 600 s | dt 120 s | dt 30 s |
+|---|---:|---:|---:|
+| Kepler, never handed over | 4.3e6 km | 4.3e6 km | 4.3e6 km |
+| patched conics (Kepler both sides) | 2.0e5 km | 2.0e5 km | 2.0e5 km |
+| Kepler far, Cowell near (Earth + Sun third body) | 1.1e5 km | 1.0e5 km | 1.0e5 km |
+| Cowell both sides, centre switched | 1.8e4 km | 3.3e3 km | 814 km |
+| Cowell about the Sun throughout (Earth third body) | 1.1e6 km | 1.6e5 km | 3.8e4 km |
+
+What it shows:
+- **Switching the centre is what matters.** The same physics integrated about one centre is 47-60x
+  worse at every step. About the Sun, Earth is a stiff third body that `third_body` freezes within
+  each step.
+- **"Kepler far" is not enough.** The Earth pull neglected on the approach puts a floor of ~1e5 km
+  under it. The flyby amplifies that arrival error, as it does for patched conics.
+- **Both Cowell configurations converge at first order**, not RK4's fourth: the error halves with
+  the step. The order is set by `third_body`'s perturber frozen within the step. The next lever is a
+  fourth-order perturber (`ephemeris_third_body`'s per-stage evaluation), not the switch.
+- **Python events cost per step.** Patched conics costs ~15x plain Kepler at the same step (0.18 s vs
+  0.012 s at 600 s), because the two event functions are evaluated every step. Load management has
+  an overhead, and here it is larger than the Keplerian physics it manages.
+
+**What a regime cannot do yet.** There is one clock, so a regime cannot change the step: the far side
+runs at the near side's step, and a cheap far regime saves cost per step, not steps. A second
+limitation is that `set_cowell_integrator` is arena-wide, so a regime cannot choose its integrator.
+Per-regime or adaptive stepping is the lever that would let load management save steps.
+
 Beyond the monopole, the fidelity ladder continues. An inner pair's quadrupole rotates with its
 orbit, so the field outside is periodic at harmonics of the inner mean motion (`2n` for a circular
 pair), and averaging it gives a ring-like secular term. The full ladder is: monopole, averaged

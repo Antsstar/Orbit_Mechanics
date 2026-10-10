@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from typing import Callable, List, Optional, Any, Dict, Sequence, Tuple, Union, cast
+from typing import TYPE_CHECKING, Callable, List, Optional, Any, Dict, Sequence, Tuple, Union, cast
 from .custom_types import ScalarSeconds, PropagatorType, ForceModelMask, COEIndex
 from numpy.typing import NDArray
 
@@ -32,6 +32,8 @@ from . import tesseral  # registers "tesseral"; TESSERAL_MODEL is in the fused C
 from . import thrust  # registers "thrust"; also supplies deplete_mass, called from step() below
 from . import manoeuvres  # impulsive Delta-v: Manoeuvre, apply_delta_v, used by the API below
 from . import events  # event-driven step splitting: Event, locate_crossing, used by the API below
+if TYPE_CHECKING:
+    from .regimes import RegimeSwitch
 from . import hierarchy  # temporary systems: form_system / dissolve_system, used by the API below
 
 # A library must not write to stdout. Build-time diagnostics go to the logger, where an application
@@ -1749,6 +1751,13 @@ class Simulation:
         """Hand `body` to `planet` inside `policy.form_km` and back beyond `policy.dissolve_km`, at the
         located crossing epochs. See `hierarchy.patch_events`."""
         return hierarchy.watch_patch(self, body, planet, policy, target)
+
+    def watch_regimes(self, switch: "RegimeSwitch") -> Tuple[events.Event, events.Event]:
+        """Switch a massless body's centre, propagator and force models by event: `switch.inside`
+        within `switch.policy.form_km` of `switch.planet`, `switch.outside` beyond `dissolve_km`. See
+        `regimes.py`."""
+        from .regimes import watch_regimes
+        return watch_regimes(self, switch)
 
     @property
     def hierarchy_changes(self) -> tuple[hierarchy.HierarchyChange, ...]:

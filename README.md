@@ -870,8 +870,13 @@ Ordered so that each stage makes the next one safe rather than merely possible.
        closer to N-body truth than never handing over. Even so, it is still 2e5 km off after 30 days,
        because a strong flyby amplifies any arrival error. The best hand-over radius does not
        separate Hill from Laplace scaling
+     - temporary systems, phase 5: regime switching. A probe's centre, propagator and force models
+       are switched by event, and each combination is a sweep configuration
+       (`docs/figures/regimes.png`). On an Earth flyby, Cowell with the integration centre switched at
+       the sphere of influence is 47-60x more accurate than the same physics about the Sun alone, at
+       every step size
    - **Planned:**
-     - regime-based propagator switching, judged on the cost-error frontier
+     - per-regime or adaptive stepping (one clock is what currently limits regime-based load management)
      - a system's field beyond the monopole as a fidelity ladder for outside bodies: averaged
        quadrupole, then the periodic (Fourier) quadrupole at harmonics of the inner orbits
 6. **Constellation networking.** Routing, handover and link budgets go in a separate repository
