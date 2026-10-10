@@ -44,6 +44,7 @@ __all__ = [
     "LAYERED_TABLE_ROW", "TABLE_N_NODES_COL", "TABLE_F107_COL", "TESSERAL_VW_SIZE",
     "COWELL_POINT_MASS", "COWELL_J2", "COWELL_ZONAL", "COWELL_DRAG", "COWELL_TESSERAL", "COWELL_THIRD_BODY",
     "cowell_leapfrog_step", "cowell_yoshida4_step", "cowell_encke_step",
+    "isl_pair_geometry",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -2026,3 +2027,99 @@ def rebase_relative_states(
         b = body_sys_map[s]
         for c in range(6):
             local_states[s, c] = global_states[s, c] - global_states[b, c]
+
+
+@njit
+def _nan_min(a: float, b: float) -> float:
+    """`np.minimum`'s scalar rule: NaN in either argument propagates."""
+    if a != a or b != b:
+        return math.nan
+    return a if a < b else b
+
+
+@njit
+def _seg_clearance_scalar(ax: float, ay: float, az: float, bx: float, by: float, bz: float,
+                          rg: float) -> float:
+    """`geometry.segment_clearance` for one segment, operation for operation: `tau* = clip(-(r1.d)/|d|^2,
+    0, 1)` (zero for coincident ends), `|r1 + tau* d| - rg`, with `rg = float(radius) + float(graze)`."""
+    dx = bx - ax
+    dy = by - ay
+    dz = bz - az
+    denom = dx * dx + dy * dy + dz * dz
+    tau = 0.0
+    if denom > 0.0:
+        tau = -(ax * dx + ay * dy + az * dz) / denom
+    if tau == tau:                                    # np.clip propagates NaN
+        tau = 0.0 if tau < 0.0 else (1.0 if tau > 1.0 else tau)
+    cx = ax + tau * dx
+    cy = ay + tau * dy
+    cz = az + tau * dz
+    return math.sqrt(cx * cx + cy * cy + cz * cz) - rg
+
+
+@njit
+def isl_pair_geometry(
+    pos: NDArray[np.float64], vel: NDArray[np.float64], ia: NDArray[np.int64], ib: NDArray[np.int64],
+    radius: NDArray[np.float64], graze: NDArray[np.float64], occ: NDArray[np.float64],
+    has_range: bool, max_range: float, has_cone: bool, bore: NDArray[np.float64],
+    half: NDArray[np.float64], margin: NDArray[np.float64], ranges: NDArray[np.float64],
+    rates: NDArray[np.float64],
+) -> None:
+    """
+    Link margin, range and range rate for each pair `(ia[k], ib[k])`, written into the caller-owned
+    `margin`, `ranges`, `rates` - the compiled twin of `isl_scale._geometry_numpy`, one fused loop with no
+    temporaries. `radius`/`graze` are the occulter spheres (occulter 0 sits at the origin; `occ[k - 1]`
+    is the centre of occulter `k`); `has_range`/`max_range` the range limit; with `has_cone`, `bore`
+    `(N, 3)` and `half` `(N,)` (NaN = no cone) add each coned end's cone margin.
+
+    Every operation is the reference's, in the same order, so without cones the results are expected
+    **bit-identical** (additions, multiplications, division and `sqrt` are correctly rounded). The cone
+    term goes through `arccos` and `sin`, whose NumPy and libm implementations may differ by an ulp.
+    """
+    n_occ = radius.shape[0]
+    half_pi = 0.5 * math.pi
+    for k in range(ia.shape[0]):
+        a = ia[k]
+        b = ib[k]
+        ax = pos[a, 0]
+        ay = pos[a, 1]
+        az = pos[a, 2]
+        bx = pos[b, 0]
+        by = pos[b, 1]
+        bz = pos[b, 2]
+        rx = bx - ax
+        ry = by - ay
+        rz = bz - az
+        rng = math.sqrt(rx * rx + ry * ry + rz * rz)
+        ranges[k] = rng
+        m = _seg_clearance_scalar(ax, ay, az, bx, by, bz, radius[0] + graze[0])
+        for j in range(1, n_occ):
+            cx = occ[j - 1, 0]
+            cy = occ[j - 1, 1]
+            cz = occ[j - 1, 2]
+            m = _nan_min(m, _seg_clearance_scalar(ax - cx, ay - cy, az - cz, bx - cx, by - cy, bz - cz,
+                                                  radius[j] + graze[j]))
+        if has_range:
+            m = _nan_min(m, max_range - rng)
+        safe = rng if rng > 0.0 else 1.0
+        if has_cone:
+            ux = rx / safe
+            uy = ry / safe
+            uz = rz / safe
+            for end in range(2):
+                e = a if end == 0 else b
+                h = half[e]
+                if h == h:                            # coned end
+                    sgn = 1.0 if end == 0 else -1.0
+                    cosang = bore[e, 0] * (sgn * ux) + bore[e, 1] * (sgn * uy) + bore[e, 2] * (sgn * uz)
+                    if cosang == cosang:
+                        cosang = -1.0 if cosang < -1.0 else (1.0 if cosang > 1.0 else cosang)
+                    d = h - math.acos(cosang)
+                    if d == d:
+                        d = -half_pi if d < -half_pi else (half_pi if d > half_pi else d)
+                    m = _nan_min(m, rng * math.sin(d))
+        margin[k] = m
+        vx = vel[b, 0] - vel[a, 0]
+        vy = vel[b, 1] - vel[a, 1]
+        vz = vel[b, 2] - vel[a, 2]
+        rates[k] = (rx * vx + ry * vy + rz * vz) / safe

@@ -52,6 +52,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 import numpy as np
 from numpy.typing import NDArray
 
+from . import kernels
 from .access import ContactSample
 from .attitude import Cone, boresights, cone_margin_km
 from .geometry import segment_clearance
@@ -262,7 +263,37 @@ def _bipartite_pairs(pos: NDArray[np.float64], radius_km: float,
 def _geometry(pos: NDArray[np.float64], vel: NDArray[np.float64], ia: NDArray[np.int64], ib: NDArray[np.int64],
               model: _Model, occ: Optional[NDArray[np.float64]] = None,
               bore: Optional[NDArray[np.float64]] = None, half: Optional[NDArray[np.float64]] = None,
+              compiled: Optional[bool] = None,
               ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Margin, range and range rate for pairs at one sample, by `_geometry_numpy` (the definition) or its
+    compiled twin `kernels.isl_pair_geometry`. `compiled=None` takes `kernels.NUMBA_AVAILABLE`; without
+    numba the NumPy path always runs (the kernel interpreted would be slower)."""
+    if not (kernels.NUMBA_AVAILABLE if compiled is None else compiled):
+        return _geometry_numpy(pos, vel, ia, ib, model, occ, bore, half)
+    p = np.asarray(pos, dtype=np.float64)
+    v = np.asarray(vel, dtype=np.float64)
+    n_occ = len(model.radius)
+    if n_occ > 1:
+        assert occ is not None
+        centres = np.asarray(occ, dtype=np.float64)
+    else:
+        centres = np.zeros((1, 3))
+    has_cone = bore is not None and half is not None
+    margin = np.empty(ia.size)
+    ranges = np.empty(ia.size)
+    rates = np.empty(ia.size)
+    kernels.isl_pair_geometry(
+        p, v, ia, ib, np.asarray(model.radius, dtype=np.float64), np.asarray(model.graze, dtype=np.float64),
+        centres, model.max_range is not None, 0.0 if model.max_range is None else float(model.max_range),
+        has_cone, bore if bore is not None and has_cone else np.zeros((1, 3)),
+        half if half is not None and has_cone else np.zeros(1), margin, ranges, rates)
+    return margin, ranges, rates
+
+
+def _geometry_numpy(pos: NDArray[np.float64], vel: NDArray[np.float64], ia: NDArray[np.int64],
+                    ib: NDArray[np.int64], model: _Model, occ: Optional[NDArray[np.float64]] = None,
+                    bore: Optional[NDArray[np.float64]] = None, half: Optional[NDArray[np.float64]] = None,
+                    ) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Margin, range and range rate for pairs at one sample - `isl._pair_block`'s arithmetic, per pair.
     Occulter 0 is the frame origin (its clearance is computed on the positions as given, exactly as
     `isl.py` does); `occ` holds the centres of occulters 1.. in that frame, and each adds a clearance."""
@@ -295,9 +326,10 @@ class _Scanner:
 
     _OPEN = ("key", "rise", "rise_clipped", "rise_range", "rise_rate", "min_range", "peak_t", "peak_rate")
 
-    def __init__(self, n: int, model: _Model) -> None:
+    def __init__(self, n: int, model: _Model, compiled: Optional[bool] = None) -> None:
         self.n = n
         self.model = model
+        self.compiled = compiled
         self.prev: Optional[Tuple[float, NDArray[np.float64], NDArray[np.float64],
                                   Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]] = None
         self.half: Optional[NDArray[np.float64]] = None              # cone half-angles per body, NaN = none
@@ -344,8 +376,8 @@ class _Scanner:
                   p1: NDArray[np.float64], v1: NDArray[np.float64], o1: Optional[NDArray[np.float64]],
                   b1: Optional[NDArray[np.float64]], ia: NDArray[np.int64], ib: NDArray[np.int64],
                   first: bool) -> None:
-        m0, r0, q0 = _geometry(p0, v0, ia, ib, self.model, o0, b0, self.half)
-        m1, r1, q1 = _geometry(p1, v1, ia, ib, self.model, o1, b1, self.half)
+        m0, r0, q0 = _geometry(p0, v0, ia, ib, self.model, o0, b0, self.half, self.compiled)
+        m1, r1, q1 = _geometry(p1, v1, ia, ib, self.model, o1, b1, self.half, self.compiled)
         key = ia * self.n + ib
         in0, in1 = m0 > 0.0, m1 > 0.0
 
@@ -420,7 +452,7 @@ class _Scanner:
             keys: NDArray[np.int64] = self.open["key"].astype(np.int64)
             a, b = keys // self.n, keys % self.n
             _, r_end, q_end = _geometry(p_end, v_end, a.astype(np.int64), b.astype(np.int64), self.model, o_end,
-                                        b_end, self.half)
+                                        b_end, self.half, self.compiled)
             self._close(keys, np.full(keys.size, t_end), np.ones(keys.size, bool), r_end, q_end)
         rows: Dict[str, NDArray[Any]]
         if self.closed:
@@ -448,8 +480,8 @@ class _Scanner:
 
 
 def _scan(samples: Iterable[Tuple[float, NDArray[np.float64], NDArray[np.float64]]], n: int,
-          names: Sequence[str], spec: IslSpec) -> IslContactTable:
-    scanner = _Scanner(n, _Model.of(spec))
+          names: Sequence[str], spec: IslSpec, compiled: Optional[bool] = None) -> IslContactTable:
+    scanner = _Scanner(n, _Model.of(spec), compiled)
     for t, pos, vel in samples:
         scanner.feed(float(t), pos, vel)
     return scanner.finish(names)
@@ -459,11 +491,12 @@ _Sample = Tuple[float, NDArray[np.float64], NDArray[np.float64], Optional[NDArra
                 Mapping[str, NDArray[np.float64]]]
 
 
-def _link_scan(samples: Iterable[_Sample], names: Sequence[str], spec: LinkSpec) -> IslContactTable:
+def _link_scan(samples: Iterable[_Sample], names: Sequence[str], spec: LinkSpec,
+               compiled: Optional[bool] = None) -> IslContactTable:
     """Each sample: `(t, pos, vel, occulter centres 1.., {reference body: (6,) state})`, all relative to
     `spec.occulters[0]`."""
     split = len(spec.group_a) if spec.group_a is not None else None
-    scanner = _Scanner(len(names), _Model.of(spec, split))
+    scanner = _Scanner(len(names), _Model.of(spec, split), compiled)
     unknown = sorted(set(spec.cones) - set(names))
     if unknown:
         raise KeyError(f"cones given for {unknown}, which are not link ends")
@@ -503,10 +536,12 @@ def _link_names(spec: LinkSpec, available: Sequence[str], bodies: Optional[Seque
 def link_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArray[np.float64],
                        times_s: NDArray[np.float64], names: Sequence[str],
                        occulter_positions_km: Mapping[str, NDArray[np.float64]], spec: LinkSpec,
-                       reference_states_km: Optional[Mapping[str, NDArray[np.float64]]] = None) -> IslContactTable:
+                       reference_states_km: Optional[Mapping[str, NDArray[np.float64]]] = None,
+                       compiled: Optional[bool] = None) -> IslContactTable:
     """
     Link contacts for `(T, N, 3)` positions and velocities of the bodies `names` in any common inertial
     frame, with each occulter's `(T, 3)` positions in the same frame (`occulter_positions_km` by name).
+    `compiled` picks the per-pair geometry: the numba twin (`None`: when numba is installed) or NumPy.
     Positions are re-expressed relative to `spec.occulters[0]`. With groups, `names` must hold both
     groups; the table's body list is `group_a + group_b`. `reference_states_km` gives the `(T, 6)` states
     of the bodies the cones' attitudes name, in the same frame.
@@ -530,13 +565,14 @@ def link_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArr
             occ = np.stack([o[k] - origin[k] for o in others]) if others else None
             refs = {n: np.concatenate([v[k, :3] - origin[k], v[k, 3:]]) for n, v in refs_in.items()}
             yield float(t), pos_all[k, cols] - origin[k], np.ascontiguousarray(vel_all[k, cols]), occ, refs
-    return _link_scan(samples(), order, spec)
+    return _link_scan(samples(), order, spec, compiled)
 
 
 def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpec,
-                                      bodies: Optional[Sequence[str]] = None) -> IslContactTable:
+                                      bodies: Optional[Sequence[str]] = None,
+                                      compiled: Optional[bool] = None) -> IslContactTable:
     """
-    Link contacts from a `history.HistorySink` recording, streamed one chunk at a time. The recording
+    Link contacts from a `history.HistorySink` recording (`compiled` as in `link_contact_table`), streamed one chunk at a time. The recording
     must include every occulter. Positions and velocities are taken relative to `spec.occulters[0]`.
     Without groups, `bodies` (default: every recorded body that is not an occulter) are paired among
     themselves.
@@ -563,29 +599,31 @@ def link_contact_table_from_recording(directory: Union[str, Path], spec: LinkSpe
                 occ = (snap[others, :3] - snap[origin, :3]) if others.size else None
                 refs = {n: snap[j] - snap[origin] for n, j in ref_cols.items()}
                 yield float(t[k]), np.ascontiguousarray(rel[:, :3]), np.ascontiguousarray(rel[:, 3:]), occ, refs
-    return _link_scan(samples(), names, spec)
+    return _link_scan(samples(), names, spec, compiled)
 
 
 def isl_contact_table(positions_km: NDArray[np.float64], velocities_km_s: NDArray[np.float64],
                       times_s: NDArray[np.float64], spec: IslSpec,
-                      names: Optional[Sequence[str]] = None) -> IslContactTable:
+                      names: Optional[Sequence[str]] = None,
+                      compiled: Optional[bool] = None) -> IslContactTable:
     """
     The ISL contact dataset from `(T, N, 3)` **central-body-relative inertial** positions and velocities
     sampled at `times_s`: `isl.isl_contacts`'s records, bit for bit, as columns. `names` defaults to
-    `body0 .. bodyN-1`.
+    `body0 .. bodyN-1`. `compiled` picks the per-pair geometry (see `link_contact_table`).
     """
     pos = np.asarray(positions_km, dtype=np.float64)
     vel = np.asarray(velocities_km_s, dtype=np.float64)
     n = pos.shape[1]
     names = list(names) if names is not None else [f"body{k}" for k in range(n)]
     return _scan(((float(t), pos[k], vel[k]) for k, t in enumerate(np.asarray(times_s, dtype=np.float64))),
-                 n, names, spec)
+                 n, names, spec, compiled)
 
 
 def isl_contact_table_from_recording(directory: Union[str, Path], spec: IslSpec,
-                                     bodies: Optional[Sequence[str]] = None) -> IslContactTable:
+                                     bodies: Optional[Sequence[str]] = None,
+                                     compiled: Optional[bool] = None) -> IslContactTable:
     """
-    The ISL contact dataset from a `history.HistorySink` recording, streamed one chunk at a time so a
+    The ISL contact dataset from a `history.HistorySink` recording (`compiled` as in `isl_contact_table`), streamed one chunk at a time so a
     day of a mega-constellation never sits in memory. The recording must include `spec.central_body`;
     positions are taken relative to it. `bodies` (default: every recorded body except the central one)
     fixes the pair order.
@@ -611,4 +649,4 @@ def isl_contact_table_from_recording(directory: Union[str, Path], spec: IslSpec,
                 rel = snap[cols] - snap[centre]
                 yield float(t[k]), np.ascontiguousarray(rel[:, :3]), np.ascontiguousarray(rel[:, 3:])
 
-    return _scan(samples(), len(names), names, spec)
+    return _scan(samples(), len(names), names, spec, compiled)
