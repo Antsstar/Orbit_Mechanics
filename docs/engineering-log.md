@@ -1580,6 +1580,21 @@ longer rolls with the orbit. The lesson: **a frame built from "A, made perpendic
 where A is near B**. Check every mode's secondary against its own boresight, not just the mode the
 frame was first written for.
 
+## A mean-element seed integrated over a one-sided window
+
+`quadrupole.mean_seed_offset` first integrated the periodic acceleration over one lunar period
+*starting* now, then removed the mean. The removed offset had the predicted magnitude, and the seeded
+averaged rung improved. But scaling the offset by 0.8 tracked the instantaneous rung better than 1.0
+by 120 days. A correct first-order seed should fit best at exactly 1x.
+
+The cause: the probe moves ~0.5 rad of its own orbit in one lunar month, so the oscillation's amplitude
+and direction change across the window, and a window that starts now weights the future only. A
+window centred on now removes that bias to first order, and the best fit returned to 1x.
+
+The check that found it is cheap and worth reusing: **scale a computed correction by 0.8 / 1.0 / 1.2 and
+confirm 1.0 is the minimum.** A correction with the right magnitude but a biased direction or phase
+passes a magnitude check and fails this one.
+
 ## Conventions that emerged
 
 - **Tolerances are budgets, not observations.** Set them from an analytic argument, roughly an order

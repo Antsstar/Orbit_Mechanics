@@ -919,8 +919,11 @@ Ordered so that each stage makes the next one safe rather than merely possible.
      - the ISL scan made 2-3.5x faster: a compiled per-pair geometry twin, and open-window bookkeeping
        with no search or sort. 10,000 satellites now take 0.97 s per sample at 2,000 km (47 min per
        simulated day)
+     - mean-element seeding for the averaged-quadrupole rung: the periodic offset an osculating start
+       carries (5 km, 2.2e-5 km/s) is removed, so the averaged rung beats the monopole from the start
+       (18 against 54 km at 30 d) instead of after a month
    - **Next:**
-     - mean-element seeding for the averaged-quadrupole rung
+     - visualisation, a general-user UI, and an API / MCP layer over the engine
 
 Established external implementations are wrapped rather than reimplemented. SGP4, atmospheric density
 models, planetary ephemerides and IAU frame and time transformations all have well-tested libraries,

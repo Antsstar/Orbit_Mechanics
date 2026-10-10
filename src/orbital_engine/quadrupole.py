@@ -49,6 +49,25 @@ active members are exactly `primary` and `secondary` (slots, given by name in sw
 `ForceModelSpec.body_coefficients`), both massive; `mode` is 0 or 1; `t0` is engine-owned and refused.
 Compose with `point_mass_gravity` (the monopole, the parent's summed `mu`); this model adds only the
 quadrupole. Not fused: Cowell runs on the NumPy path.
+
+Mean seeding
+------------
+An averaged model integrates the *mean* motion, but a body's initial state is osculating: it carries
+the periodic response to the forcing the average dropped. Started from it, the averaged rung flies
+that response's instantaneous velocity offset as if it were secular, a drift linear in time. Here the
+periodic quadrupole acceleration has amplitude ~`a_Q`, at twice the inner pair's mean motion, so the
+offset is ~`a_Q / (2 n)` in velocity and ~`a_Q / (2 n)^2` in position. (Compare `CLAUDE.md` on mean
+elements: here the forcing that was averaged out is the model's own, so removing its periodic part
+from its own seed is the theory's to make, as in `propagators.mean_seeded_p`.)
+
+`mean_seed(sim, bodies)` removes it, to first order in the quadrupole. Along the body's two-body conic
+about the barycentre and the pair's own conic, over one inner period centred on now, it integrates the
+periodic acceleration `a_p = a_instantaneous - a_averaged` once to a velocity and once more to a position.
+(Centred, because the body moves ~0.5 rad of its orbit in one lunar month at 2e6 km: a window starting
+now biased the removed offset enough that 0.8x of it fitted better than 1x by 120 days.)
+It then subtracts the mean of each, so both have zero mean, and shifts the body's state by minus their
+values now. It is a one-off change of the initial state, applied before the run; the kernel is unchanged.
+`ModelConfig.mean_seed` applies it to a Cowell configuration whose bodies carry `mode = 0`.
 """
 from __future__ import annotations
 
@@ -64,7 +83,8 @@ from .registry import register_force_model
 if TYPE_CHECKING:
     from .simulator import Simulation
 
-__all__ = ["QUADRUPOLE_MODEL", "QUADRUPOLE_PARAM_NAMES", "quadrupole_kernel", "averaged_second_moment"]
+__all__ = ["QUADRUPOLE_MODEL", "QUADRUPOLE_PARAM_NAMES", "quadrupole_kernel", "averaged_second_moment",
+           "mean_seed_offset", "mean_seed"]
 
 QUADRUPOLE_MODEL: Final = "system_quadrupole"
 QUADRUPOLE_PARAM_NAMES: Final = ("mode", "primary", "secondary", "t0")
@@ -157,9 +177,75 @@ def quadrupole_kernel(
         m[rows] = averaged_second_moment(d[rows], v[rows], mu_pair[rows])
 
     r = state[indices, :3] - state[parent_indices[indices], :3]       # about the barycentre
+    out[indices] += _field(r, m, g_mu_r)
+
+
+def _field(r: NDArray[np.float64], m: NDArray[np.float64], g_mu_r: NDArray[np.float64]) -> NDArray[np.float64]:
+    """The quadrupole acceleration at `r` `(k, 3)` about the barycentre for second moments `m` `(k, 3, 3)`."""
     r2 = np.einsum("ij,ij->i", r, r)
     mr = np.einsum("kij,kj->ki", m, r)
     rmr = np.einsum("ki,ki->k", r, mr)
     tr = np.einsum("kii->k", m)
     coef = g_mu_r / (2.0 * r2 * r2 * np.sqrt(r2))
-    out[indices] += coef[:, None] * (6.0 * mr - 15.0 * (rmr / r2)[:, None] * r + 3.0 * tr[:, None] * r)
+    out: NDArray[np.float64] = coef[:, None] * (6.0 * mr - 15.0 * (rmr / r2)[:, None] * r + 3.0 * tr[:, None] * r)
+    return out
+
+
+def mean_seed_offset(sim: "Simulation", body: int, samples: int = 4000) -> NDArray[np.float64]:
+    """
+    The periodic part of `body`'s state now, `(6,)` km and km/s: what `mean_seed` subtracts. Uses the
+    `primary` / `secondary` of its `"system_quadrupole"` row; see "Mean seeding" in the module docstring.
+    """
+    p = sim.force_model_params[QUADRUPOLE_MODEL][body]
+    a, b, s = int(p[_PRIMARY]), int(p[_SECONDARY]), int(sim.parent_indices[body])
+    mu_a, mu_b = float(sim.mu_array[a]), float(sim.mu_array[b])
+    mu_pair = np.array([mu_a + mu_b])
+    g = sim.global_states
+    d0, w0 = (g[b, :3] - g[a, :3])[None], (g[b, 3:] - g[a, 3:])[None]
+    r0, v0 = (g[body, :3] - g[s, :3])[None], (g[body, 3:] - g[s, 3:])[None]
+    sma = 1.0 / (2.0 / float(np.linalg.norm(d0)) - float(w0[0] @ w0[0]) / float(mu_pair[0]))
+    period = 2.0 * np.pi * np.sqrt(sma ** 3 / float(mu_pair[0]))
+    samples += samples % 2
+    times = np.linspace(-0.5 * period, 0.5 * period, samples + 1, dtype=np.float64)   # centred on now
+    m_avg = averaged_second_moment(d0, w0, mu_pair)[0]
+    acc = np.empty((times.size, 3), dtype=np.float64)
+    for j, t in enumerate(times.tolist()):
+        d = d0 if t == 0.0 else kepler_advance(d0, w0, t, mu_pair)[0]
+        r = r0 if t == 0.0 else kepler_advance(r0, v0, t, np.array([float(sim.mu_array[s])]))[0]
+        m = np.stack([np.outer(d[0], d[0]), m_avg])
+        acc[j] = (_field(np.repeat(r, 2, axis=0), m, np.full(2, mu_a * mu_b / (mu_a + mu_b))) * [[1.0], [-1.0]]).sum(axis=0)
+    h = np.diff(times)[:, None]
+    vel = np.concatenate([np.zeros((1, 3)), np.cumsum(0.5 * h * (acc[1:] + acc[:-1]), axis=0)])
+    vel -= _mean(vel, h)                                          # zero-mean periodic velocity
+    pos = np.concatenate([np.zeros((1, 3)), np.cumsum(0.5 * h * (vel[1:] + vel[:-1]), axis=0)])
+    pos -= _mean(pos, h)
+    now = samples // 2
+    out: NDArray[np.float64] = np.concatenate([pos[now], vel[now]])
+    return out
+
+
+def _mean(x: NDArray[np.float64], h: NDArray[np.float64]) -> NDArray[np.float64]:
+    out: NDArray[np.float64] = np.sum(0.5 * h * (x[1:] + x[:-1]), axis=0) / float(np.sum(h))
+    return out
+
+
+def mean_seed(sim: "Simulation", bodies: NDArray[np.int64] | list[int]) -> NDArray[np.float64]:
+    """
+    Shift each body's state by minus its periodic quadrupole part (`mean_seed_offset`), so the averaged
+    rung starts from the mean state. Each body must be Cowell and carry `"system_quadrupole"` with
+    `mode = 0`. Returns the offsets removed, `(k, 6)`.
+    """
+    from .custom_types import PropagatorType
+    from .registry import get_force_model
+    idx = np.asarray(bodies, dtype=np.int64)
+    bit = np.uint64(1) << np.uint64(get_force_model(QUADRUPOLE_MODEL).bit)
+    for k in idx.tolist():
+        if not sim.force_model_mask[k] & bit or sim.force_model_params[QUADRUPOLE_MODEL][k, _MODE] != 0.0:
+            raise ValueError(f"mean seeding slot {k}: it must carry '{QUADRUPOLE_MODEL}' with mode = 0 "
+                             f"(the averaged rung); the instantaneous one has no periodic part to remove")
+        if sim.propagator_type[k] != np.uint8(PropagatorType.COWELL):
+            raise ValueError(f"mean seeding slot {k}: only a Cowell body integrates the averaged field")
+    offsets = np.stack([mean_seed_offset(sim, k) for k in idx.tolist()]) if idx.size else np.empty((0, 6))
+    sim.global_states[idx] -= offsets
+    sim.local_states[idx] -= offsets
+    return offsets

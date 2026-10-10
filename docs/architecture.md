@@ -2557,8 +2557,20 @@ barycentre. Composed with `point_mass_gravity` (the monopole, the summed `mu`), 
 - **Averaged** is *worse* than the monopole for the first ~month, and 7x better by a year. That is the
   classic catch of an averaged theory seeded with **osculating** rather than mean initial conditions.
   The short-period terms the average dropped leave a velocity offset that drifts linearly; the secular
-  term the average keeps grows as t^2 and overtakes it. Seeding it with mean conditions (a near-identity
-  transformation of the start state) is the fix, and it is not built.
+  term the average keeps grows as t^2 and overtakes it.
+- **Mean seeding fixes that** (`quadrupole.mean_seed`, or `ModelConfig.mean_seed` on a Cowell config).
+  Along the probe's and the pair's conics, over one lunar period centred on now, the periodic
+  acceleration `a_inst - a_avg` is integrated to a zero-mean velocity and position; their values now are
+  removed from the seed. Predicted ~`a_Q/(2n)` = 2.5e-5 km/s and ~`a_Q/(2n)^2` = 5 km; *measured*
+  2.2e-5 km/s and 5.0 km. Seeded, the averaged rung tracks the instantaneous one within 10 km through
+  90 d (317 km unseeded). Against truth it is 18 km at 30 d, now below the monopole from the start,
+  and 74 km at 90 d, against the instantaneous rung's 82.
+- **The open residual.** Beyond ~120 d the two rungs part again (34 km at 120 d), and the seeded
+  averaged rung is the *closer* to truth at 180 and 360 d (103 and 34 km against 190 and 117). Both
+  omit the octupole, so this is not read as the averaged model being better; it is unexplained.
+- **A first attempt was wrong.** The offset was first integrated over a window *starting* now. Scaling
+  it showed 0.8x fitting better than 1x by 120 d. The probe moves ~0.5 rad of its orbit in one lunar
+  month, so a one-sided window biases the mean. A centred window put the best fit back at 1x.
 - **It is a far-field ladder.** At 180 d it holds for d/r <= 0.26. At d/r = 0.38 (r = 2.6 d), both
   quadrupole rungs are worse than the monopole (2.4e4 and 1.6e4 km against 2.4e3 km). There the
   expansion converges slowly (the octupole is half the quadrupole), and the probe sits near the limit

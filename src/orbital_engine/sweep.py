@@ -129,7 +129,8 @@ class ModelConfig(object):
     `propagator_coefficients` is forwarded to `Simulation.set_propagator(**coefficients)`; it is
     mandatory (`j2`, `r_eq`) for `PropagatorType.SECULAR_J2` and must be empty for every other
     propagator, the same strictness `set_propagator` itself enforces. `mean_seed` is likewise only
-    meaningful for `SECULAR_J2` - `apply_config` raises before ever calling into `Simulation` if either
+    meaningful for `SECULAR_J2` and, on `COWELL`, for bodies under the averaged `"system_quadrupole"`
+    (`quadrupole.mean_seed`, applied after the force models) - `apply_config` raises before ever calling into `Simulation` if either
     is set inconsistently, rather than letting `set_propagator`'s own error surface out of context.
 
     `station_keeping` is this configuration's own controller policy, overriding `run_sweep`'s
@@ -260,7 +261,8 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
     error statistics against the same set. Exposed standalone so a caller can use it without
     `run_sweep`'s truth generation and timing.
 
-    Raises `ValueError` if `mean_seed` is set for any propagator other than `SECULAR_J2` - the same
+    Raises `ValueError` if `mean_seed` is set for any propagator other than `SECULAR_J2`, or `COWELL`
+    with the averaged `"system_quadrupole"` on every body (`quadrupole.mean_seed`) - the same
     strictness `Simulation.set_propagator` applies to an unexpected coefficient, checked before it
     would otherwise be silently ignored by a propagator with no use for it.
     """
@@ -281,18 +283,20 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
     if idx.size == 0:
         return idx
 
-    if config.mean_seed and config.propagator != PropagatorType.SECULAR_J2:
+    if config.mean_seed and config.propagator not in (PropagatorType.SECULAR_J2, PropagatorType.COWELL):
         raise ValueError(
-            f"config '{config.name}': mean_seed=True is only meaningful for PropagatorType.SECULAR_J2, "
+            f"config '{config.name}': mean_seed=True is only meaningful for PropagatorType.SECULAR_J2 "
+            f"(its own short-period p correction) or COWELL under the averaged system quadrupole, "
             f"got {config.propagator.name}."
         )
+    secular_seed = config.mean_seed and config.propagator == PropagatorType.SECULAR_J2
 
     # `mean_seed` is passed positionally, not by keyword: `set_propagator`'s remaining parameter is
     # `**coefficients: float`, and a keyword `mean_seed=...` alongside `**config.propagator_coefficients`
     # (an arbitrary-keyed `Mapping[str, float]`) would make mypy --strict conservatively check the
     # mapping's float values against the `bool` parameter, since it cannot prove the mapping never
     # contains a "mean_seed" key. Binding it positionally removes the ambiguity.
-    sim.set_propagator(idx, config.propagator, config.mean_seed, **config.propagator_coefficients)
+    sim.set_propagator(idx, config.propagator, secular_seed, **config.propagator_coefficients)
 
     for fm in config.force_models:
         # `.tolist()` rather than the `NDArray[np.int64]` itself: `enable_force_model`'s `bodies`
@@ -314,6 +318,10 @@ def apply_config(sim: Simulation, config: ModelConfig) -> NDArray[np.int64]:
                 )
             coefficients[key] = float(sim.name_to_index[body_name])
         sim.enable_force_model(fm.name, idx.tolist(), **coefficients)
+    if config.mean_seed and config.propagator == PropagatorType.COWELL:
+        # Removes the averaged quadrupole's periodic part from the seed; refuses a body without it.
+        from .quadrupole import mean_seed
+        mean_seed(sim, idx)
 
     for enc in config.encounters:
         for body_name in (enc.a, enc.b):
